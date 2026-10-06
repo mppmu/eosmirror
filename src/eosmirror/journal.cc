@@ -41,12 +41,10 @@ int step_done(sqlite3_stmt* stmt) {
 
 }  // namespace
 
-Result<std::unique_ptr<Journal>> Journal::open(const std::string& file, const std::string& source,
-                                               const std::string& target) {
+Result<std::unique_ptr<Journal>> Journal::open_db(const std::string& file, bool create) {
   sqlite3* db = nullptr;
-  int rc = sqlite3_open_v2(file.c_str(), &db,
-                           SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX,
-                           nullptr);
+  int flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX | (create ? SQLITE_OPEN_CREATE : 0);
+  int rc = sqlite3_open_v2(file.c_str(), &db, flags, nullptr);
   if (rc != SQLITE_OK) {
     Error e{ErrorKind::Other, "open journal " + file + ": " + (db ? sqlite3_errmsg(db) : "error")};
     sqlite3_close(db);
@@ -60,6 +58,30 @@ Result<std::unique_ptr<Journal>> Journal::open(const std::string& file, const st
   }
   Status s = journal->exec(kSchema);
   if (!s.ok()) return s.error();
+  if (!(s = journal->prepare_statements()).ok()) return s.error();
+  return journal;
+}
+
+Result<std::unique_ptr<Journal>> Journal::open_any(const std::string& file) {
+  return open_db(file, /*create=*/false);
+}
+
+std::string Journal::source() {
+  auto m = meta("source");
+  return m.ok() ? m.value() : "";
+}
+
+std::string Journal::target() {
+  auto m = meta("target");
+  return m.ok() ? m.value() : "";
+}
+
+Result<std::unique_ptr<Journal>> Journal::open(const std::string& file, const std::string& source,
+                                               const std::string& target) {
+  auto opened = open_db(file, /*create=*/true);
+  if (!opened.ok()) return opened.error();
+  std::unique_ptr<Journal> journal = std::move(opened).value();
+  Status s;
 
   auto existing_source = journal->meta("source");
   auto existing_target = journal->meta("target");
@@ -71,7 +93,6 @@ Result<std::unique_ptr<Journal>> Journal::open(const std::string& file, const st
                                        " -> " + existing_target.value() + ", not to " + source +
                                        " -> " + target};
   }
-  if (!(s = journal->prepare_statements()).ok()) return s.error();
   return journal;
 }
 

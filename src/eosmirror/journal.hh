@@ -25,6 +25,12 @@ class Journal {
   // pair; opening it for another pair fails.
   static Result<std::unique_ptr<Journal>> open(const std::string& file, const std::string& source,
                                                const std::string& target);
+
+  // Opens an existing journal for inspection, whatever pair it belongs to.
+  static Result<std::unique_ptr<Journal>> open_any(const std::string& file);
+
+  std::string source();
+  std::string target();
   ~Journal();
   Journal(const Journal&) = delete;
   Journal& operator=(const Journal&) = delete;
@@ -45,6 +51,7 @@ class Journal {
 
  private:
   explicit Journal(sqlite3* db) : db_(db) {}
+  static Result<std::unique_ptr<Journal>> open_db(const std::string& file, bool create);
   Status exec(const std::string& sql);
   Result<std::string> meta(const std::string& key);
   Status set_meta(const std::string& key, const std::string& value);

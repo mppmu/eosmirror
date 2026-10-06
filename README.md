@@ -10,7 +10,8 @@ transfers and metadata operations in flight, works directory by directory with
 bounded memory, never stops on single errors, and keeps a journal so that a
 later run retries exactly what failed.
 
-Status: work in progress, not yet usable. See [docs/design.md](docs/design.md).
+Status: work in progress. Replication between local file systems works;
+XRootD and EOS endpoints are being added. See [docs/design.md](docs/design.md).
 
 ## Behavior in short
 
@@ -28,6 +29,27 @@ Status: work in progress, not yet usable. See [docs/design.md](docs/design.md).
   journal and reported, and the exit status says so.
 
 Extended attributes and ACLs are not replicated.
+
+## Usage
+
+```
+eosmirror sync [options] SOURCE TARGET
+eosmirror failures JOURNAL
+```
+
+For example, a first run with a journal, then a rerun of what failed:
+
+```
+eosmirror sync --journal migration.db --progress 60 /data/project /mirror/project
+eosmirror sync --journal migration.db --retry-failed /data/project /mirror/project
+```
+
+`eosmirror sync --help` lists the options: dry runs, deletion of extra
+entries with a cap, worker counts, retries, resuming an interrupted run,
+sharding a tree over several hosts (`--shard K/N`) and symlink rewriting.
+The exit status is 0 when everything succeeded, 1 when some entries failed
+after retries, 2 for usage errors, 3 when the run could not start and 130
+when interrupted.
 
 ## Building
 

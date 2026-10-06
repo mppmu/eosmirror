@@ -3,7 +3,9 @@ configure_file(eosmirror/version.hh.in ${CMAKE_CURRENT_BINARY_DIR}/generated/eos
 
 add_library(eosmirror_core STATIC
   eosmirror/checksum.cc
+  eosmirror/cli.cc
   eosmirror/copy.cc
+  eosmirror/endpoints.cc
   eosmirror/engine.cc
   eosmirror/error.cc
   eosmirror/journal.cc

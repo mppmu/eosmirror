@@ -2,6 +2,7 @@
 add_executable(eosmirror_tests
   unit/test_main.cc
   unit/test_checksum.cc
+  unit/test_cli.cc
   unit/test_engine.cc
   unit/test_error.cc
   unit/test_journal.cc
@@ -23,3 +24,5 @@ if(EOSMIRROR_SANITIZER STREQUAL "thread")
 endif()
 
 add_test(NAME unit COMMAND ${test_launcher} $<TARGET_FILE:eosmirror_tests>)
+add_test(NAME cli_smoke
+  COMMAND ${test_launcher} bash ${CMAKE_CURRENT_SOURCE_DIR}/cli/smoke.sh $<TARGET_FILE:eosmirror>)
