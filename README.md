@@ -39,10 +39,12 @@ mtimes, owners or modes, and does not compare with an existing target: a
 rerun either fails on existing files or, with `--force`, writes them all
 again. Checksums are verified on request, and it can use third-party copy.
 
-`eos rclone` synchronizes a tree within one EOS instance (or a FUSE path and
-EOS). It lists the whole tree before copying, copies a file when the
-source is newer, keeps symlinks and mtimes, creates directories with a
-fixed mode, and sets no owners and verifies no checksums.
+`eos rclone` copies a tree between a local path and an EOS instance, or
+within one. It lists the whole tree before copying, copies a file when the
+source is newer, keeps symlinks, keeps mtimes on EOS but not on local
+targets, creates directories with a fixed mode, sets no owners, verifies no
+checksums, copies with a fixed parallelism, and its exit status does not
+reflect failed copies.
 
 eosmirror works between any two of local file systems, XRootD servers and
 EOS instances, directory by directory with bounded memory, copies a file
