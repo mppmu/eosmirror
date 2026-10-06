@@ -46,6 +46,10 @@ grep -q '3 would be copied' "$work/dry.out" || fail "dry run summary: $(cat "$wo
 [[ $(stat -c %Y "$work/dst/sub/deep") == $(stat -c %Y "$work/src/sub/deep") ]] || fail "mtime of dir"
 grep -q 'failures: 0' "$work/run.out" || fail "summary: $(cat "$work/run.out")"
 
+# Missing parents of the target are created.
+"$bin" sync -q "${owner_opt[@]}" "$work/src" "$work/deep/er/dst" > /dev/null || fail "sync into missing parents"
+[[ -f $work/deep/er/dst/a ]] || fail "parents not created"
+
 # A rerun copies nothing.
 "$bin" sync -q "${owner_opt[@]}" "$work/src" "$work/dst" > "$work/rerun.out"
 grep -q 'files: 0 copied' "$work/rerun.out" || fail "rerun summary: $(cat "$work/rerun.out")"

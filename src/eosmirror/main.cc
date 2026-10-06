@@ -61,10 +61,48 @@ int selftest(const CliOptions& opts) {
   return usable ? kOk : kFailures;
 }
 
+// The specification of the directory above the one given ("" at the top).
+std::string parent_spec(const std::string& spec) {
+  auto scheme = spec.find("://");
+  size_t path_start = scheme == std::string::npos ? 0 : spec.find("//", scheme + 3);
+  if (path_start == std::string::npos) return "";
+  if (scheme != std::string::npos) path_start += 1;  // the path's leading slash
+  auto slash = spec.rfind('/');
+  if (slash == std::string::npos || slash <= path_start) return "";
+  return spec.substr(0, slash);
+}
+
+// Creates the target's missing ancestors, like mkdir -p; the engine creates
+// the target directory itself.
+Status ensure_parents(const std::string& spec, const EndpointSettings& settings, bool dry_run) {
+  std::string parent = parent_spec(spec);
+  if (parent.empty()) return {};
+  auto ep = make_endpoint(parent, settings);
+  if (!ep.ok()) return ep.error();
+  auto st = ep.value()->stat("");
+  if (st.ok()) {
+    if (st.value().type != EntryType::Directory)
+      return Error{ErrorKind::NotADirectory, parent + " is not a directory"};
+    return {};
+  }
+  if (st.error().kind != ErrorKind::NotFound) return st.error();
+  Status above = ensure_parents(parent, settings, dry_run);
+  if (!above.ok()) return above;
+  log::info(dry_run ? "would create " : "creating ", parent);
+  if (dry_run) return {};
+  auto grand = make_endpoint(parent_spec(parent), settings);
+  if (!grand.ok()) return grand.error();
+  return grand.value()->mkdir(parent.substr(parent.rfind('/') + 1), 0755);
+}
+
 int sync(const CliOptions& opts) {
   auto source = make_endpoint(opts.source, opts.endpoints);
   if (!source.ok()) {
     log::error(source.error().describe());
+    return kFatal;
+  }
+  if (Status s = ensure_parents(opts.target, opts.endpoints, opts.sync.dry_run); !s.ok()) {
+    log::error(s.error().describe());
     return kFatal;
   }
   auto target = make_endpoint(opts.target, opts.endpoints);
