@@ -118,7 +118,9 @@ TEST_CASE("posix writer commits atomically with metadata") {
   REQUIRE(writer.value()->write(6, bytes("world")).ok());
   hasher.update(bytes("world"));
   spec.checksum = hasher.finish();
-  REQUIRE(writer.value()->commit(spec).ok());
+  auto committed = writer.value()->commit(spec);
+  REQUIRE(committed.ok());
+  CHECK_FALSE(committed.value().verified);  // no readback was asked for
 
   CHECK(tmp.read_file("out.bin") == "hello world");
   auto st = ep.stat("out.bin");
@@ -131,7 +133,7 @@ TEST_CASE("posix writer commits atomically with metadata") {
     auto w = ep.open_write("short.bin", spec);
     REQUIRE(w.ok());
     REQUIRE(w.value()->write(0, bytes("abc")).ok());
-    Status s = w.value()->commit(spec);
+    auto s = w.value()->commit(spec);
     REQUIRE_FALSE(s.ok());
     CHECK(s.error().kind == ErrorKind::Changed);
     CHECK_FALSE(fs::exists(tmp.sub("short.bin")));
@@ -176,7 +178,7 @@ TEST_CASE("posix readback verification catches corruption") {
   REQUIRE(w.ok());
   REQUIRE(w.value()->write(0, bytes("abc")).ok());
   spec.checksum = {ChecksumType::Adler32, "deadbeef"};
-  Status s = w.value()->commit(spec);
+  auto s = w.value()->commit(spec);
   REQUIRE_FALSE(s.ok());
   CHECK(s.error().kind == ErrorKind::Checksum);
   CHECK_FALSE(fs::exists(tmp.sub("f")));

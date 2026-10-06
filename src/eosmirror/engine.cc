@@ -37,6 +37,7 @@ struct DirNode {
   std::atomic<bool> touched{false};        // entries were created, replaced or removed
   std::atomic<bool> failed{false};         // listing, creation or metadata failed
   std::atomic<bool> made_writable{false};  // the target's mode was relaxed for writing
+  std::atomic<bool> unverified_warned{false};
   std::mutex writable_mutex;
 };
 
@@ -86,7 +87,8 @@ struct Engine::Impl {
         copies(std::max<size_t>(1, options.max_backlog)) {
     copy_options.preserve_owner = options.preserve_owner;
     copy_options.preserve_mode = options.preserve_mode;
-    copy_options.verify = options.verify;
+    copy_options.verify = options.verify || options.require_checksum;
+    copy_options.require_verification = options.require_checksum;
   }
 
   Endpoint& source;
@@ -102,6 +104,7 @@ struct Engine::Impl {
   int32_t mtime_resolution = 1;
   bool use_mtimes = true;    // the target stores mtimes: compare and set them
   bool use_symlinks = true;  // the target has symlinks
+  bool symlink_owner = true;  // symlinks on the target have settable owners
   bool relax_modes = false;  // make read-only target directories writable first
 
   WorkQueue<std::shared_ptr<DirNode>> dirs;
@@ -156,7 +159,9 @@ struct Engine::Impl {
   // The metadata fields of the target entry that differ from the source.
   MetaFields differences(const Entry& src, const Entry& dst) const {
     MetaFields fields = MetaFields::None;
-    if (options.preserve_owner && (src.uid != dst.uid || src.gid != dst.gid))
+    bool owner_matters =
+        options.preserve_owner && (src.type != EntryType::Symlink || symlink_owner);
+    if (owner_matters && (src.uid != dst.uid || src.gid != dst.gid))
       fields = fields | MetaFields::Owner;
     bool mode_matters = options.preserve_mode && src.type != EntryType::Symlink;
     if (mode_matters && src.mode != dst.mode) fields = fields | MetaFields::Mode;
@@ -443,7 +448,7 @@ struct Engine::Impl {
     }
     MetaFields fields = MetaFields::None;
     if (use_mtimes) fields = fields | MetaFields::Mtime;
-    if (options.preserve_owner) fields = fields | MetaFields::Owner;
+    if (options.preserve_owner && symlink_owner) fields = fields | MetaFields::Owner;
     if (apply_metadata(path, e, fields)) succeeded(path);
   }
 
@@ -532,6 +537,12 @@ struct Engine::Impl {
         stats.files_copied.fetch_add(1);
         stats.bytes_copied.fetch_add(result.value().bytes);
         log::debug("copied ", path, " (", result.value().bytes, " bytes)");
+        if (copy_options.verify && !result.value().verified) {
+          stats.files_unverified.fetch_add(1);
+          if (!job.dir->unverified_warned.exchange(true))
+            log::warn("no checksum verification for files copied into ",
+                      job.dir->path.empty() ? "." : job.dir->path);
+        }
         succeeded(path);
       } else {
         fail(path, EntryType::File, result.error());
@@ -561,6 +572,7 @@ struct Engine::Impl {
     mtime_resolution = std::max(src.mtime_resolution, dst.mtime_resolution);
     use_mtimes = dst.can_set_mtime;
     use_symlinks = dst.has_symlinks;
+    symlink_owner = dst.symlink_owner;
     relax_modes = !dst.can_set_owner && options.preserve_mode;
     copy_options.preserve_mtime = use_mtimes;
     if (!use_mtimes)

@@ -28,6 +28,7 @@ add_test(NAME unit COMMAND ${test_launcher} $<TARGET_FILE:eosmirror_tests>)
 if(EOSMIRROR_WITH_XROOTD)
   add_executable(eosmirror_integration_tests
     integration/main.cc
+    integration/test_eos.cc
     integration/test_xrootd.cc
   )
   target_include_directories(eosmirror_integration_tests

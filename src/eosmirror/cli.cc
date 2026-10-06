@@ -55,6 +55,7 @@ Options:
       --no-owner           do not set owners and groups
       --no-mode            do not set modes
       --no-verify          do not compute checksums
+      --require-checksum   fail copies that the target cannot verify by checksum
       --verify-readback    read files on local targets back to verify them
       --fsync              fsync files on local targets before renaming them
       --rewrite-links A=B  rewrite symlink targets starting with A to start with B
@@ -136,6 +137,7 @@ Result<CliOptions> parse_command_line(int argc, char** argv) {
   flag("--no-owner", [&] { sync.preserve_owner = false; });
   flag("--no-mode", [&] { sync.preserve_mode = false; });
   flag("--no-verify", [&] { sync.verify = false; });
+  flag("--require-checksum", [&] { sync.require_checksum = true; });
   flag("--verify-readback", [&] { opts.endpoints.posix.verify_readback = true; });
   flag("--fsync", [&] { opts.endpoints.posix.fsync = true; });
   value("--rewrite-links", [&](const std::string& v) -> Status {

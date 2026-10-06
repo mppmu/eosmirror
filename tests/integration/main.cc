@@ -10,8 +10,11 @@
 
 int main(int argc, char** argv) {
   const char* xrootd = std::getenv("EOSMIRROR_XROOTD_URL");
-  if (!xrootd || !*xrootd) {
-    std::fprintf(stderr, "EOSMIRROR_XROOTD_URL not set, skipping the integration tests\n");
+  const char* eos = std::getenv("EOSMIRROR_EOS_URL");
+  if ((!xrootd || !*xrootd) && (!eos || !*eos)) {
+    std::fprintf(stderr,
+                 "neither EOSMIRROR_XROOTD_URL nor EOSMIRROR_EOS_URL is set, skipping the "
+                 "integration tests\n");
     return 77;
   }
   doctest::Context context(argc, argv);

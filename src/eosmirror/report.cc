@@ -82,7 +82,7 @@ std::string Report::summary(bool dry_run) const {
     << " " << would << "created\n"
     << "  files: " << stats.files_copied.load() << " " << would << "copied ("
     << format_bytes(stats.bytes_copied.load()) << "), " << stats.files_unchanged.load()
-    << " unchanged\n"
+    << " unchanged, " << stats.files_unverified.load() << " without checksum verification\n"
     << "  symlinks: " << stats.symlinks_created.load() << " " << would << "created, "
     << stats.symlinks_unchanged.load() << " unchanged, " << stats.symlinks_skipped.load()
     << " skipped\n"

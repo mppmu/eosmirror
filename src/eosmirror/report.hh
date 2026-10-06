@@ -29,6 +29,7 @@ struct Stats {
   Counter files_copied{0};
   Counter bytes_copied{0};
   Counter files_unchanged{0};
+  Counter files_unverified{0};  // copied where no checksum could be compared
   Counter symlinks_created{0};
   Counter symlinks_unchanged{0};
   Counter symlinks_skipped{0};  // the target has no symlinks

@@ -18,11 +18,13 @@ struct CopyOptions {
   bool preserve_mode = true;
   bool preserve_mtime = true;
   bool verify = true;
+  bool require_verification = false;  // fail where the target cannot verify
 };
 
 struct CopyOutcome {
   uint64_t bytes = 0;
   Checksum checksum;
+  bool verified = false;  // the target compared the stored data with the checksum
 };
 
 // Copies one file from source to target under the same relative path.

@@ -1,0 +1,8 @@
+# QuarkDB of the test instance (single node).
+xrd.port 7777
+xrd.protocol redis:7777 libXrdQuarkDB.so
+redis.mode raft
+redis.database /var/lib/qdb/db
+redis.myself eosmirror-qdb.eosmirror.test:7777
+redis.password_file /etc/eos/qdb.password
+redis.require_password_for_localhost true

@@ -144,10 +144,13 @@ class PosixWriter : public FileWriter {
     return {};
   }
 
-  Status commit(const CommitSpec& spec) override {
+  Result<CommitInfo> commit(const CommitSpec& spec) override {
     Status status = finish(spec);
-    if (!status.ok()) abort();
-    return status;
+    if (!status.ok()) {
+      abort();
+      return status.error();
+    }
+    return CommitInfo{verified_};
   }
 
   void abort() override {
@@ -162,9 +165,14 @@ class PosixWriter : public FileWriter {
     if (written_ != spec.size)
       return Error{ErrorKind::Changed, "wrote " + std::to_string(written_) + " bytes to " + temp_ +
                                            ", expected " + std::to_string(spec.size)};
-    if (options_.verify_readback && spec.checksum.type != ChecksumType::None) {
+    // Reading the file back is the only verification a local target has.
+    if ((options_.verify_readback || spec.require_verification) &&
+        spec.checksum.type != ChecksumType::None) {
       Status verified = verify_readback(spec.checksum);
       if (!verified.ok()) return verified;
+      verified_ = true;
+    } else if (spec.require_verification) {
+      return Error{ErrorKind::Unsupported, "no checksum to verify " + temp_ + " against"};
     }
     if (options_.fsync && fsync(fd_) != 0) return errno_error(errno, "fsync " + temp_);
     Status md = apply_metadata_fd(fd_, temp_, spec.metadata, spec.fields, options_.default_mode);
@@ -209,6 +217,7 @@ class PosixWriter : public FileWriter {
   std::string final_;
   PosixOptions options_;
   uint64_t written_ = 0;
+  bool verified_ = false;
 };
 
 }  // namespace

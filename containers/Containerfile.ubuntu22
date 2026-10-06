@@ -8,6 +8,6 @@ RUN apt-get update \
  && printf 'Types: deb\nURIs: https://storage-ci.web.cern.ch/storage-ci/ubuntu/eos/diopside\nSuites: jammy\nComponents: jammy/tag/5.5 jammy/deps/5.5\nSigned-By: /etc/apt/keyrings/storage-ci.asc\n' \
       > /etc/apt/sources.list.d/eos.sources \
  && apt-get update \
- && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libeosxrootd-client-dev \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libeosxrootd-client-dev eos-xrootd-plugins \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /build

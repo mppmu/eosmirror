@@ -18,7 +18,7 @@ target_include_directories(eosmirror_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${C
 target_link_libraries(eosmirror_core PUBLIC Threads::Threads SQLite::SQLite3)
 
 if(EOSMIRROR_WITH_XROOTD)
-  target_sources(eosmirror_core PRIVATE eosmirror/xrootd_endpoint.cc)
+  target_sources(eosmirror_core PRIVATE eosmirror/xrootd_endpoint.cc eosmirror/eos_endpoint.cc)
   target_compile_definitions(eosmirror_core PUBLIC EOSMIRROR_HAVE_XROOTD=1)
   target_link_libraries(eosmirror_core PUBLIC XRootD::XrdCl)
 endif()

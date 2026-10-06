@@ -33,6 +33,7 @@ Result<CopyOutcome> copy_file(Endpoint& source, Endpoint& target, const RelPath&
   if (options.preserve_owner) spec.fields = spec.fields | MetaFields::Owner;
   if (options.preserve_mode) spec.fields = spec.fields | MetaFields::Mode;
   spec.checksum.type = type;
+  spec.require_verification = options.require_verification;
 
   auto created = target.open_write(path, spec);
   if (!created.ok()) return created.error();
@@ -76,9 +77,9 @@ Result<CopyOutcome> copy_file(Endpoint& source, Endpoint& target, const RelPath&
   }
 
   spec.checksum = hasher.finish();
-  Status committed = writer->commit(spec);
+  auto committed = writer->commit(spec);
   if (!committed.ok()) return committed.error();
-  return CopyOutcome{src.size, spec.checksum};
+  return CopyOutcome{src.size, spec.checksum, committed.value().verified};
 }
 
 }  // namespace eosmirror

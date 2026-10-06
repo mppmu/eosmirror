@@ -37,6 +37,7 @@ struct SyncOptions {
   bool preserve_owner = true;
   bool preserve_mode = true;
   bool verify = true;  // compute and compare checksums where possible
+  bool require_checksum = false;  // fail copies the target cannot verify
   bool resume = false;  // skip directories the journal records as finalized
 
   RetryPolicy retry;

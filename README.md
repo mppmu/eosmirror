@@ -10,8 +10,9 @@ transfers and metadata operations in flight, works directory by directory with
 bounded memory, never stops on single errors, and keeps a journal so that a
 later run retries exactly what failed.
 
-Status: work in progress. Replication between local file systems works;
-XRootD and EOS endpoints are being added. See [docs/design.md](docs/design.md).
+Status: work in progress. Local file systems, plain XRootD servers and EOS
+instances work as source and target; EOS to EOS copies stream through the
+client for now. See [docs/design.md](docs/design.md).
 
 ## Behavior in short
 
@@ -37,12 +38,22 @@ eosmirror sync [options] SOURCE TARGET
 eosmirror failures JOURNAL
 ```
 
+Endpoints are local paths or XRootD URLs. An XRootD URL that answers to
+EOS commands is treated as EOS (symlinks, owners, nanosecond mtimes, atomic
+uploads); `eos://` names an EOS instance explicitly. Authentication is the
+XRootD client's (`XrdSecPROTOCOL`, `XrdSecSSSKT`, Kerberos tickets).
+
 For example, a first run with a journal, then a rerun of what failed:
 
 ```
-eosmirror sync --journal migration.db --progress 60 /data/project /mirror/project
-eosmirror sync --journal migration.db --retry-failed /data/project /mirror/project
+eosmirror sync --journal migration.db --progress 60 /data/project root://eos.example.org//eos/project
+eosmirror sync --journal migration.db --retry-failed /data/project root://eos.example.org//eos/project
 ```
+
+Setting owners on EOS needs an identity that EOS treats as root or sudoer;
+the run refuses to start otherwise unless `--no-owner` is given. Plain
+XRootD servers store no mtimes and have no symlinks, so against them files
+are compared by size only and symlinks are skipped (both are reported).
 
 `eosmirror sync --help` lists the options: dry runs, deletion of extra
 entries with a cap, worker counts, retries, resuming an interrupted run,
@@ -65,6 +76,9 @@ ctest --test-dir build
 `containers/` has container recipes for the supported platforms (EL9,
 Ubuntu 22.04 and 24.04) and `scripts/check.sh` builds and tests in one of
 them, optionally under AddressSanitizer or ThreadSanitizer.
+`scripts/integration-test.sh` runs the integration tests against a plain
+xrootd server and a single-host EOS instance started in containers from
+CERN's public EOS image.
 
 ## License
 

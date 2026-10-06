@@ -240,18 +240,22 @@ class FakeEndpoint : public eosmirror::Endpoint {
       content_.append(reinterpret_cast<const char*>(data.data()), data.size());
       return {};
     }
-    Status commit(const eosmirror::CommitSpec& spec) override {
+    Result<eosmirror::CommitInfo> commit(const eosmirror::CommitSpec& spec) override {
       if (auto err = ep_.check("commit", path_)) return *err;
       if (content_.size() != spec.size) return Error{ErrorKind::Changed, "size mismatch"};
+      bool verified = false;
       if (ep_.caps.checksum != eosmirror::ChecksumType::None &&
           spec.checksum.type == ep_.caps.checksum) {
         eosmirror::Hasher h(spec.checksum.type);
         h.update({reinterpret_cast<const std::byte*>(content_.data()), content_.size()});
         if (!(h.finish() == spec.checksum))
           return Error{ErrorKind::Checksum, "checksum mismatch on " + path_};
+        verified = true;
+      } else if (spec.require_verification) {
+        return Error{ErrorKind::Unsupported, "no checksum on " + path_};
       }
       std::lock_guard lock(ep_.mutex_);
-      if (Status s = ep_.require_parent(path_); !s.ok()) return s;
+      if (Status s = ep_.require_parent(path_); !s.ok()) return s.error();
       auto it = ep_.nodes_.find(path_);
       if (it != ep_.nodes_.end() && it->second.entry.type == eosmirror::EntryType::Directory)
         return Error{ErrorKind::IsADirectory, "commit " + path_};
@@ -260,7 +264,7 @@ class FakeEndpoint : public eosmirror::Endpoint {
       ep_.apply(e, spec.metadata, spec.fields);
       ep_.nodes_[path_] = Node{e, content_};
       ep_.touch_parent(path_);
-      return {};
+      return eosmirror::CommitInfo{verified};
     }
     void abort() override {}
 

@@ -26,6 +26,8 @@ struct Capabilities {
   bool can_set_mtime = true;
   // Whether symlinks exist on the endpoint.
   bool has_symlinks = true;
+  // Whether symlinks have owners of their own that can be set.
+  bool symlink_owner = true;
   // The checksum the endpoint computes itself for stored files (None if it
   // computes none), which a copy verifies against.
   ChecksumType checksum = ChecksumType::None;
@@ -46,9 +48,15 @@ class FileReader {
 // What a committed file must look like.
 struct CommitSpec {
   uint64_t size = 0;
-  Entry metadata;              // owner, mode and mtime to apply
+  Entry metadata;  // owner, mode and mtime to apply
   MetaFields fields = MetaFields::All;
-  Checksum checksum;           // of the written data; None if not computed
+  Checksum checksum;  // of the written data; None if not computed
+  // Refuse to commit unless the stored data was verified against the checksum.
+  bool require_verification = false;
+};
+
+struct CommitInfo {
+  bool verified = false;  // the stored data was compared with the checksum
 };
 
 // Writer of one file to a temporary location. Nothing is visible under the
@@ -62,7 +70,7 @@ class FileWriter {
 
   // Finishes the file: applies the metadata, verifies size and checksum
   // against what the endpoint stored, and renames it into place.
-  virtual Status commit(const CommitSpec& spec) = 0;
+  virtual Result<CommitInfo> commit(const CommitSpec& spec) = 0;
 
   // Discards the file. Called instead of commit(), or after a failed one.
   virtual void abort() = 0;

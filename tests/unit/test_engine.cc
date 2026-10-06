@@ -848,3 +848,43 @@ TEST_CASE("FS to FS: --no-mode gives copies the default mode") {
   umask(mask);
   CHECK(dst.stat("f").value().mode == (0666 & ~static_cast<ModeBits>(mask)));
 }
+
+TEST_CASE("fake: copies without checksum verification are counted or refused") {
+  FakeEndpoint src, dst;
+  populate(src);
+  Report r;
+  REQUIRE(run_sync(src, dst, fake_options(), r).ok());
+  CHECK(r.stats.files_copied == 3);
+  CHECK(r.stats.files_unverified == 3);  // the fake computes none by default
+
+  FakeEndpoint dst2;
+  SyncOptions strict = fake_options();
+  strict.require_checksum = true;
+  Report r2;
+  REQUIRE(run_sync(src, dst2, strict, r2).ok());
+  CHECK(r2.stats.files_copied == 0);
+  CHECK(r2.stats.failures == 3);
+  CHECK(r2.failures()[0].error.kind == ErrorKind::Unsupported);
+
+  FakeEndpoint dst3;
+  dst3.caps.checksum = ChecksumType::Adler32;
+  Report r3;
+  REQUIRE(run_sync(src, dst3, strict, r3).ok());
+  CHECK(r3.stats.files_copied == 3);
+  CHECK(r3.stats.files_unverified == 0);
+  CHECK(r3.stats.failures == 0);
+}
+
+TEST_CASE("FS to FS: --require-checksum reads local copies back") {
+  TempDir tmp;
+  tmp.write_file("src/f", "verify me");
+  PosixEndpoint src(tmp.sub("src"));
+  PosixEndpoint dst(tmp.sub("dst"));
+  SyncOptions strict = test_options();
+  strict.require_checksum = true;
+  Report r;
+  REQUIRE(run_sync(src, dst, strict, r).ok());
+  CHECK(r.stats.files_copied == 1);
+  CHECK(r.stats.files_unverified == 0);
+  CHECK(tmp.read_file("dst/f") == "verify me");
+}

@@ -169,11 +169,19 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
 - Owner and mode: `mgm.cmd=chown&mgm.path=...&mgm.chown.owner=uid:gid` and
   `mgm.cmd=chmod&mgm.path=...&mgm.chmod.mode=<octal>`; chown needs a root or
   sudoer identity, which the preflight checks.
-- Writes use EOS's atomic upload (`eos.atomic=1` on the open URL), so EOS
-  itself renames the file into place at close; the checksum is read back
-  with a checksum query. The target directory's `sys.forced.checksum`
-  attribute tells which checksum to expect (none: a warning per directory,
-  or a failure with `--require-checksum`).
+- Writes use EOS's atomic upload (`eos.atomic=1` on the open URL, with
+  `eos.mtime`), so EOS itself renames the file into place at close and a
+  close before the end discards the upload. The checksum is read back with
+  a checksum query and compared when the directory's `sys.forced.checksum`
+  attribute (cached per directory) names the type that was computed. Owner
+  and mode are applied after the close, since an upload runs under the
+  client's identity: the file is briefly visible with the uploader's owner.
+- EOS cannot change the owner of a symlink (chown follows the link) and
+  cannot replace one in place, so symlink owners are not synchronized and a
+  changed symlink is removed and recreated. A symlink target containing
+  `&` cannot be sent in an MGM command and is reported as a failure.
+- Whether the identity may set owners comes from `whoami` (root or
+  `sudo*`).
 - EOS's own hidden entries (atomic temporaries `.sys.a#.`, version
   directories `.sys.v#.`) are never treated as entries of the tree.
 - Files are written through XRootD with one writer per file and sequential

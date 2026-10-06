@@ -2,6 +2,7 @@
 #include "eosmirror/endpoints.hh"
 
 #ifdef EOSMIRROR_HAVE_XROOTD
+#include "eosmirror/eos_endpoint.hh"
 #include "eosmirror/xrootd_endpoint.hh"
 #endif
 
@@ -14,9 +15,18 @@ Result<std::unique_ptr<Endpoint>> make_endpoint(const std::string& spec,
   if (scheme_end != std::string::npos) {
     std::string scheme = spec.substr(0, scheme_end);
     if (scheme == "file") return std::unique_ptr<Endpoint>(new PosixEndpoint(spec.substr(scheme_end + 3), settings.posix));
-    if (scheme == "root" || scheme == "roots" || scheme == "xroot" || scheme == "xroots") {
+    bool eos = scheme == "eos";
+    if (eos || scheme == "root" || scheme == "roots" || scheme == "xroot" || scheme == "xroots") {
 #ifdef EOSMIRROR_HAVE_XROOTD
-      auto ep = XrdEndpoint::create(spec, settings.xrootd);
+      // An EOS MGM answers the eos client's commands; other servers get the
+      // plain XRootD endpoint. "eos://" names EOS explicitly.
+      std::string url = eos ? "root" + spec.substr(3) : spec;
+      if (eos || EosEndpoint::is_eos(url)) {
+        auto ep = EosEndpoint::create(url, settings.xrootd);
+        if (!ep.ok()) return ep.error();
+        return std::unique_ptr<Endpoint>(std::move(ep).value());
+      }
+      auto ep = XrdEndpoint::create(url, settings.xrootd);
       if (!ep.ok()) return ep.error();
       return std::unique_ptr<Endpoint>(std::move(ep).value());
 #else

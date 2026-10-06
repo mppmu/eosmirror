@@ -155,10 +155,13 @@ class XrdWriter : public FileWriter {
     return {};
   }
 
-  Status commit(const CommitSpec& spec) override {
+  Result<CommitInfo> commit(const CommitSpec& spec) override {
     Status s = finish(spec);
-    if (!s.ok()) abort();
-    return s;
+    if (!s.ok()) {
+      abort();
+      return s.error();
+    }
+    return CommitInfo{verified_};
   }
 
   void abort() override {
@@ -220,6 +223,10 @@ class XrdWriter : public FileWriter {
       if (!(stored.value() == spec.checksum))
         return Error{ErrorKind::Checksum, temp_ + " has checksum " + stored.value().hex +
                                               " instead of " + spec.checksum.hex};
+      verified_ = true;
+    } else if (spec.require_verification) {
+      return Error{ErrorKind::Unsupported, "the server computes no checksum to verify " + temp_ +
+                                               " against"};
     }
     Status renamed = ep_.rename_abs(temp_, final_);
     if (renamed.ok()) temp_exists_ = false;
@@ -238,6 +245,7 @@ class XrdWriter : public FileWriter {
   std::optional<Error> error_;
   uint64_t written_ = 0;
   bool temp_exists_ = true;
+  bool verified_ = false;
 };
 
 }  // namespace
