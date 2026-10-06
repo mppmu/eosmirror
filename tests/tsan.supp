@@ -1,0 +1,4 @@
+# ThreadSanitizer suppressions for the integration tests: XrdCl's threads
+# call XrdSysTimer::TimeZone() at once, whose mktime() sets up the time zone
+# under a lock inside glibc that TSan does not see.
+race:XrdSysTimer::TimeZone

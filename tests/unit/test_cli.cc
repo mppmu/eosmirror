@@ -32,6 +32,7 @@ TEST_CASE("sizes are parsed with binary suffixes") {
 TEST_CASE("the sync command line maps onto the options") {
   auto r = parse({"sync", "-n", "--delete", "--max-delete", "5", "--no-owner", "--checkers=3",
                   "--transfers", "4", "--buffer-size", "1M", "--retries", "0",
+                  "--write-window", "1", "--read-window=6", "--connection-per-transfer",
                   "--rewrite-links", "/old/=/new/", "--journal", "j.db", "--resume",
                   "--shard", "1/3", "--progress", "10", "-v", "/src", "/dst"});
   REQUIRE(r.ok());
@@ -47,6 +48,9 @@ TEST_CASE("the sync command line maps onto the options") {
   CHECK(o.sync.checkers == 3);
   CHECK(o.sync.transfers == 4);
   CHECK(o.sync.buffer_size == 1u << 20);
+  CHECK(o.endpoints.xrootd.write_window == 1);
+  CHECK(o.endpoints.xrootd.read_window == 6);
+  CHECK(o.endpoints.xrootd.connection_per_thread);
   CHECK(o.sync.retry.attempts == 1);
   REQUIRE(o.sync.link_rewrites.size() == 1);
   CHECK(o.sync.link_rewrites[0].first == "/old/");
@@ -64,6 +68,9 @@ TEST_CASE("the sync command line maps onto the options") {
   CHECK(defaults.value().sync.preserve_owner);
   CHECK(defaults.value().sync.max_delete == 1000);
   CHECK_FALSE(defaults.value().sync.dry_run);
+  CHECK(defaults.value().endpoints.xrootd.write_window == 4);
+  CHECK(defaults.value().endpoints.xrootd.read_window == 4);
+  CHECK_FALSE(defaults.value().endpoints.xrootd.connection_per_thread);
 
   CHECK(parse({"sync", "--max-delete", "unlimited", "a", "b"}).value().sync.max_delete == UINT64_MAX);
   CHECK(parse({"sync", "--", "-weird", "b"}).value().source == "-weird");
@@ -81,6 +88,9 @@ TEST_CASE("usage errors are rejected") {
   CHECK_FALSE(parse({"sync", "--resume", "a", "b"}).ok());
   CHECK_FALSE(parse({"sync", "--shard", "3/3", "a", "b"}).ok());
   CHECK_FALSE(parse({"sync", "--rewrite-links", "noequals", "a", "b"}).ok());
+  CHECK_FALSE(parse({"sync", "--write-window", "0", "a", "b"}).ok());
+  CHECK_FALSE(parse({"sync", "--read-window", "0", "a", "b"}).ok());
+  CHECK_FALSE(parse({"sync", "--buffer-size", "2G", "a", "b"}).ok());
   CHECK_FALSE(parse({"failures"}).ok());
 
   CHECK(parse({"--version"}).value().command == Command::Version);

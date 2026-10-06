@@ -28,11 +28,10 @@ struct Checksum {
 class Adler32 {
  public:
   void update(std::span<const std::byte> data);
-  uint32_t value() const { return (b_ << 16) | a_; }
+  uint32_t value() const { return value_; }
 
  private:
-  uint32_t a_ = 1;
-  uint32_t b_ = 0;
+  uint32_t value_ = 1;
 };
 
 // Computes a checksum of a given type over a stream of data.

@@ -5,7 +5,7 @@
 FROM almalinux:9
 RUN dnf -y install epel-release dnf-plugins-core \
  && dnf config-manager --set-enabled crb \
- && dnf -y install gcc-c++ cmake make ninja-build git diffutils sqlite-devel \
+ && dnf -y install gcc-c++ cmake make ninja-build git diffutils sqlite-devel zlib-devel \
       libasan libtsan libubsan xrootd-client-devel xrootd-client \
  && dnf clean all
 RUN printf '[eos-depend]\nname=EOS dependencies\nbaseurl=https://storage-ci.web.cern.ch/storage-ci/eos/diopside-depend/el-9/x86_64/\ngpgcheck=0\nenabled=1\n' \

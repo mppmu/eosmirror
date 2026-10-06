@@ -7,6 +7,8 @@
 #include <string>
 #include <string_view>
 
+#include "eosmirror/checksum.hh"
+
 namespace eosmirror {
 
 enum class EntryType : uint8_t { File, Directory, Symlink, Other };
@@ -58,6 +60,9 @@ struct Entry {
   // Identifies a directory however it was reached (such as device and inode),
   // to find cycles in listings that follow symlinks; empty where unknown.
   std::string id;
+  // The checksum stored with a file, where listings carry one (EOS); None
+  // otherwise.
+  Checksum checksum;
 };
 
 // Paths handed to endpoints are relative to the endpoint's root: "" for the

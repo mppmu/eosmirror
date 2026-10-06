@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include <cstddef>
 #include <memory>
 #include <vector>
 
@@ -12,6 +13,12 @@
 #include "eosmirror/report.hh"
 
 namespace eosmirror {
+
+// The adaptive transfer limit after an interval: down by a quarter when
+// operations were retried, else up by half (at least 2) when throughput
+// improved, within [min_limit, max_limit].
+size_t next_transfer_limit(size_t limit, size_t min_limit, size_t max_limit, bool retried,
+                           bool improved);
 
 // Synchronizes a target tree with a source tree, see docs/design.md.
 class Engine {

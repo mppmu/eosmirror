@@ -11,6 +11,7 @@ Build-Depends: debhelper-compat (= 13),
                g++ (>= 4:11),
                ninja-build,
                libsqlite3-dev,
+               zlib1g-dev,
                libxrootd-client-dev | libeosxrootd-client-dev,
 Standards-Version: 4.7.4
 Rules-Requires-Root: no

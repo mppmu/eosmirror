@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -8,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "eosmirror/buffer.hh"
 #include "eosmirror/checksum.hh"
 #include "eosmirror/error.hh"
 #include "eosmirror/types.hh"
@@ -47,6 +49,12 @@ class FileReader {
   // Reads up to buf.size() bytes at offset; a short count means end of file.
   virtual Result<size_t> read(uint64_t offset, std::span<std::byte> buf) = 0;
 
+  // The chunk at offset in a buffer from the pool, as long as the buffer but
+  // not beyond end, and shorter only at the end of the file. Readers that
+  // read ahead (XRootD) keep reading the following chunks up to end, for a
+  // caller that takes them in order.
+  virtual Result<Chunk> read_chunk(uint64_t offset, uint64_t end, BufferPool& pool);
+
   // The file's current size and mtime, to detect changes during the copy.
   virtual Result<Entry> stat() = 0;
 };
@@ -59,6 +67,8 @@ struct CommitSpec {
   Checksum checksum;  // of the written data; None if not computed
   // Refuse to commit unless the stored data was verified against the checksum.
   bool require_verification = false;
+  // The target may have a file of that name already, which the copy replaces.
+  bool replaces = true;
 };
 
 struct CommitInfo {
@@ -71,8 +81,14 @@ class FileWriter {
  public:
   virtual ~FileWriter() = default;
 
-  // Writes data at offset; offsets must be sequential and contiguous.
-  virtual Status write(uint64_t offset, std::span<const std::byte> data) = 0;
+  // Writes a chunk at the end of the data written so far. The writer may
+  // keep the chunk until the write has completed, which commit() waits for.
+  virtual Status write(Chunk chunk) = 0;
+
+  // Writes a copy of data at offset.
+  Status write(uint64_t offset, std::span<const std::byte> data) {
+    return write(Chunk::copy_of(offset, data));
+  }
 
   // Finishes the file: applies the metadata, verifies size and checksum
   // against what the endpoint stored, and renames it into place.
@@ -119,10 +135,27 @@ class Endpoint {
 
   virtual Result<std::unique_ptr<FileReader>> open_read(const RelPath& path) = 0;
 
+  // The checksum the endpoint stores for a file, given its entry as listed;
+  // None where it stores none, or one of a type that cannot be computed.
+  // EOS lists checksums with the entries, XRootD servers are asked.
+  virtual Result<Checksum> stored_checksum(const RelPath& /*path*/, const Entry& listed) {
+    return listed.checksum;
+  }
+
   // Opens a file for writing. The spec tells the expected size and metadata
   // in advance for endpoints that need them at creation time.
   virtual Result<std::unique_ptr<FileWriter>> open_write(const RelPath& path,
                                                          const CommitSpec& spec) = 0;
 };
+
+inline Result<Chunk> FileReader::read_chunk(uint64_t offset, uint64_t end, BufferPool& pool) {
+  Chunk chunk{offset, 0, pool.acquire()};
+  uint64_t left = end > offset ? end - offset : 0;
+  auto got = read(offset, chunk.buffer.span().first(
+                              static_cast<size_t>(std::min<uint64_t>(chunk.buffer.size(), left))));
+  if (!got.ok()) return got.error();
+  chunk.size = got.value();
+  return chunk;
+}
 
 }  // namespace eosmirror

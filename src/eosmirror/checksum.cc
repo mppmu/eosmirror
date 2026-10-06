@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "eosmirror/checksum.hh"
 
+#include <zlib.h>
+
+#include <algorithm>
 #include <cstdio>
 
 namespace eosmirror {
@@ -20,23 +23,14 @@ std::optional<ChecksumType> parse_checksum_type(std::string_view name) {
 }
 
 void Adler32::update(std::span<const std::byte> data) {
-  constexpr uint32_t kBase = 65521;
-  constexpr size_t kMaxRun = 5552;  // the largest run before the sums can overflow
-  uint32_t a = a_, b = b_;
-  const auto* p = reinterpret_cast<const uint8_t*>(data.data());
+  const auto* p = reinterpret_cast<const Bytef*>(data.data());
   size_t left = data.size();
   while (left > 0) {
-    size_t run = left < kMaxRun ? left : kMaxRun;
+    auto run = static_cast<uInt>(std::min<size_t>(left, 1u << 30));
+    value_ = static_cast<uint32_t>(adler32(value_, p, run));
+    p += run;
     left -= run;
-    for (const auto* end = p + run; p != end; ++p) {
-      a += *p;
-      b += a;
-    }
-    a %= kBase;
-    b %= kBase;
   }
-  a_ = a;
-  b_ = b;
 }
 
 void Hasher::update(std::span<const std::byte> data) {

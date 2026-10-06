@@ -37,6 +37,7 @@ endif()
 
 find_package(Threads REQUIRED)
 find_package(SQLite3 REQUIRED)
+find_package(ZLIB REQUIRED)  # adler32
 
 # The XRootD client library, for XRootD and EOS endpoints. CERN's eos-xrootd
 # lives under /opt/eos/xrootd and is preferred when present. Some packages

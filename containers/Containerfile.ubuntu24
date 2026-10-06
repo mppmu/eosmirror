@@ -3,7 +3,7 @@
 FROM ubuntu:24.04
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      g++ cmake make ninja-build git ca-certificates curl libsqlite3-dev libxrootd-client-dev xrootd-client-plugins \
+      g++ cmake make ninja-build git ca-certificates curl libsqlite3-dev zlib1g-dev libxrootd-client-dev xrootd-client-plugins \
  && curl -sSfL https://storage-ci.web.cern.ch/storage-ci/storageci.key -o /etc/apt/keyrings/storage-ci.asc \
  && printf 'Types: deb\nURIs: https://storage-ci.web.cern.ch/storage-ci/ubuntu/eos/diopside\nSuites: noble\nComponents: noble/tag/5.5 noble/deps/5.5\nSigned-By: /etc/apt/keyrings/storage-ci.asc\n' \
       > /etc/apt/sources.list.d/eos.sources \

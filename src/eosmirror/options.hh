@@ -33,7 +33,7 @@ struct SyncOptions {
   // retried. Off: all transfers run at once.
   bool adaptive = true;
   int min_transfers = 4;
-  std::chrono::seconds adapt_interval{15};
+  std::chrono::seconds adapt_interval{10};
   size_t max_backlog = 10000;  // queued copies before the checkers block
   size_t buffer_size = 8u << 20;
 

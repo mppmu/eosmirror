@@ -1080,18 +1080,175 @@ TEST_CASE("fake: slow source reads are logged") {
   src.hook = [](std::string_view op, const RelPath&) {
     if (op == "read") std::this_thread::sleep_for(std::chrono::milliseconds(5));
   };
-  std::vector<std::byte> buffer(4096);
+  BufferPool pool(4096);
   Cancellation cancel;
   CopyOptions options;
+  Entry listed = src.stat("f").value();
   {
     StderrCapture capture;
-    REQUIRE(copy_file(src, dst, "f", options, buffer, cancel).ok());
+    REQUIRE(copy_file(src, dst, "f", listed, options, pool, cancel).ok());
     CHECK(capture.text().find("slow source read") == std::string::npos);
   }
   options.slow_read = std::chrono::milliseconds(1);
   StderrCapture capture;
-  REQUIRE(copy_file(src, dst, "f", options, buffer, cancel).ok());
+  REQUIRE(copy_file(src, dst, "f", listed, options, pool, cancel).ok());
   std::string out = capture.text();
   CHECK(out.find("slow source read: f at offset 0, 4096 bytes, ") != std::string::npos);
   CHECK(out.find("slow source read: f at offset 8192, 1808 bytes, ") != std::string::npos);
+}
+
+TEST_CASE("fake: nothing is created on the target before the first chunk was read") {
+  FakeEndpoint src, dst;
+  populate(src);
+  src.fail("read", "f0", Error{ErrorKind::Permission, "unreadable"});
+  Report r;
+  REQUIRE(run_sync(src, dst, fake_options(), r).ok());
+  REQUIRE(r.stats.failures == 1);
+  CHECK(r.failures()[0].path == "f0");
+  CHECK(dst.count("open_write") == 2);  // the other files
+  CHECK_FALSE(dst.get("f0"));
+
+  // Nor is a temporary left on a local target.
+  TempDir tmp;
+  PosixEndpoint posix(tmp.path());
+  src.fail("read", "f0", Error{ErrorKind::Permission, "unreadable"});
+  Report r2;
+  REQUIRE(run_sync(src, posix, test_options(), r2).ok());
+  CHECK(r2.stats.failures == 1);
+  CHECK(r2.stats.files_copied == 2);
+  for (const auto& entry : fs::recursive_directory_iterator(tmp.path()))
+    CHECK_FALSE(is_temporary_name(entry.path().filename().string()));
+  CHECK_FALSE(fs::exists(tmp.sub("f0")));
+}
+
+TEST_CASE("fake: files of many chunks are written in order and counted once") {
+  FakeEndpoint src, dst;
+  std::string content = pattern(10 * 4096 + 17);
+  src.add_file("big", content);
+  src.add_file("exact", pattern(2 * 4096));
+  SyncOptions o = fake_options();
+  o.buffer_size = 4096;
+  std::atomic<uint64_t> chunks{0};
+  dst.hook = [&](std::string_view op, const RelPath&) {
+    if (op == "write") ++chunks;
+  };
+  Report r;
+  REQUIRE(run_sync(src, dst, o, r).ok());
+  CHECK(r.stats.failures == 0);
+  CHECK(r.stats.bytes_copied == content.size() + 2 * 4096);
+  CHECK(r.stats.bytes_written == content.size() + 2 * 4096);
+  CHECK(chunks == 11 + 2);
+  CHECK(dst.get("big")->content == content);  // the fake refuses gaps and rewrites
+  CHECK(dst.get("exact")->content == pattern(2 * 4096));
+}
+
+TEST_CASE("fake: targets without checksums are verified against the source's") {
+  FakeEndpoint src;
+  src.caps.checksum = ChecksumType::Adler32;
+  populate(src);
+  // Like EOS, the source lists the checksums it stores.
+  for (const RelPath& p : src.paths()) {
+    src.modify(p, [](FakeEndpoint::Node& n) {
+      if (n.entry.type != EntryType::File) return;
+      Hasher h(ChecksumType::Adler32);
+      h.update({reinterpret_cast<const std::byte*>(n.content.data()), n.content.size()});
+      n.entry.checksum = h.finish();
+    });
+  }
+  FakeEndpoint dst;
+  Report r;
+  REQUIRE(run_sync(src, dst, fake_options(), r).ok());
+  CHECK(r.stats.files_copied == 3);
+  CHECK(r.stats.files_unverified == 0);
+  CHECK(r.stats.failures == 0);
+
+  SUBCASE("a mismatch fails the copy after retries and leaves nothing") {
+    src.modify("f0", [](FakeEndpoint::Node& n) { n.entry.checksum.hex = "00000002"; });
+    FakeEndpoint dst2;
+    Report r2;
+    REQUIRE(run_sync(src, dst2, fake_options(), r2).ok());
+    REQUIRE(r2.stats.failures == 1);
+    CHECK(r2.failures()[0].path == "f0");
+    CHECK(r2.failures()[0].error.kind == ErrorKind::Checksum);
+    CHECK(r2.stats.retries == 2);
+    CHECK_FALSE(dst2.get("f0"));
+
+    TempDir tmp;
+    PosixEndpoint posix(tmp.path());
+    Report r3;
+    REQUIRE(run_sync(src, posix, test_options(), r3).ok());
+    CHECK(r3.stats.failures == 1);
+    CHECK(r3.stats.files_unverified == 0);
+    for (const auto& entry : fs::recursive_directory_iterator(tmp.path()))
+      CHECK_FALSE(is_temporary_name(entry.path().filename().string()));
+    CHECK_FALSE(fs::exists(tmp.sub("f0")));
+  }
+
+  SUBCASE("a listed checksum is compared even where the target verifies") {
+    src.modify("f0", [](FakeEndpoint::Node& n) { n.entry.checksum.hex = "00000002"; });
+    FakeEndpoint dst2;
+    dst2.caps.checksum = ChecksumType::Adler32;
+    Report r2;
+    REQUIRE(run_sync(src, dst2, fake_options(), r2).ok());
+    REQUIRE(r2.stats.failures == 1);
+    CHECK(r2.failures()[0].error.kind == ErrorKind::Checksum);
+    CHECK_FALSE(dst2.get("f0"));
+    CHECK(dst2.count("commit") == 2);  // the other files
+  }
+
+  SUBCASE("a listed checksum counts only while size and mtime are those listed") {
+    src.modify("f0", [](FakeEndpoint::Node& n) { n.entry.checksum.hex = "00000002"; });
+    // The file is touched after its listing, before it is opened.
+    bool touched = false;
+    src.hook = [&](std::string_view op, const RelPath& path) {
+      if (op == "open_read" && path == "f0" && !touched) {
+        touched = true;
+        src.modify("f0", [](FakeEndpoint::Node& n) { n.entry.mtime = {3999, 0}; });
+      }
+    };
+    FakeEndpoint dst2;
+    Report r2;
+    REQUIRE(run_sync(src, dst2, fake_options(), r2).ok());
+    CHECK(r2.stats.failures == 0);
+    CHECK(r2.stats.files_unverified == 1);
+    CHECK(dst2.get("f0")->entry.mtime == Timespec{3999, 0});
+  }
+
+  SUBCASE("--require-checksum is met by the source") {
+    SyncOptions strict = fake_options();
+    strict.require_checksum = true;
+    FakeEndpoint dst2;
+    Report r2;
+    REQUIRE(run_sync(src, dst2, strict, r2).ok());
+    CHECK(r2.stats.files_copied == 3);
+    CHECK(r2.stats.failures == 0);
+
+    src.modify("f0", [](FakeEndpoint::Node& n) { n.entry.checksum = {}; });
+    FakeEndpoint dst3;
+    Report r3;
+    REQUIRE(run_sync(src, dst3, strict, r3).ok());
+    REQUIRE(r3.stats.failures == 1);
+    CHECK(r3.failures()[0].path == "f0");
+    CHECK(r3.failures()[0].error.kind == ErrorKind::Unsupported);
+  }
+}
+
+TEST_CASE("the transfer limit grows by half while throughput improves") {
+  CHECK(next_transfer_limit(4, 4, 32, false, true) == 6);
+  CHECK(next_transfer_limit(6, 4, 32, false, true) == 9);
+  CHECK(next_transfer_limit(1, 1, 32, false, true) == 3);    // by at least 2
+  CHECK(next_transfer_limit(30, 4, 32, false, true) == 32);  // up to the maximum
+  CHECK(next_transfer_limit(13, 4, 32, false, false) == 13);
+  // Retries take a quarter away, whatever the throughput did.
+  CHECK(next_transfer_limit(32, 4, 32, true, true) == 24);
+  CHECK(next_transfer_limit(3, 1, 32, true, false) == 2);  // at least 1
+  CHECK(next_transfer_limit(5, 4, 32, true, false) == 4);  // down to the minimum
+  // From 4 to 32 within six intervals.
+  size_t limit = 4;
+  int intervals = 0;
+  while (limit < 32) {
+    limit = next_transfer_limit(limit, 4, 32, false, true);
+    ++intervals;
+  }
+  CHECK(intervals == 6);
 }

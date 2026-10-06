@@ -10,6 +10,7 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -45,6 +46,7 @@ struct DirNode {
 struct CopyJob {
   std::shared_ptr<DirNode> dir;
   Entry source;
+  bool replaces = true;  // the target had a file of that name when listed
 };
 
 // Limits how many transfers run at once; the limit can change while
@@ -107,13 +109,14 @@ std::string name_of(const RelPath& path) {
   return slash == std::string::npos ? path : path.substr(slash + 1);
 }
 
-bool is_under(const RelPath& path, const RelPath& dir) {
-  if (dir.empty()) return !path.empty();
-  return path.size() > dir.size() && path.compare(0, dir.size(), dir) == 0 &&
-         path[dir.size()] == '/';
-}
-
 }  // namespace
+
+size_t next_transfer_limit(size_t limit, size_t min_limit, size_t max_limit, bool retried,
+                           bool improved) {
+  if (retried) return std::max(min_limit, limit - std::min(limit, std::max<size_t>(1, limit / 4)));
+  if (improved) return std::min(max_limit, limit + std::max<size_t>(2, limit / 2));
+  return limit;
+}
 
 struct Engine::Impl {
   Impl(Endpoint& src, Endpoint& dst, SyncOptions opts, Report& rep, Journal* jnl,
@@ -150,7 +153,9 @@ struct Engine::Impl {
   bool symlink_owner = true;  // symlinks on the target have settable owners
   ModeBits file_mode_bits = 07777;  // the mode bits the target stores
   ModeBits dir_mode_bits = 07777;
-  bool target_verifies = false;  // the target computes checksums of stored files
+  // An endpoint normally provides a checksum to verify copies against: the
+  // target computes them, or else the source stores them.
+  bool checksums_expected = false;
   bool relax_modes = false;  // make read-only target directories writable first
 
   WorkQueue<std::shared_ptr<DirNode>> dirs;
@@ -384,11 +389,10 @@ struct Engine::Impl {
 
     if (node->only) {
       // Names gone from both sides have nothing left to retry.
-      for (const std::string& name : *node->only) {
-        bool in_source = std::any_of(src_entries.begin(), src_entries.end(),
-                                     [&](const Entry& e) { return e.name == name; });
-        if (!in_source && !dst_entries.count(name)) succeeded(join(node->path, name));
-      }
+      std::unordered_set<std::string_view> in_source;
+      for (const Entry& e : src_entries) in_source.insert(e.name);
+      for (const std::string& name : *node->only)
+        if (!in_source.count(name) && !dst_entries.count(name)) succeeded(join(node->path, name));
     } else if (node->owned && !cancel.requested()) {
       handle_extras(node, dst_entries);
     }
@@ -498,7 +502,7 @@ struct Engine::Impl {
     ensure_writable(node);
     node->pending.fetch_add(1);
     stats.queued_copies.fetch_add(1);
-    if (!copies.push(CopyJob{node, e})) {
+    if (!copies.push(CopyJob{node, e, existing != nullptr})) {
       stats.queued_copies.fetch_sub(1);
       entry_done(node);
     }
@@ -608,7 +612,7 @@ struct Engine::Impl {
   // ---- transfers -----------------------------------------------------------------
 
   void transfer_loop(size_t index) {
-    std::vector<std::byte> buffer(std::max<size_t>(options.buffer_size, 4096));
+    BufferPool pool(std::max<size_t>(options.buffer_size, 4096));
     TransferSlot& slot = *report.slots[index];
     while (auto job = copies.pop()) {
       stats.queued_copies.fetch_sub(1);
@@ -616,14 +620,14 @@ struct Engine::Impl {
         entry_done(job->dir);
         continue;
       }
-      run_copy(*job, buffer, slot);
+      run_copy(*job, pool, slot);
       gate.release();
     }
   }
 
   // Adjusts the transfer limit every interval: up while throughput (bytes
-  // or files) improves, down by a quarter when operations were retried,
-  // which is how an overloaded target shows.
+  // or files) improves, down when operations were retried, which is how an
+  // overloaded target shows.
   void controller_loop() {
     const size_t min_limit = initial_limit();
     const size_t max_limit = max_transfers();
@@ -646,16 +650,16 @@ struct Engine::Impl {
       last_files = files;
       last_retries = retries;
 
-      size_t limit = gate.limit(), wanted = limit;
+      bool improved = byte_rate > best_bytes * 1.05 || file_rate > best_files * 1.05;
       if (retried) {
-        wanted = std::max(min_limit, limit - std::max<size_t>(1, limit / 4));
         best_bytes = byte_rate;
         best_files = file_rate;
-      } else if (byte_rate > best_bytes * 1.05 || file_rate > best_files * 1.05) {
+      } else if (improved) {
         best_bytes = std::max(best_bytes, byte_rate);
         best_files = std::max(best_files, file_rate);
-        wanted = std::min(max_limit, limit + 2);
       }
+      size_t limit = gate.limit();
+      size_t wanted = next_transfer_limit(limit, min_limit, max_limit, retried, improved);
       if (wanted != limit) {
         log::info("transfer limit ", limit, " -> ", wanted, " (", format_bytes(static_cast<uint64_t>(byte_rate)),
                   "/s, ", static_cast<uint64_t>(file_rate), " files/s",
@@ -666,7 +670,7 @@ struct Engine::Impl {
     }
   }
 
-  void run_copy(const CopyJob& job, std::span<std::byte> buffer, TransferSlot& slot) {
+  void run_copy(const CopyJob& job, BufferPool& pool, TransferSlot& slot) {
     RelPath path = join(job.dir->path, job.source.name);
     job.dir->touched = true;
     if (options.dry_run) {
@@ -682,12 +686,13 @@ struct Engine::Impl {
       slot.written = 0;
       slot.active = true;
       CopyOptions job_options = copy_options;
+      job_options.replaces = job.replaces;
       job_options.on_chunk = [&](uint64_t n) {
         stats.bytes_written.fetch_add(n);
         slot.written.fetch_add(n);
       };
-      auto result =
-          retry([&] { return copy_file(source, target, path, job_options, buffer, cancel); });
+      auto result = retry(
+          [&] { return copy_file(source, target, path, job.source, job_options, pool, cancel); });
       slot.active = false;
       if (result.ok()) {
         stats.files_copied.fetch_add(1);
@@ -695,9 +700,9 @@ struct Engine::Impl {
         log::debug("copied ", path, " (", result.value().bytes, " bytes)");
         if (copy_options.verify && !result.value().verified) {
           stats.files_unverified.fetch_add(1);
-          // Worth a warning where the target normally verifies (an EOS
-          // directory without checksums), not for local targets.
-          if (target_verifies && !job.dir->unverified_warned.exchange(true))
+          // Worth a warning where copies are normally verified (an EOS
+          // directory without checksums), not between local file systems.
+          if (checksums_expected && !job.dir->unverified_warned.exchange(true))
             log::warn("no checksum verification for files copied into ",
                       job.dir->path.empty() ? "." : job.dir->path);
         }
@@ -739,7 +744,7 @@ struct Engine::Impl {
     symlink_owner = dst.symlink_owner;
     file_mode_bits = dst.file_mode_bits;
     dir_mode_bits = dst.dir_mode_bits;
-    target_verifies = dst.checksum != ChecksumType::None;
+    checksums_expected = dst.checksum != ChecksumType::None || src.checksum != ChecksumType::None;
     if (options.preserve_mode && (file_mode_bits != 07777 || dir_mode_bits != 07777)) {
       char bits[80];
       std::snprintf(bits, sizeof bits, "%04o of files and %04o of directories", file_mode_bits,
@@ -847,8 +852,11 @@ Status Engine::run(const std::vector<Failure>& entries) {
   std::map<RelPath, std::set<std::string>> groups;
   bool whole_tree = false;
   for (const Failure& f : entries) {
-    bool covered = std::any_of(failed_dirs.begin(), failed_dirs.end(),
-                               [&](const RelPath& d) { return is_under(f.path, d); });
+    bool covered = false;
+    for (RelPath dir = f.path; !dir.empty() && !covered;) {
+      dir = parent_path(dir);
+      covered = failed_dirs.count(dir) > 0;
+    }
     if (covered) continue;
     if (f.path.empty())
       whole_tree = true;

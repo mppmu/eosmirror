@@ -6,6 +6,7 @@
 #include <XrdCl/XrdClXRootDResponses.hh>
 
 #include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <charconv>
 #include <chrono>
@@ -156,6 +157,21 @@ std::string parent_of(const std::string& path) {
   return slash == std::string::npos ? "" : path.substr(0, slash);
 }
 
+// A checksum as find lists it: the type as EOS names it ("adler") and the
+// value in hex. A file whose checksum was never stored is listed with zeros.
+Checksum listed_checksum(std::string_view type, std::string_view hex) {
+  auto parsed = parse_checksum_type(type);
+  bool valid = hex.size() == 8 && std::all_of(hex.begin(), hex.end(), [](char c) {
+                 return std::isxdigit(static_cast<unsigned char>(c));
+               });
+  if (!parsed || *parsed == ChecksumType::None || !valid ||
+      hex.find_first_not_of('0') == std::string_view::npos)
+    return {};
+  std::string value(hex);
+  for (auto& c : value) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  return {*parsed, value};
+}
+
 std::string format_timespec(const Timespec& t) {
   char buf[40];
   std::snprintf(buf, sizeof buf, "%lld.%09d", static_cast<long long>(t.sec), t.nsec);
@@ -170,6 +186,9 @@ class EosReader : public FileReader {
       : ep_(ep), inner_(std::move(inner)), path_(std::move(path)) {}
   Result<size_t> read(uint64_t offset, std::span<std::byte> buf) override {
     return inner_->read(offset, buf);
+  }
+  Result<Chunk> read_chunk(uint64_t offset, uint64_t end, BufferPool& pool) override {
+    return inner_->read_chunk(offset, end, pool);
   }
   Result<Entry> stat() override { return ep_.stat(path_); }
 
@@ -189,9 +208,7 @@ class EosWriter : public FileWriter {
   EosWriter(EosEndpoint& ep, std::unique_ptr<FileWriter> inner, std::string abs, std::string url)
       : ep_(ep), inner_(std::move(inner)), abs_(std::move(abs)), url_(std::move(url)) {}
 
-  Status write(uint64_t offset, std::span<const std::byte> data) override {
-    return inner_->write(offset, data);
-  }
+  Status write(Chunk chunk) override { return inner_->write(std::move(chunk)); }
 
   Result<CommitInfo> commit(const CommitSpec& spec) override {
     CommitSpec inner_spec = spec;
@@ -199,23 +216,41 @@ class EosWriter : public FileWriter {
     auto committed = inner_->commit(inner_spec);
     if (!committed.ok()) return committed.error();
     // The file is in place now, with the source's size and mtime: what fails
-    // from here on has to take it away again.
+    // from here on has to take it away again. Unless the close did not
+    // commit it after all: XrdCl reports the close of a file whose
+    // connection is gone as done (XrdClFileStateHandler.cc, Close), and the
+    // storage node then discards the upload, leaving the previous file or
+    // none in place.
     bool verified = false;
     if (spec.checksum.type != ChecksumType::None) {
       auto stored = ep_.query_checksum(abs_);
-      if (!stored.ok()) return discard(stored.error());
+      if (!stored.ok())
+        return stored.error().kind == ErrorKind::NotFound ? not_committed()
+                                                          : discard(spec, stored.error());
       if (stored.value().type == spec.checksum.type) {
         if (!(stored.value() == spec.checksum))
-          return discard(Error{ErrorKind::Checksum, url_ + " has checksum " + stored.value().hex +
-                                                        " instead of " + spec.checksum.hex});
+          return discard(spec, Error{ErrorKind::Checksum, url_ + " has checksum " +
+                                                              stored.value().hex + " instead of " +
+                                                              spec.checksum.hex});
         verified = true;
       }
     }
+    if (!verified) {
+      // Nothing compared, so the file in place must be told by its size and
+      // mtime.
+      auto ours = in_place(spec);
+      if (!ours.ok()) return ours.error();
+      if (!ours.value()) return not_committed();
+    }
     if (spec.require_verification && !verified)
-      return discard(Error{ErrorKind::Unsupported,
-                           "EOS stores no " + std::string(to_string(spec.checksum.type)) +
-                               " checksum to verify " + url_ + " against"});
+      return discard(spec, Error{ErrorKind::Unsupported,
+                                 "EOS stores no " + std::string(to_string(spec.checksum.type)) +
+                                     " checksum to verify " + url_ + " against"});
     MetaFields fields = spec.fields & (MetaFields::Owner | MetaFields::Mode);
+    // A new file has the mode of the open, plus the owner's read and write
+    // bits that XRootD adds. One that replaced a file may have been given
+    // the old file's mode by EOS's versioning.
+    if (!spec.replaces && (spec.metadata.mode & 0600) == 0600) fields = fields & ~MetaFields::Mode;
     Status md = ep_.set_metadata_abs(abs_, spec.metadata, fields, false);
     if (!md.ok()) return md.error();
     return CommitInfo{verified};
@@ -224,9 +259,27 @@ class EosWriter : public FileWriter {
   void abort() override { inner_->abort(); }
 
  private:
+  // Whether the file in place is this upload, by size and mtime.
+  Result<bool> in_place(const CommitSpec& spec) {
+    auto st = ep_.stat_abs(abs_);
+    if (!st.ok()) {
+      if (st.error().kind == ErrorKind::NotFound) return false;
+      return st.error();
+    }
+    return st.value().type == EntryType::File && st.value().size == spec.size &&
+           (!has(spec.fields, MetaFields::Mtime) || st.value().mtime == spec.metadata.mtime);
+  }
+
+  Error not_committed() const {
+    return Error{ErrorKind::IO, "the upload of " + url_ +
+                                    " was not committed (the connection to the storage node "
+                                    "was lost before the close)"};
+  }
+
   // Removes the committed file, or else sets its mtime to 0 so that the next
-  // run copies it again.
-  Error discard(Error e) {
+  // run copies it again. A file in place that is not this upload is left.
+  Error discard(const CommitSpec& spec, Error e) {
+    if (auto ours = in_place(spec); ours.ok() && !ours.value()) return not_committed();
     Status removed = ep_.remove_abs(abs_);
     if (removed.ok() || removed.error().kind == ErrorKind::NotFound) return e;
     Entry md;
@@ -245,44 +298,23 @@ class EosWriter : public FileWriter {
 };
 
 // The XRootD writer that EosWriter wraps: writes to the final URL with the
-// atomic upload parameters, one synchronous write at a time, and does
-// nothing at commit beyond closing. Erasure-coded layouts need the writes in
-// order (see docs/design.md).
-class EosUploadWriter : public FileWriter {
+// atomic upload parameters and does nothing at commit beyond closing. Up to
+// `window` writes are in flight, sent in offset order over the file's one
+// connection, each at the end of the previous one, as erasure-coded layouts
+// need (see docs/design.md).
+class EosUploadWriter : public XrdFileWriter {
  public:
-  EosUploadWriter(std::unique_ptr<XrdCl::File> file, std::string url)
-      : file_(std::move(file)), url_(std::move(url)) {}
+  EosUploadWriter(std::unique_ptr<XrdCl::File> file, std::string url, int window)
+      : XrdFileWriter(std::move(file), std::move(url), window) {}
 
   ~EosUploadWriter() override { abort(); }
 
-  Status write(uint64_t offset, std::span<const std::byte> data) override {
-    if (offset != written_) return Error{ErrorKind::Other, "non-sequential write to " + url_};
-    XrdCl::XRootDStatus st =
-        file_->Write(offset, static_cast<uint32_t>(data.size()), data.data());
-    if (!st.IsOK()) return stalled(XrdEndpoint::xrd_error(st, "write " + url_));
-    last_ack_ = std::chrono::steady_clock::now();
-    written_ += data.size();
-    return {};
-  }
-
-  Error stalled(Error e) const {
-    auto secs = std::chrono::duration_cast<std::chrono::seconds>(
-                    std::chrono::steady_clock::now() - last_ack_)
-                    .count();
-    e.message += " (last write acknowledged " + std::to_string(secs) + " s earlier)";
-    return e;
-  }
-
   Result<CommitInfo> commit(const CommitSpec& spec) override {
-    if (!file_) return Error{ErrorKind::Other, "commit without an open file"};
-    if (written_ != spec.size) {
+    if (Status s = complete(spec.size); !s.ok()) {
       abort();
-      return Error{ErrorKind::Changed, "wrote " + std::to_string(written_) + " bytes to " + url_ +
-                                           ", expected " + std::to_string(spec.size)};
+      return s.error();
     }
-    XrdCl::XRootDStatus st = file_->Close();
-    file_.reset();
-    if (!st.IsOK()) return stalled(XrdEndpoint::xrd_error(st, "close " + url_));
+    if (Status s = close(); !s.ok()) return s.error();
     return CommitInfo{};
   }
 
@@ -292,23 +324,19 @@ class EosUploadWriter : public FileWriter {
   // when the connection ends.
   void abort() override {
     if (!file_) return;
+    Status drained = writes_.drain();  // XrdCl refuses to close with writes in flight
+    (void)drained;
     if (file_->IsOpen()) {
       XrdCl::Buffer arg;
       arg.FromString("delete");
       XrdCl::Buffer* response = nullptr;
       XrdCl::XRootDStatus st = file_->Fcntl(arg, response);
       delete response;
-      if (!st.IsOK()) log::warn("cannot discard the upload of ", url_, ": ", st.ToStr());
+      if (!st.IsOK()) log::warn("cannot discard the upload of ", name_, ": ", st.ToStr());
       st = file_->Close();  // fails after the delete
     }
     file_.reset();
   }
-
- private:
-  std::unique_ptr<XrdCl::File> file_;
-  std::string url_;
-  uint64_t written_ = 0;
-  std::chrono::steady_clock::time_point last_ack_ = std::chrono::steady_clock::now();
 };
 
 }  // namespace
@@ -385,9 +413,10 @@ Result<std::optional<Entry>> parse_find_line(std::string_view line, std::string_
     return bad("ambiguous listing line");
   std::string_view path = line.substr(kPath.size(), path_end - kPath.size());
 
-  // "type=... size=N uid=U gid=G mode=M flags=F mtime=S.N target="...""; the
-  // target comes last.
+  // "type=... size=N uid=U gid=G mode=M flags=F mtime=S.N checksum=X
+  // checksumtype=T target="..."", the target last.
   Entry e;
+  std::string_view checksum, checksum_type;
   std::string_view rest = line.substr(path_end + 2);
   while (!rest.empty()) {
     if (rest.front() == ' ') {
@@ -427,10 +456,15 @@ Result<std::optional<Entry>> parse_find_line(std::string_view line, std::string_
       e.mode = parse_number<ModeBits>(value, 8) & 07777;
     } else if (key == "mtime") {
       e.mtime = parse_timespec(value);
+    } else if (key == "checksum") {
+      checksum = value;
+    } else if (key == "checksumtype") {
+      checksum_type = value;
     } else if (key == "target") {
       e.link_target = std::string(value);
     }
   }
+  if (e.type == EntryType::File) e.checksum = listed_checksum(checksum_type, checksum);
   if (e.type == EntryType::Symlink) {
     e.mode = 0777;
     e.size = 0;
@@ -694,7 +728,8 @@ Result<std::string> EosEndpoint::resolve(const std::string& abs_path) {
 Result<std::vector<Entry>> EosEndpoint::list(const RelPath& dir) {
   std::string abs = absolute(dir);
   // The link target comes last: parse_find_line takes it to the end of the line.
-  std::string request = find_request(abs, "type,size,uid,gid,mode,flags,mtime,link");
+  std::string request =
+      find_request(abs, "type,size,uid,gid,mode,flags,mtime,checksum,checksumtype,link");
   auto result = proc("mgm.cmd.proto=" + base64(request));
   if (!result.ok()) return result.error();
   const ProcResult& reply = result.value();
@@ -752,10 +787,11 @@ Result<std::vector<Entry>> EosEndpoint::list(const RelPath& dir) {
   }
   // Subdirectories left out for lack of permission are listed all the same,
   // so that walking into them fails for them alone.
+  std::unordered_set<std::string> known;
+  if (!denied.empty())
+    for (const Entry& e : entries) known.insert(e.name);
   for (const std::string& name : denied) {
-    bool known = std::any_of(entries.begin(), entries.end(),
-                             [&](const Entry& e) { return e.name == name; });
-    if (known) continue;
+    if (known.count(name)) continue;
     auto e = stat_abs(abs == "/" ? "/" + name : abs + "/" + name);
     if (!e.ok()) {
       if (e.error().kind == ErrorKind::NotFound) continue;
@@ -814,43 +850,59 @@ Status EosEndpoint::set_metadata(const RelPath& path, const Entry& md, MetaField
 
 Status EosEndpoint::set_metadata_abs(const std::string& abs, const Entry& md, MetaFields fields,
                                      bool is_symlink) {
-  std::string request = request_path(abs).value();
   // The mtime first: utimes needs write access, which the mode may take away.
   if (has(fields, MetaFields::Mtime)) {
     char nsec[16];
     std::snprintf(nsec, sizeof nsec, "%09d", md.mtime.nsec);
-    XrdCl::Buffer arg;
-    arg.FromString(request + "&mgm.pcmd=utimes&tv1_sec=0&tv1_nsec=0&tv2_sec=" +
-                   std::to_string(md.mtime.sec) + "&tv2_nsec=" + nsec + std::string(kApp));
-    XrdCl::Buffer* response = nullptr;
-    XrdCl::XRootDStatus st = fs_->Query(XrdCl::QueryCode::OpaqueFile, arg, response);
-    if (!st.IsOK()) return xrd_error(st, "utimes " + url_of(abs));
-    std::unique_ptr<XrdCl::Buffer> owned(response);
-    std::string text = response ? response->ToString() : "";
-    if (text.rfind("utimes: retc=0", 0) != 0) {
-      int retc = text.rfind("utimes: retc=", 0) == 0 ? std::atoi(text.c_str() + 13) : EIO;
-      return errno_error(retc ? retc : EIO, "utimes " + url_of(abs) + ": " + text);
+    Status s = fsctl(abs, "utimes",
+                     "&tv1_sec=0&tv1_nsec=0&tv2_sec=" + std::to_string(md.mtime.sec) +
+                         "&tv2_nsec=" + nsec);
+    if (!s.ok()) return s;
+  }
+  if (has(fields, MetaFields::Owner) && (!is_symlink || caps_.symlink_owner)) {
+    // The fsctl form follows symlinks and parses ids as signed ints; the
+    // proc command with option h changes a symlink itself.
+    constexpr uint32_t kMaxInt = 0x7fffffff;
+    if (!is_symlink && md.uid <= kMaxInt && md.gid <= kMaxInt) {
+      Status s = fsctl(abs, "chown",
+                       "&uid=" + std::to_string(md.uid) + "&gid=" + std::to_string(md.gid));
+      if (!s.ok()) return s;
+    } else {
+      auto result = proc("mgm.cmd=chown&mgm.chown.option=h&mgm.path=" + eos_encoded_path(abs) +
+                         "&eos.encodepath=1&mgm.chown.owner=" + std::to_string(md.uid) + ":" +
+                         std::to_string(md.gid));
+      if (!result.ok()) return result.error();
+      if (result.value().retc != 0)
+        return errno_error(result.value().retc,
+                           "chown " + url_of(abs) + ": " + result.value().err);
     }
   }
-  // chown with option h changes a symlink itself rather than its target.
-  if (has(fields, MetaFields::Owner) && (!is_symlink || caps_.symlink_owner)) {
-    auto result = proc("mgm.cmd=chown&mgm.chown.option=h&mgm.path=" + eos_encoded_path(abs) +
-                       "&eos.encodepath=1&mgm.chown.owner=" + std::to_string(md.uid) + ":" +
-                       std::to_string(md.gid));
-    if (!result.ok()) return result.error();
-    if (result.value().retc != 0)
-      return errno_error(result.value().retc, "chown " + url_of(abs) + ": " + result.value().err);
-  }
   if (has(fields, MetaFields::Mode) && !is_symlink) {
-    char mode[8];
-    std::snprintf(mode, sizeof mode, "%o", md.mode & 07777);
-    auto result = proc("mgm.cmd=chmod&mgm.path=" + eos_encoded_path(abs) + "&eos.encodepath=1" +
-                       "&mgm.chmod.mode=" + mode);
-    if (!result.ok()) return result.error();
-    if (result.value().retc != 0)
-      return errno_error(result.value().retc, "chmod " + url_of(abs) + ": " + result.value().err);
+    Status s = fsctl(abs, "chmod", "&mode=" + std::to_string(md.mode & 07777));  // decimal
+    if (!s.ok()) return s;
   }
   return {};
+}
+
+Status EosEndpoint::fsctl(const std::string& abs, const std::string& command,
+                          const std::string& args) {
+  XrdCl::Buffer arg;
+  arg.FromString(request_path(abs).value() + "&mgm.pcmd=" + command + args + std::string(kApp));
+  XrdCl::Buffer* response = nullptr;
+  XrdCl::XRootDStatus st = fs_->Query(XrdCl::QueryCode::OpaqueFile, arg, response);
+  if (!st.IsOK()) return xrd_error(st, command + " " + url_of(abs));
+  std::unique_ptr<XrdCl::Buffer> owned(response);
+  std::string text = response ? response->ToString() : "";
+  while (!text.empty() && (text.back() == '\0' || text.back() == '\n')) text.pop_back();
+  // "<command>: retc=<errno>"
+  std::string prefix = command + ": retc=";
+  int retc = text.rfind(prefix, 0) == 0 ? std::atoi(text.c_str() + prefix.size()) : EIO;
+  if (retc != 0) return errno_error(retc, command + " " + url_of(abs) + ": " + text);
+  return {};
+}
+
+Result<Checksum> EosEndpoint::stored_checksum(const RelPath& path, const Entry& listed) {
+  return Endpoint::stored_checksum(path, listed);
 }
 
 Result<std::unique_ptr<FileReader>> EosEndpoint::open_read(const RelPath& path) {
@@ -862,14 +914,17 @@ Result<std::unique_ptr<FileReader>> EosEndpoint::open_read(const RelPath& path) 
 Result<std::unique_ptr<FileWriter>> EosEndpoint::open_write(const RelPath& path,
                                                             const CommitSpec& spec) {
   std::string abs = absolute(path);
-  std::string url = open_url(request_path(abs).value() + "&eos.atomic=1" + std::string(kApp));
-  if (has(spec.fields, MetaFields::Mtime)) url += "&eos.mtime=" + format_timespec(spec.metadata.mtime);
+  std::string request = request_path(abs).value() + "&eos.atomic=1" + std::string(kApp);
+  if (has(spec.fields, MetaFields::Mtime))
+    request += "&eos.mtime=" + format_timespec(spec.metadata.mtime);
+  std::string url = open_url(request);
   auto file = new_write_file();
   ModeBits mode = has(spec.fields, MetaFields::Mode) ? spec.metadata.mode : 0644;
   XrdCl::XRootDStatus st = file->Open(url, XrdCl::OpenFlags::Delete | XrdCl::OpenFlags::Write,
                                       static_cast<XrdCl::Access::Mode>(mode & 0777));
   if (!st.IsOK()) return xrd_error(st, "create " + url_of(abs));
-  std::unique_ptr<FileWriter> upload(new EosUploadWriter(std::move(file), url_of(abs)));
+  std::unique_ptr<FileWriter> upload(
+      new EosUploadWriter(std::move(file), url_of(abs), options_.write_window));
   return std::unique_ptr<FileWriter>(new EosWriter(*this, std::move(upload), abs, url_of(abs)));
 }
 

@@ -3,7 +3,7 @@
 FROM ubuntu:22.04
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      g++ cmake make ninja-build git ca-certificates curl libsqlite3-dev \
+      g++ cmake make ninja-build git ca-certificates curl libsqlite3-dev zlib1g-dev \
  && curl -sSfL https://storage-ci.web.cern.ch/storage-ci/storageci.key -o /etc/apt/keyrings/storage-ci.asc \
  && printf 'Types: deb\nURIs: https://storage-ci.web.cern.ch/storage-ci/ubuntu/eos/diopside\nSuites: jammy\nComponents: jammy/tag/5.5 jammy/deps/5.5\nSigned-By: /etc/apt/keyrings/storage-ci.asc\n' \
       > /etc/apt/sources.list.d/eos.sources \

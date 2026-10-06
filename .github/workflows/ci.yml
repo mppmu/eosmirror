@@ -24,7 +24,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ninja-build libsqlite3-dev ${{ matrix.xrootd }}
+          sudo apt-get install -y --no-install-recommends ninja-build libsqlite3-dev zlib1g-dev ${{ matrix.xrootd }}
       - name: Configure
         run: >
           cmake -S . -B build -G Ninja -DEOSMIRROR_SANITIZER=${{ matrix.sanitizer }}
@@ -48,7 +48,7 @@ jobs:
         run: |
           dnf -y install epel-release dnf-plugins-core
           dnf config-manager --set-enabled crb
-          dnf -y install gcc-c++ cmake make ninja-build git sqlite-devel xrootd-client-devel libasan libubsan
+          dnf -y install gcc-c++ cmake make ninja-build git sqlite-devel zlib-devel xrootd-client-devel libasan libubsan
       - name: Configure
         run: cmake -S . -B build -G Ninja -DEOSMIRROR_SANITIZER=${{ matrix.sanitizer }}
       - name: Build

@@ -92,6 +92,11 @@ TEST_CASE("XRootD errors are classified for retries") {
   CHECK(server(kXR_NoSpace) == ErrorKind::NoSpace);
   CHECK(server(kXR_overQuota) == ErrorKind::NoSpace);
   CHECK(server(kXR_ArgInvalid) == ErrorKind::Other);
+  // A storage node's failure without an errno of its own, as protocol code
+  // and as errno.
+  CHECK(server(kXR_FSError) == ErrorKind::IO);
+  CHECK(server(ENODEV) == ErrorKind::IO);
+  CHECK(kind(XrdCl::errOSError, ENODEV) == ErrorKind::IO);
   for (uint16_t code : {XrdCl::errTlsError, XrdCl::errHandShakeFailed, XrdCl::errInvalidAddr,
                         XrdCl::errNoMoreFreeSIDs, XrdCl::errSocketTimeout, XrdCl::errConnectionError}) {
     INFO("client error ", code);
@@ -171,6 +176,23 @@ TEST_CASE("find listing lines") {
   CHECK(f.mode == 0640);
   CHECK(f.mtime == Timespec{1700000000, 123456789});
 
+  CHECK(f.checksum == Checksum{});
+
+  // Checksums with their type; files that have none, or one never stored.
+  Entry c = listed(R"(path="/eos/d/c" type=file  size=5 uid=1 gid=2 flags=644 mtime=1.0 )"
+                   R"(checksum=0A1b2c3d checksumtype=adler)");
+  CHECK(c.checksum == Checksum{ChecksumType::Adler32, "0a1b2c3d"});
+  CHECK(c.size == 5);
+  for (const char* xs :
+       {"checksum= checksumtype=none", "checksum=00000000 checksumtype=adler",
+        "checksum=0a1b2c3d checksumtype=crc32c", "checksum=0a1b checksumtype=adler",
+        "checksum=0a1b2c3x checksumtype=adler"}) {
+    INFO(xs);
+    CHECK(listed(std::string(R"(path="/eos/d/n" type=file  size=5 uid=1 gid=2 flags=644 )") +
+                 "mtime=1.0 " + xs)
+              .checksum == Checksum{});
+  }
+
   Entry d = listed(R"(path="/eos/d/sub/" type=directory  size=4096 uid=5 gid=6 mode=40755 )"
                    R"(mtime=1600000000.5)");
   CHECK(d.name == "sub");
@@ -180,7 +202,7 @@ TEST_CASE("find listing lines") {
   CHECK(d.mtime == Timespec{1600000000, 500000000});
 
   Entry l = listed(R"(path="/eos/d/l" type=symlink  size=0 uid=1 gid=2 flags=0 mtime=1.0 )"
-                   R"(target="../a "quoted" target")");
+                   R"(checksum= checksumtype=none target="../a "quoted" target")");
   CHECK(l.name == "l");
   CHECK(l.type == EntryType::Symlink);
   CHECK(l.link_target == R"(../a "quoted" target)");

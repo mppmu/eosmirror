@@ -60,7 +60,8 @@ Options:
       --no-owner           do not set owners and groups
       --no-mode            do not set modes
       --no-verify          do not compute checksums
-      --require-checksum   fail copies that the target cannot verify by checksum
+      --require-checksum   fail copies that neither the target nor the source can
+                           verify by checksum
       --verify-readback    read files on local targets back to verify them
       --fsync              fsync files on local targets before renaming them
       --rewrite-links A=B  rewrite symlink targets starting with A to start with B
@@ -69,10 +70,18 @@ Options:
       --min-transfers N    copies running at the start (default 4); the limit then
                            rises while throughput improves and falls on retries
       --no-adaptive        run all transfers at once from the start
-      --write-window N     writes per file in flight on plain XRootD targets
-                           (default 2); EOS uploads keep one, in order
+      --write-window N     writes per file in flight to XRootD and EOS (default 4),
+                           in order; safe for erasure-coded EOS files only while
+                           the FSTs keep EOS's default "xrootd.async off";
+                           --write-window 1 opts out
+      --read-window N      reads per file in flight from XRootD and EOS sources
+                           (default 4)
+      --connection-per-transfer
+                           give every transfer its own connections to XRootD and
+                           EOS servers instead of sharing one per server
       --max-backlog N      queued copies before directory workers wait (default 10000)
-      --buffer-size SIZE   copy buffer per transfer, e.g. 8M (default)
+      --buffer-size SIZE   size of the chunks read and written, e.g. 8M (default);
+                           a transfer holds at most both windows plus one
       --retries N          retries per operation (default 2)
       --retry-delay SEC    delay before the first retry (default 1)
       --mgm URL            the EOS MGM for paths below /eos, root://host[:port]
@@ -186,7 +195,11 @@ Result<CliOptions> parse_command_line(int argc, char** argv) {
   integer("--transfers", [&](long long n) { sync.transfers = static_cast<int>(n); });
   integer("--min-transfers", [&](long long n) { sync.min_transfers = static_cast<int>(n); });
   flag("--no-adaptive", [&] { sync.adaptive = false; });
-  integer("--write-window", [&](long long n) { opts.endpoints.xrootd.write_window = static_cast<int>(n); });
+  integer("--write-window",
+          [&](long long n) { opts.endpoints.xrootd.write_window = static_cast<int>(n); });
+  integer("--read-window",
+          [&](long long n) { opts.endpoints.xrootd.read_window = static_cast<int>(n); });
+  flag("--connection-per-transfer", [&] { opts.endpoints.xrootd.connection_per_thread = true; });
   integer("--max-backlog", [&](long long n) { sync.max_backlog = static_cast<size_t>(n); });
   value("--buffer-size", [&](const std::string& v) -> Status {
     auto n = parse_size(v);
@@ -270,6 +283,9 @@ Result<CliOptions> parse_command_line(int argc, char** argv) {
   if (retries < 0) return usage_error("--retries must not be negative");
   sync.retry.attempts = retries + 1;
   if (sync.checkers < 1 || sync.transfers < 1) return usage_error("--checkers and --transfers must be at least 1");
+  if (sync.buffer_size > (1u << 30)) return usage_error("--buffer-size must be at most 1G");
+  if (opts.endpoints.xrootd.write_window < 1 || opts.endpoints.xrootd.read_window < 1)
+    return usage_error("--write-window and --read-window must be at least 1");
   if (sync.shard_count < 1 || sync.shard_index < 0 || sync.shard_index >= sync.shard_count)
     return usage_error("--shard K/N needs 0 <= K < N");
   if ((sync.resume || opts.retry_failed) && opts.journal.empty())

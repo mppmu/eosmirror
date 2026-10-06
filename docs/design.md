@@ -28,10 +28,14 @@ the source changed while it was read (size or mtime differ afterwards), the
 copy is reported as "changed" and retried; whatever was renamed into place
 carries the old mtime, so a later run copies it again.
 
-Checksums are computed while streaming and compared end to end where an
-endpoint can provide one: EOS reports the checksum it computed while storing
-the file, and stores one for reading. For a POSIX target, `--verify-readback`
-reads the written file back.
+Checksums (adler32, through zlib) are computed while streaming and compared
+with what an endpoint stores: an EOS or XRootD target with the checksum it
+computed while storing the file, and an EOS or XRootD source with the
+checksum it stores for the file where the target computes none (a POSIX
+target) or where it comes with the listing anyway (EOS).
+A mismatch is an error like any other: the copy is discarded and retried.
+For a POSIX target, `--verify-readback` reads the written file back too.
+`--require-checksum` fails copies that neither side could verify.
 
 ## Structure
 
@@ -83,9 +87,19 @@ of one of its ancestors is reported as a failure and not walked.
 under a target before a long run and reports what the target cannot do.
 
 Endpoint operations are synchronous; concurrency comes from the worker pools
-below. Remote endpoints may pipeline internally (plain XRootD keeps several
-writes of one file in flight, EOS deliberately one), which the interface
-allows because writes are sequential and only `commit()` has to confirm them.
+below. Within a file, remote endpoints pipeline: data moves in chunks of
+`--buffer-size`, in buffers from a small pool per transfer, which the reader
+fills and the writer sends as they are. XRootD and EOS readers keep up to
+`--read-window` chunk reads in flight and hand the chunks over in order;
+XRootD and EOS writers keep up to `--write-window` writes in flight, each
+starting where the previous one ended, and `commit()` waits for them. The
+windows bound the buffers a transfer holds (reads plus writes plus one).
+Once a read or write has failed, nothing more is sent; the requests in
+flight are waited for before a file is closed, since XrdCl refuses to close
+a file with requests in flight and may complete them after the close. The
+first chunk is read before the target file is created, so that an
+unreadable source leaves nothing on the target, and the reads ahead overlap
+the target's open.
 
 ### Engine
 
@@ -107,8 +121,11 @@ metadata is applied and the parent's counter is decremented. The run ends
 when the root is finalized and the queues are drained.
 
 Separate pools matter because a tree of tiny files is bound by metadata
-latency and a tree of huge files by bandwidth. Later, the sizes of both pools
-adapt to measured throughput.
+latency and a tree of huge files by bandwidth. The number of transfers
+running at once adapts: it starts at `--min-transfers` and every 10 s rises
+by half (at least 2) while the throughput in bytes or files grows by more
+than 5 %, up to `--transfers`, and falls by a quarter, down to the start
+value, when operations were retried, which is how an overloaded target shows.
 
 ### Retries and the journal
 
@@ -171,7 +188,17 @@ compares files by size only, skips symlinks (counted), applies no mtimes,
 ignores owners of such a source, and detects directory cycles. Writes go to
 a temporary name `.<name>.eosmirror-<12 hex digits>` with up to
 `--write-window` writes in flight per file, the stored checksum is verified
-by a checksum query, and the file is renamed into place.
+by a checksum query, and the file is renamed into place. A file read from a
+server that computes checksums is verified by a checksum query after the
+read when the target computes none; the server may have to read the file
+once more to answer it.
+
+XrdCl shares one connection per server (user, host and port) among all
+files. With `--connection-per-transfer`, every transfer thread opens its
+files over connections of its own, told apart by the `xrdcl.intent`
+parameter, which XrdCl keys connections by, keeps across redirections and
+does not send to servers. Each file still goes over one connection per
+server.
 
 XRootD has no escaping for paths: the server takes everything after the
 first `?` as opaque parameters, in opens as in all other requests. Paths
@@ -180,8 +207,11 @@ containing `?` are therefore refused with an error instead of being sent.
 Server errors that mean a busy or failing server (`kXR_Overloaded`,
 `kXR_ServerError`, `kXR_noReplicas`, `kXR_inProgress` and `kXR_FSError`,
 which servers send for errnos without a protocol code such as `EAGAIN`,
-`EBUSY` or `ESTALE`) and client errors of the connection (TLS, handshake,
-address, exhausted stream ids) are retried like I/O errors.
+`EBUSY` or `ESTALE`, and which XrdCl turns into `ENODEV`) and client errors
+of the connection (TLS, handshake, address, exhausted stream ids) are
+retried like I/O errors. So is any failed write or close of an upload,
+whatever the error, unless space or permission is missing: the target then
+holds no file, and copying again is right.
 
 ## EOS specifics (milestone 3)
 
@@ -210,11 +240,14 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
   URL as given is kept for messages and the journal.
 - Listing: `find` (RequestProto field 5, FindProto) with `Files`,
   `Directories`, `Maxdepth=1` (a oneof, so it must be sent), `Path` and
-  `Format="type,size,uid,gid,mode,flags,mtime,link"`, plus
-  `SkipVersionDirs`. Each output line is `path="<abs>" type=... size=N
+  `Format="type,size,uid,gid,mode,flags,mtime,checksum,checksumtype,link"`,
+  plus `SkipVersionDirs`. Each output line is `path="<abs>" type=... size=N
   uid=U gid=G mode=<octal, directories> flags=<octal, files>
-  mtime=<sec>.<nsec> target="<link target>"`, the fields in the order of the
-  format and the target only for symlinks.
+  mtime=<sec>.<nsec> checksum=<hex, files> checksumtype=<adler, crc32c, ...,
+  none> target="<link target>"`, the fields in the order of the format and
+  the target only for symlinks (`mgm/proc/user/NewfindCmd.cc`, printFormat).
+  A file's checksum is kept with its entry when its type is adler32; one of
+  all zeros (a type without a stored value) counts as none.
   The start directory itself is listed too and skipped; a listing without it
   is an error. Paths and targets are printed raw: lines with more than one
   `" type=` (which a name or target can contain), names with control
@@ -244,9 +277,12 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
   the OpaqueFile query `<encoded path>?eos.encodepath=1&mgm.pcmd=utimes
   &tv1_sec=0&tv1_nsec=0&tv2_sec=S&tv2_nsec=<9 digits>`, which works for
   directories and symlinks as well.
-- Owner and mode: `mgm.cmd=chown&mgm.chown.option=h&mgm.path=...
-  &mgm.chown.owner=uid:gid` (`h`: the entry itself, so symlinks get their
-  own owner) and `mgm.cmd=chmod&mgm.path=...&mgm.chmod.mode=<octal>`. EOS
+- Owner and mode: the OpaqueFile queries `mgm.pcmd=chown&uid=U&gid=G` and
+  `mgm.pcmd=chmod&mode=<decimal>` (`mgm/ofs/fsctl/Chown.cc`, `Chmod.cc`),
+  one request each, where the proc commands take an open, two reads and a
+  close. The fsctl chown follows symlinks and parses ids as signed integers,
+  so symlinks and ids above 2^31 - 1 get `mgm.cmd=chown&mgm.chown.option=h
+  &mgm.path=...&mgm.chown.owner=uid:gid` (`h`: the entry itself). EOS
   stores only the permission bits of files and clears setuid on directories
   (`mgm/ofs/cmds/Chmod.inc`), so those bits are not compared.
 - Only root can set owners: sudoers can set neither the owner of a directory
@@ -257,9 +293,9 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
   `eos.mtime`), so EOS itself renames the file into place at close. A
   storage node commits an upload at any regular close, complete or not, and
   discards it only on a client disconnect, a write error or when told to
-  delete it (`fst/XrdFstOfsFile.cc`): an aborted upload sends the fctl
-  `delete` (XrdCl `File::Fcntl`) before it closes, and the previous file
-  stays as it was.
+  delete it (`fst/XrdFstOfsFile.cc`): an aborted upload waits for its writes
+  in flight, also after a failed one, sends the fctl `delete` (XrdCl
+  `File::Fcntl`) and closes, and the previous file stays as it was.
 - After the close, a checksum query on the file tells the type EOS stored
   and its value; they are compared when the type is the one computed while
   copying (adler32). Files without checksums (`none`, the default without
@@ -269,14 +305,48 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
   again, or else gets mtime 0, since it already carries the size and mtime
   of the source and would pass for a good copy. Owner and mode are applied
   after the close, since an upload runs under the client's identity: the
-  file is briefly visible with the uploader's owner.
+  file is briefly visible with the uploader's owner. The mode is passed in
+  the open, which gives a new file that mode plus the owner's read and
+  write bits (`XrdXrootdXeq.cc` adds them, `XrdMgmOfsFile.cc` stores the
+  permission bits), so the chmod is skipped for a file that did not exist
+  on the target and whose mode has those bits. A file that replaces another
+  is chmodded all the same: with versioning, EOS gives it the old file's
+  owner and mode (`mgm/ofs/fsctl/CommitHelper.cc`). The chown is not skipped
+  for owners that equal the identity's: a directory's `sys.owner.auth`
+  makes EOS create files as the directory's owner, also for root.
+- Per copied file, the MGM sees the open (which redirects to a storage
+  node), the checksum query after the close (and a stat where it compares
+  nothing) and the chown, plus the chmod in the cases above; per created
+  directory the mkdir and, when it is finalized, utimes, chown and chmod;
+  per listed directory one find (an open, two reads and a close). An EOS
+  source adds an open and two stats per file, before and after reading;
+  its checksum comes with the listing.
 - EOS's own hidden entries (atomic temporaries `.sys.a#.`, version
   directories `.sys.v#.`) are never treated as entries of the tree.
-- Files are written through XRootD with one writer per file, one write in
-  flight at a time, in order, by design: EOS up to 5.5.2 stores zero parity
-  for erasure-coded files written out of order. `--write-window` applies to
-  plain XRootD targets only. EOS computes the checksum while storing the
-  file.
+- Files are written through XRootD with up to `--write-window` writes in
+  flight (default 4). EOS up to 5.5.2 stores zero parity for an
+  erasure-coded file when the first storage node executes a write that does
+  not start where the previous one ended. eosmirror therefore writes each
+  file through one XrdCl file over one connection, from one thread, each
+  write starting where the previous one ended and only the last one short,
+  with XrdCl's write recovery off (which would resend writes over a new
+  connection) and its substreams at the default of one (writes always go
+  over the first). XrdCl sends a connection's requests in the order they
+  were submitted (one FIFO per substream, `XrdClStream.cc`), and a storage
+  node running with `xrootd.async off`, which EOS's packaged configuration
+  sets (`misc/etc/xrd.cf.fst`, `misc/etc/eos/config/fst/fst`), executes
+  them in that order. The client cannot tell a storage node that runs with
+  async on. Pipelined writes are thus safe for erasure-coded files only
+  while the FSTs keep EOS's default `xrootd.async off`; `--write-window 1`
+  opts out. Once a write has failed, nothing more is sent; the writes in
+  flight are waited for and the upload is discarded. EOS computes the
+  checksum while storing the file.
+- XrdCl reports the close of a file whose connection is gone as done
+  (`XrdClFileStateHandler.cc`, `Close`), while the storage node discards
+  the upload. A commit is therefore confirmed: by the checksum query where
+  it compares, else by a stat (size and mtime). When the file in place is
+  not the upload (it is the previous one, or none), the copy fails with an
+  I/O error and is retried; that file is never removed.
 - A POSIX target on an EOS FUSE mount (`fuse.eosxd` for the longest mount
   point above the target in `/proc/self/mountinfo`; more cautiously, a FUSE
   mount of unknown kind, or any FUSE file system where that table is

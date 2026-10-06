@@ -23,6 +23,7 @@ Source0:        %{name}-%{version}.tar.gz
 BuildRequires:  cmake >= 3.20
 BuildRequires:  make
 BuildRequires:  pkgconfig(sqlite3)
+BuildRequires:  pkgconfig(zlib)
 %if 0%{?suse_version} && 0%{?suse_version} < 1600
 # The default compiler of Leap 15 is gcc 7.
 BuildRequires:  gcc13-c++

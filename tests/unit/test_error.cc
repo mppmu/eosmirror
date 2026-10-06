@@ -13,6 +13,7 @@ TEST_CASE("errno mapping and transience") {
   CHECK(errno_error(EEXIST, "mkdir x").kind == ErrorKind::Exists);
   CHECK(errno_error(EACCES, "open x").kind == ErrorKind::Permission);
   CHECK(errno_error(EIO, "read x").kind == ErrorKind::IO);
+  CHECK(errno_error(ENODEV, "write x").kind == ErrorKind::IO);
   CHECK(errno_error(EXDEV, "rename x").kind == ErrorKind::Other);
   CHECK(errno_error(ENOSPC, "write x").kind == ErrorKind::NoSpace);
   CHECK(errno_error(EDQUOT, "write x").kind == ErrorKind::NoSpace);
@@ -29,6 +30,21 @@ TEST_CASE("errno mapping and transience") {
   Error e = errno_error(ENOENT, "stat /x");
   CHECK(e.describe() == "stat /x: No such file or directory");
   CHECK(Error{ErrorKind::Other, "plain"}.describe() == "plain");
+}
+
+TEST_CASE("failed uploads are retried unless space or permission is missing") {
+  for (int err : {ENODEV, ENOENT, EINVAL, EBADF, EXDEV, EIO}) {
+    INFO("errno ", err);
+    Error e = upload_error(errno_error(err, "write x"));
+    CHECK(is_transient(e.kind));
+    CHECK(e.errnum == err);
+    CHECK(e.message == "write x");
+  }
+  CHECK(upload_error(Error{ErrorKind::Other, "close x"}).kind == ErrorKind::IO);
+  CHECK(upload_error(Error{ErrorKind::Checksum, "x"}).kind == ErrorKind::Checksum);
+  CHECK(upload_error(errno_error(ENOSPC, "write x")).kind == ErrorKind::NoSpace);
+  CHECK(upload_error(errno_error(EDQUOT, "write x")).kind == ErrorKind::NoSpace);
+  CHECK(upload_error(errno_error(EACCES, "write x")).kind == ErrorKind::Permission);
 }
 
 TEST_CASE("Result carries a value or an error") {

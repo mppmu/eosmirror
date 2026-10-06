@@ -5,6 +5,7 @@
 #include <string>
 
 #include "eosmirror/endpoint.hh"
+#include "eosmirror/pipeline.hh"
 
 namespace XrdCl {
 class File;
@@ -15,10 +16,17 @@ class XRootDStatus;
 namespace eosmirror {
 
 struct XrdOptions {
-  // Writes of one file kept in flight before write() blocks. Storage nodes
-  // handle the requests of a connection one after another, so a deep
-  // window only queues.
-  int write_window = 2;
+  // Writes and reads of one file kept in flight, each of a chunk of the
+  // buffer size; xrdcp keeps 4 of 8 MiB. Writes are sent in offset order
+  // over one connection, which erasure-coded EOS files need (see
+  // docs/design.md).
+  int write_window = 4;
+  int read_window = 4;
+  // Files opened by a thread go over connections of the thread's own, to
+  // the redirector and to the storage nodes, rather than over the one
+  // connection per server that XrdCl otherwise shares among all files. Each
+  // file still uses one connection per server.
+  bool connection_per_thread = false;
 };
 
 // The URL without what may carry credentials: a password before the host and
@@ -69,6 +77,8 @@ class XrdEndpoint : public Endpoint {
   Result<std::unique_ptr<FileReader>> open_read(const RelPath& path) override;
   Result<std::unique_ptr<FileWriter>> open_write(const RelPath& path,
                                                  const CommitSpec& spec) override;
+  // Asks the server, if it computes checksums.
+  Result<Checksum> stored_checksum(const RelPath& path, const Entry& listed) override;
 
   // The absolute path on the server of a relative path, and its URL for
   // messages.
@@ -96,10 +106,9 @@ class XrdEndpoint : public Endpoint {
  protected:
   XrdEndpoint(const std::string& url, EndpointUrl parts, XrdOptions options);
 
-  // The URL for File::Open of a request path.
-  std::string open_url(const std::string& request_path) const {
-    return server_ + "/" + request_path;
-  }
+  // The URL for File::Open of a request path, with the calling thread's
+  // own connection where asked for.
+  std::string open_url(const std::string& request_path) const;
 
   std::string url_;     // as given, for display (display_url)
   std::string server_;  // root://[user[:password]@]host:port
@@ -108,6 +117,31 @@ class XrdEndpoint : public Endpoint {
   XrdOptions options_;
   Capabilities caps_;
   std::unique_ptr<XrdCl::FileSystem> fs_;
+};
+
+// A file written through one XrdCl::File with up to `window` writes in
+// flight, each at the end of the previous one (WriteWindow); the base of the
+// XRootD and EOS writers. The file must come from new_write_file().
+class XrdFileWriter : public FileWriter {
+ public:
+  // name: the file, for messages.
+  XrdFileWriter(std::unique_ptr<XrdCl::File> file, std::string name, int window);
+  ~XrdFileWriter() override;
+
+  Status write(Chunk chunk) override;
+
+ protected:
+  // Waits for the writes in flight; an error if one failed or if not size
+  // bytes were written.
+  Status complete(uint64_t size);
+  // Closes the file after complete(), which commits it on the server.
+  Status close();
+  // Waits for the writes in flight and closes the file, whatever fails.
+  void close_quietly();
+
+  std::unique_ptr<XrdCl::File> file_;
+  std::string name_;
+  WriteWindow writes_;
 };
 
 }  // namespace eosmirror

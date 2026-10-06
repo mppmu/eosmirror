@@ -5,8 +5,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <span>
 
+#include "eosmirror/buffer.hh"
 #include "eosmirror/cancellation.hh"
 #include "eosmirror/checksum.hh"
 #include "eosmirror/endpoint.hh"
@@ -20,7 +20,8 @@ struct CopyOptions {
   bool preserve_mode = true;
   bool preserve_mtime = true;
   bool verify = true;
-  bool require_verification = false;  // fail where the target cannot verify
+  bool require_verification = false;  // fail copies that neither side can verify
+  bool replaces = true;  // the target may have a file of that name already
   std::function<void(uint64_t)> on_chunk;  // called with the size of every chunk written
   // Source reads that take longer are logged, to tell source pauses from
   // target stalls.
@@ -30,17 +31,22 @@ struct CopyOptions {
 struct CopyOutcome {
   uint64_t bytes = 0;
   Checksum checksum;
-  bool verified = false;  // the target compared the stored data with the checksum
+  bool verified = false;  // a stored checksum was compared with the data
 };
 
-// Copies one file from source to target under the same relative path.
+// Copies one file from source to target under the same relative path, in
+// chunks of the pool's buffer size.
 //
 // The target gets the metadata and mtime the source had before reading. If
 // the source's size or mtime changed by the end, nothing is committed and the
-// error is Changed. Checksums are computed while streaming: the target's own
-// type if it computes one, else the source's, else adler32.
+// error is Changed. Nothing is created on the target before the first chunk
+// was read. Checksums are computed while streaming: the target's own type if
+// it computes one, else the source's, else adler32. The checksum the source
+// stores is compared too where the target computes none, or where the
+// source lists it anyway: `listed` is the source's entry from its listing,
+// whose checksum counts while its size and mtime are those of the file read.
 Result<CopyOutcome> copy_file(Endpoint& source, Endpoint& target, const RelPath& path,
-                              const CopyOptions& options, std::span<std::byte> buffer,
+                              const Entry& listed, const CopyOptions& options, BufferPool& pool,
                               const Cancellation& cancel);
 
 }  // namespace eosmirror

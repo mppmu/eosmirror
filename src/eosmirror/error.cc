@@ -59,6 +59,7 @@ Error errno_error(int err, std::string_view context) {
     case ENOSPC:
     case EDQUOT: kind = ErrorKind::NoSpace; break;
     case EIO:
+    case ENODEV:  // kXR_FSError, a storage node's failure without an errno of its own
     case EAGAIN:
     case EINTR:
     case ESTALE:
@@ -71,6 +72,12 @@ Error errno_error(int err, std::string_view context) {
     default: kind = ErrorKind::Other; break;
   }
   return Error{kind, std::string(context), err};
+}
+
+Error upload_error(Error e) {
+  if (e.kind != ErrorKind::NoSpace && e.kind != ErrorKind::Permission && !is_transient(e.kind))
+    e.kind = ErrorKind::IO;
+  return e;
 }
 
 }  // namespace eosmirror

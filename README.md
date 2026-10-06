@@ -84,6 +84,14 @@ the run refuses to start otherwise unless `--no-owner` is given. Plain
 XRootD servers store no mtimes and have no symlinks, so against them files
 are compared by size only and symlinks are skipped (both are reported).
 
+Each file is copied in chunks of `--buffer-size` (8 MiB) with up to 4 reads
+and 4 writes in flight (`--read-window`, `--write-window`), over one
+connection per server. Writes go out in order, each where the previous one
+ended. This is safe for erasure-coded EOS files only while the storage
+nodes (FSTs) keep EOS's default `xrootd.async off`; `--write-window 1` opts
+out. Files read from EOS or from an XRootD server that computes checksums
+are verified against the stored checksum when the target computes none.
+
 On a terminal, `sync` shows a live display: counters, the write rate, bars
 for the transfer slots in use and the backlog, and one bar per file being
 copied. `--progress SEC` prints plain progress lines instead (for logs) and
@@ -98,8 +106,9 @@ when interrupted.
 
 ## Building
 
-Requires a C++20 compiler (gcc 11 or newer), CMake 3.20 or newer and SQLite 3.
-The XRootD client library (XrdCl) is needed for XRootD and EOS endpoints.
+Requires a C++20 compiler (gcc 11 or newer), CMake 3.20 or newer, SQLite 3
+and zlib. The XRootD client library (XrdCl) is needed for XRootD and EOS
+endpoints.
 
 ```
 cmake -S . -B build

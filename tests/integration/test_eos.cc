@@ -362,6 +362,16 @@ TEST_CASE("eos endpoint: aborted uploads leave the previous file as it was") {
     CHECK(short_commit.error().kind == ErrorKind::Changed);
     CHECK(get(ep, "f") == old);
 
+    // An abort with a full window of writes in flight.
+    auto w4 = ep.open_write("f", spec);
+    REQUIRE(w4.ok());
+    for (size_t off = 0; off < 2 * 1024 * 1024; off += 512 * 1024)
+      REQUIRE(
+          w4.value()->write(off, bytes(std::string_view(content).substr(off, 512 * 1024))).ok());
+    w4.value()->abort();
+    CHECK(get(ep, "f") == old);
+    CHECK(must(ep.stat("f")).mtime == Timespec{1500000000, 1});
+
     // A copy that is cancelled halfway.
     TempDir tmp;
     tmp.write_file("f", content);
@@ -370,13 +380,153 @@ TEST_CASE("eos endpoint: aborted uploads leave the previous file as it was") {
     CopyOptions options;
     options.preserve_owner = false;
     options.on_chunk = [&](uint64_t) { cancel.request(); };
-    std::vector<std::byte> buffer(256 * 1024);
-    auto copied = copy_file(src, ep, "f", options, buffer, cancel);
+    BufferPool pool(256 * 1024);
+    auto copied = copy_file(src, ep, "f", must(src.stat("f")), options, pool, cancel);
     REQUIRE_FALSE(copied.ok());
     CHECK(copied.error().kind == ErrorKind::Cancelled);
     CHECK(get(ep, "f") == old);
     CHECK(ep.list("").value().size() == 1);
   }
+}
+
+TEST_CASE("eos endpoint: pipelined uploads and downloads of many chunks") {
+  if (!base_url()) return;
+  std::string content = pattern(5 * 1024 * 1024 + 17);
+  TempDir tmp;
+  tmp.write_file("src/f", content);
+  PosixEndpoint src(tmp.sub("src"));
+  for (const char* layout : {"raid6", "replica2"}) {
+    for (int window : {4, 1}) {
+      INFO("layout ", layout, ", window ", window);
+      RemoteDir dir("pipelined", layout);
+      XrdOptions xo;
+      xo.write_window = window;
+      xo.read_window = window;
+      auto ep = EosEndpoint::create(dir.url, xo);
+      REQUIRE(ep.ok());
+      Cancellation cancel;
+      CopyOptions options;
+      options.preserve_owner = false;
+      BufferPool pool(64 * 1024);  // 81 chunks
+      auto up = copy_file(src, *ep.value(), "f", must(src.stat("f")), options, pool, cancel);
+      REQUIRE(up.ok());
+      CHECK(up.value().verified);
+      CHECK(up.value().bytes == content.size());
+      CHECK(get(*ep.value(), "f") == content);
+      CHECK((ep.value()->query_checksum(ep.value()->absolute("f")).value() == adler(content)));
+
+      // And back, verified against the checksum the listing gives.
+      auto listed = ep.value()->list("");
+      REQUIRE(listed.ok());
+      REQUIRE(find(listed.value(), "f"));
+      CHECK((find(listed.value(), "f")->checksum == adler(content)));
+      std::string back_dir = std::string("back-") + layout + std::to_string(window);
+      PosixEndpoint back(tmp.sub(back_dir));
+      REQUIRE(back.mkdir("", 0755).ok());
+      const Entry& entry = *find(listed.value(), "f");
+      auto down = copy_file(*ep.value(), back, "f", entry, options, pool, cancel);
+      REQUIRE(down.ok());
+      CHECK(down.value().verified);
+      CHECK(tmp.read_file(back_dir + "/f") == content);
+      CHECK(pool.available() == pool.allocated());
+      CHECK(pool.allocated() <= static_cast<size_t>(window) + 2);
+    }
+  }
+}
+
+TEST_CASE("eos endpoint: an upload whose file disappears fails once and leaves nothing") {
+  if (!base_url()) return;
+  RemoteDir dir("vanish");
+  EosEndpoint& ep = *dir.endpoint;
+  std::string content = pattern(4 * 1024 * 1024);
+  TempDir tmp;
+  tmp.write_file("f", content);
+  PosixEndpoint src(tmp.path());
+  CopyOptions options;
+  options.preserve_owner = false;
+  int chunks = 0;
+  bool removed = false;
+  options.on_chunk = [&](uint64_t) {
+    if (++chunks != 3) return;
+    // The atomic upload's hidden file goes behind the writer's back.
+    auto listed = ep.list("");
+    REQUIRE(listed.ok());
+    for (const Entry& e : listed.value())
+      if (e.name.starts_with(".sys.a#.")) removed = ep.remove(e.name, EntryType::File).ok();
+  };
+  BufferPool pool(256 * 1024);
+  Cancellation cancel;
+  StderrCapture err;
+  auto copied = copy_file(src, ep, "f", must(src.stat("f")), options, pool, cancel);
+  CHECK(removed);
+  REQUIRE_FALSE(copied.ok());
+  INFO("error: ", copied.error().describe());
+  CHECK(is_transient(copied.error().kind));
+  CHECK(ep.stat("f").error().kind == ErrorKind::NotFound);
+  CHECK(ep.list("").value().empty());
+  CHECK(pool.available() == pool.allocated());
+}
+
+TEST_CASE("EOS to FS: downloads are verified, and a read that fails midway leaves nothing") {
+  if (!base_url()) return;
+  RemoteDir dir("download");
+  EosEndpoint& ep = *dir.endpoint;
+  std::string big = pattern(3 * 1024 * 1024 + 5);
+  put(ep, "a", big);
+  put(ep, "b", "small");
+  REQUIRE(ep.mkdir("crc", 0755).ok());
+  auto attr = ep.proc("mgm.cmd=attr&mgm.subcmd=set&mgm.attr.key=sys.forced.checksum"
+                      "&mgm.attr.value=crc32c&mgm.path=" + eos_encoded_path(ep.absolute("crc")) +
+                      "&eos.encodepath=1");
+  REQUIRE(attr.ok());
+  REQUIRE(attr.value().retc == 0);
+  put(ep, "crc/bad", big);
+  // The crc32c checksum relabelled as adler32. The storage node finds the
+  // mismatch itself: it fails the read that reaches the end of the file, and
+  // later opens.
+  auto relabel = ep.proc("mgm.cmd=file&mgm.subcmd=layout&mgm.path=" + ep.absolute("crc/bad") +
+                         "&mgm.file.layout.checksum=adler");
+  REQUIRE(relabel.ok());
+  INFO("file layout: ", relabel.value().out, relabel.value().err);
+  REQUIRE(relabel.value().retc == 0);
+  auto listed = ep.list("crc");
+  REQUIRE(listed.ok());
+  const Entry* bad = find(listed.value(), "bad");
+  REQUIRE(bad);
+  REQUIRE(bad->checksum.type == ChecksumType::Adler32);
+  REQUIRE(bad->checksum != adler(big));
+
+  TempDir tmp;
+  PosixEndpoint dst(tmp.sub("dst"));
+  REQUIRE(dst.mkdir("", 0755).ok());
+  REQUIRE(dst.mkdir("crc", 0755).ok());
+  CopyOptions copy_options;
+  copy_options.preserve_owner = false;
+  int chunks = 0;
+  copy_options.on_chunk = [&](uint64_t) { ++chunks; };
+  BufferPool pool(64 * 1024);
+  Cancellation cancel;
+  auto failed = copy_file(ep, dst, "crc/bad", *bad, copy_options, pool, cancel);
+  REQUIRE_FALSE(failed.ok());
+  INFO("error: ", failed.error().describe());
+  CHECK(is_transient(failed.error().kind));
+  CHECK(chunks > 0);  // midway
+  CHECK(dst.list("crc").value().empty());  // neither the file nor a temporary
+  CHECK(pool.available() == pool.allocated());
+
+  // A sync verifies what it downloads, and reports the broken file once.
+  SyncOptions options = test_options();
+  options.preserve_owner = false;
+  Report r;
+  Engine engine(ep, dst, options, r, nullptr, cancel);
+  REQUIRE(engine.run().ok());
+  CHECK(r.stats.files_copied == 2);
+  CHECK(r.stats.files_unverified == 0);
+  REQUIRE(r.stats.failures == 1);
+  CHECK(r.failures()[0].path == "crc/bad");
+  CHECK(tmp.read_file("dst/a") == big);
+  CHECK(tmp.read_file("dst/b") == "small");
+  CHECK(dst.list("crc").value().empty());
 }
 
 TEST_CASE("eos endpoint: roots reached through symlinks") {
@@ -752,6 +902,7 @@ TEST_CASE("FS to EOS and back, replica and erasure coded layouts") {
     Engine restore(dst, back, options, r4, nullptr, cancel);
     REQUIRE(restore.run().ok());
     CHECK(r4.stats.files_copied == 4);
+    CHECK(r4.stats.files_unverified == 0);
     CHECK(r4.stats.symlinks_created == 2);
     CHECK(r4.stats.failures == 0);
     CHECK(tmp.read_file("back/a.txt") == "hello world");
@@ -766,6 +917,36 @@ TEST_CASE("FS to EOS and back, replica and erasure coded layouts") {
     CHECK(r5.stats.files_copied == 0);
     CHECK(r5.stats.metadata_fixed == 0);
   }
+}
+
+TEST_CASE("FS to EOS and back with connections of each transfer's own") {
+  if (!base_url()) return;
+  TempDir tmp;
+  for (int i = 0; i < 6; ++i) tmp.write_file("src/f" + std::to_string(i), pattern(300000 + i));
+  PosixEndpoint src(tmp.sub("src"));
+  RemoteDir dir("connections");
+  XrdOptions xo;
+  xo.connection_per_thread = true;
+  auto dst = EosEndpoint::create(dir.url, xo);
+  REQUIRE(dst.ok());
+  SyncOptions options = test_options();
+  options.preserve_owner = false;
+  Cancellation cancel;
+  Report r;
+  Engine engine(src, *dst.value(), options, r, nullptr, cancel);
+  REQUIRE(engine.run().ok());
+  CHECK(r.stats.files_copied == 6);
+  CHECK(r.stats.files_unverified == 0);
+  CHECK(r.stats.failures == 0);
+
+  PosixEndpoint back(tmp.sub("back"));
+  Report r2;
+  Engine restore(*dst.value(), back, options, r2, nullptr, cancel);
+  REQUIRE(restore.run().ok());
+  CHECK(r2.stats.files_copied == 6);
+  CHECK(r2.stats.files_unverified == 0);
+  for (int i = 0; i < 6; ++i)
+    CHECK(tmp.read_file("back/f" + std::to_string(i)) == pattern(300000 + i));
 }
 
 TEST_CASE("EOS to EOS between directories") {
@@ -798,6 +979,18 @@ TEST_CASE("EOS to EOS between directories") {
   CHECK(must(b.endpoint->stat("f")).mtime == Timespec{1600000000, 1});
   CHECK((b.endpoint->query_checksum(b.endpoint->absolute("f")).value() == spec.checksum));
   CHECK(must(b.endpoint->stat("d/l")).link_target == "../f");
+
+  // Into a directory without checksums, the source's listed checksum
+  // verifies the copy, which meets --require-checksum.
+  RemoteDir c("eos2eos-nochecksum", "nochecksum");
+  options.require_checksum = true;
+  Report r2;
+  Engine strict(*a.endpoint, *c.endpoint, options, r2, nullptr, cancel);
+  REQUIRE(strict.run().ok());
+  CHECK(r2.stats.files_copied == 1);
+  CHECK(r2.stats.files_unverified == 0);
+  CHECK(r2.stats.failures == 0);
+  CHECK(get(*c.endpoint, "f") == content);
 }
 
 TEST_CASE("selftest against EOS") {

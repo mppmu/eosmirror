@@ -9,11 +9,13 @@
 #include <XProtocol/XProtocol.hh>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -79,12 +81,40 @@ Result<Checksum> parse_checksum(const std::string& text, const std::string& cont
   return Checksum{*parsed, value};
 }
 
+// An XrdCl response handler that passes the status and response to a
+// function, from XrdCl's thread, and deletes itself.
+class Callback : public XrdCl::ResponseHandler {
+ public:
+  using Function = std::function<void(const XrdCl::XRootDStatus&, XrdCl::AnyObject*)>;
+  explicit Callback(Function f) : f_(std::move(f)) {}
+
+  void HandleResponse(XrdCl::XRootDStatus* status, XrdCl::AnyObject* response) override {
+    std::unique_ptr<XrdCl::XRootDStatus> owned_status(status);
+    std::unique_ptr<XrdCl::AnyObject> owned_response(response);
+    Function f = std::move(f_);
+    delete this;
+    f(*owned_status, owned_response.get());
+  }
+
+ private:
+  Function f_;
+};
+
+// Reads with up to `window` chunk reads in flight (ReadAhead). XrdCl may
+// call a read's handler after the file is closed, so the reads in flight are
+// waited for first.
 class XrdReader : public FileReader {
  public:
-  XrdReader(std::unique_ptr<XrdCl::File> file, std::string url)
-      : file_(std::move(file)), url_(std::move(url)) {}
+  XrdReader(std::unique_ptr<XrdCl::File> file, std::string url, int window)
+      : file_(std::move(file)),
+        url_(std::move(url)),
+        ahead_(static_cast<size_t>(std::max(window, 1)),
+               [this](uint64_t offset, std::span<std::byte> buf, ReadAhead::Done done) {
+                 return submit(offset, buf, std::move(done));
+               }) {}
 
   ~XrdReader() override {
+    ahead_.stop();
     XrdCl::XRootDStatus st = file_->Close();
     (void)st;
   }
@@ -102,6 +132,10 @@ class XrdReader : public FileReader {
     return done;
   }
 
+  Result<Chunk> read_chunk(uint64_t offset, uint64_t end, BufferPool& pool) override {
+    return ahead_.next(offset, end, pool);
+  }
+
   Result<Entry> stat() override {
     XrdCl::StatInfo* info = nullptr;
     XrdCl::XRootDStatus st = file_->Stat(/*force=*/true, info);
@@ -111,52 +145,40 @@ class XrdReader : public FileReader {
   }
 
  private:
+  Status submit(uint64_t offset, std::span<std::byte> buf, ReadAhead::Done done) {
+    auto* handler = new Callback([this, done = std::move(done)](const XrdCl::XRootDStatus& st,
+                                                                XrdCl::AnyObject* response) {
+      if (!st.IsOK()) return done(XrdEndpoint::xrd_error(st, "read " + url_));
+      XrdCl::ChunkInfo* info = nullptr;
+      if (response) response->Get(info);
+      done(info ? size_t{info->GetLength()} : size_t{0});
+    });
+    XrdCl::XRootDStatus st =
+        file_->Read(offset, static_cast<uint32_t>(buf.size()), buf.data(), handler);
+    if (!st.IsOK()) {
+      delete handler;  // XrdCl calls it only for reads it accepted
+      return XrdEndpoint::xrd_error(st, "read " + url_);
+    }
+    return {};
+  }
+
   std::unique_ptr<XrdCl::File> file_;
   std::string url_;
+  ReadAhead ahead_;
 };
 
-// Writes are issued asynchronously with up to `window` in flight, each from
-// its own copy of the data; commit() waits for all of them, closes, verifies
-// the stored checksum and renames the file into place.
-class XrdWriter : public FileWriter {
+// Writes to a temporary name; commit() waits for the writes, closes,
+// verifies the stored checksum and renames the file into place.
+class XrdWriter : public XrdFileWriter {
  public:
   XrdWriter(XrdEndpoint& ep, std::unique_ptr<XrdCl::File> file, std::string temp_abs,
             std::string final_abs, int window)
-      : ep_(ep),
-        file_(std::move(file)),
+      : XrdFileWriter(std::move(file), temp_abs, window),
+        ep_(ep),
         temp_(std::move(temp_abs)),
-        final_(std::move(final_abs)),
-        buffers_(static_cast<size_t>(std::max(window, 1))) {
-    for (size_t i = 0; i < buffers_.size(); ++i) free_.push_back(i);
-  }
+        final_(std::move(final_abs)) {}
 
   ~XrdWriter() override { abort(); }
-
-  Status write(uint64_t offset, std::span<const std::byte> data) override {
-    if (offset != written_) return Error{ErrorKind::Other, "non-sequential write to " + temp_};
-    size_t index;
-    {
-      std::unique_lock lock(mutex_);
-      cv_.wait(lock, [&] { return !free_.empty(); });
-      if (error_) return *error_;
-      index = free_.back();
-      free_.pop_back();
-      ++in_flight_;
-    }
-    buffers_[index].assign(data.begin(), data.end());
-    auto* pending = new Pending{this, index};
-    XrdCl::XRootDStatus st = file_->Write(offset, static_cast<uint32_t>(data.size()),
-                                          buffers_[index].data(), pending);
-    if (!st.IsOK()) {
-      delete pending;  // XrdCl takes the handler only when the request is sent
-      std::lock_guard lock(mutex_);
-      free_.push_back(index);
-      --in_flight_;
-      return XrdEndpoint::xrd_error(st, "write " + temp_);
-    }
-    written_ += data.size();
-    return {};
-  }
 
   Result<CommitInfo> commit(const CommitSpec& spec) override {
     Status s = finish(spec);
@@ -168,12 +190,7 @@ class XrdWriter : public FileWriter {
   }
 
   void abort() override {
-    if (file_) {
-      drain();
-      XrdCl::XRootDStatus st = file_->Close();
-      (void)st;
-      file_.reset();
-    }
+    close_quietly();
     if (!temp_exists_) return;
     temp_exists_ = false;
     Status removed = ep_.remove_abs(temp_);
@@ -182,54 +199,9 @@ class XrdWriter : public FileWriter {
   }
 
  private:
-  struct Pending : XrdCl::ResponseHandler {
-    XrdWriter* writer;
-    size_t index;
-    Pending(XrdWriter* w, size_t i) : writer(w), index(i) {}
-    void HandleResponse(XrdCl::XRootDStatus* status, XrdCl::AnyObject* response) override {
-      writer->completed(index, *status);
-      delete status;
-      delete response;
-      delete this;
-    }
-  };
-
-  void completed(size_t index, const XrdCl::XRootDStatus& st) {
-    std::lock_guard lock(mutex_);
-    if (!st.IsOK() && !error_) error_ = stalled(XrdEndpoint::xrd_error(st, "write " + temp_));
-    if (st.IsOK()) last_ack_ = std::chrono::steady_clock::now();
-    free_.push_back(index);
-    --in_flight_;
-    cv_.notify_all();
-  }
-
-  // Adds how long ago the server last acknowledged a write, which tells a
-  // stalled connection from an immediate refusal.
-  Error stalled(Error e) const {
-    auto secs = std::chrono::duration_cast<std::chrono::seconds>(
-                    std::chrono::steady_clock::now() - last_ack_)
-                    .count();
-    e.message += " (last write acknowledged " + std::to_string(secs) + " s earlier)";
-    return e;
-  }
-
-  void drain() {
-    std::unique_lock lock(mutex_);
-    cv_.wait(lock, [&] { return in_flight_ == 0; });
-  }
-
   Status finish(const CommitSpec& spec) {
-    drain();
-    {
-      std::lock_guard lock(mutex_);
-      if (error_) return *error_;
-    }
-    if (written_ != spec.size)
-      return Error{ErrorKind::Changed, "wrote " + std::to_string(written_) + " bytes to " + temp_ +
-                                           ", expected " + std::to_string(spec.size)};
-    XrdCl::XRootDStatus st = file_->Close();
-    file_.reset();
-    if (!st.IsOK()) return stalled(XrdEndpoint::xrd_error(st, "close " + temp_));
+    if (Status s = complete(spec.size); !s.ok()) return s;
+    if (Status s = close(); !s.ok()) return s;
     if (spec.checksum.type != ChecksumType::None &&
         spec.checksum.type == ep_.capabilities().checksum) {
       auto stored = ep_.query_checksum(temp_);
@@ -250,19 +222,10 @@ class XrdWriter : public FileWriter {
   }
 
   XrdEndpoint& ep_;
-  std::unique_ptr<XrdCl::File> file_;
   std::string temp_;
   std::string final_;
-  std::vector<std::vector<std::byte>> buffers_;
-  std::vector<size_t> free_;
-  std::mutex mutex_;
-  std::condition_variable cv_;
-  int in_flight_ = 0;
-  std::optional<Error> error_;
-  uint64_t written_ = 0;
   bool temp_exists_ = true;
   bool verified_ = false;
-  std::chrono::steady_clock::time_point last_ack_ = std::chrono::steady_clock::now();
 };
 
 }  // namespace
@@ -366,6 +329,66 @@ std::unique_ptr<XrdCl::File> XrdEndpoint::new_write_file() {
   return file;
 }
 
+// ---- XrdFileWriter -------------------------------------------------------------------
+
+XrdFileWriter::XrdFileWriter(std::unique_ptr<XrdCl::File> file, std::string name, int window)
+    : file_(std::move(file)),
+      name_(std::move(name)),
+      writes_(static_cast<size_t>(std::max(window, 1)),
+              [this](const Chunk& chunk, WriteWindow::Done done) -> Status {
+                auto* handler = new Callback(
+                    [this, done = std::move(done)](const XrdCl::XRootDStatus& st,
+                                                   XrdCl::AnyObject*) {
+                      if (!st.IsOK())
+                        return done(upload_error(XrdEndpoint::xrd_error(st, "write " + name_)));
+                      done({});
+                    });
+                XrdCl::XRootDStatus st =
+                    file_->Write(chunk.offset, static_cast<uint32_t>(chunk.size),
+                                 chunk.buffer.span().data(), handler);
+                if (!st.IsOK()) {
+                  delete handler;  // XrdCl calls it only for writes it accepted
+                  return upload_error(XrdEndpoint::xrd_error(st, "write " + name_));
+                }
+                return {};
+              },
+              name_) {}
+
+XrdFileWriter::~XrdFileWriter() = default;
+
+Status XrdFileWriter::write(Chunk chunk) {
+  if (!file_) return Error{ErrorKind::Other, "write to " + name_ + " after its close"};
+  return writes_.write(std::move(chunk));
+}
+
+Status XrdFileWriter::complete(uint64_t size) {
+  if (!file_) return Error{ErrorKind::Other, "commit of " + name_ + " without an open file"};
+  if (Status drained = writes_.drain(); !drained.ok()) return drained;
+  if (writes_.written() != size)
+    return Error{ErrorKind::Changed, "wrote " + std::to_string(writes_.written()) + " bytes to " +
+                                         name_ + ", expected " + std::to_string(size)};
+  return {};
+}
+
+Status XrdFileWriter::close() {
+  XrdCl::XRootDStatus st = file_->Close();
+  file_.reset();
+  if (!st.IsOK())
+    return upload_error(writes_.stalled(XrdEndpoint::xrd_error(st, "close " + name_)));
+  return {};
+}
+
+void XrdFileWriter::close_quietly() {
+  if (!file_) return;
+  Status drained = writes_.drain();
+  (void)drained;
+  XrdCl::XRootDStatus st = file_->Close();
+  (void)st;
+  file_.reset();
+}
+
+// ---- XrdEndpoint ---------------------------------------------------------------------
+
 Result<std::unique_ptr<XrdEndpoint>> XrdEndpoint::create(const std::string& url,
                                                          XrdOptions options) {
   auto parts = parse_endpoint_url(url);
@@ -415,6 +438,16 @@ XrdEndpoint::XrdEndpoint(const std::string& url, EndpointUrl parts, XrdOptions o
 }
 
 XrdEndpoint::~XrdEndpoint() = default;
+
+std::string XrdEndpoint::open_url(const std::string& request_path) const {
+  std::string url = server_ + "/" + request_path;
+  if (!options_.connection_per_thread) return url;
+  // XrdCl keys its connections by host and this parameter (URL::GetChannelId),
+  // keeps it for redirections and does not send it to servers.
+  static std::atomic<int> threads{0};
+  thread_local int thread = threads++;
+  return with_cgi(std::move(url), "xrdcl.intent=eosmirror" + std::to_string(thread));
+}
 
 bool XrdEndpoint::is_temporary(std::string_view name) const {
   return is_temporary_name(name);
@@ -553,6 +586,11 @@ Result<Checksum> XrdEndpoint::query_checksum(const std::string& abs) {
   return parse_checksum(response ? response->ToString() : "", url_of(abs));
 }
 
+Result<Checksum> XrdEndpoint::stored_checksum(const RelPath& path, const Entry&) {
+  if (caps_.checksum == ChecksumType::None) return Checksum{};
+  return query_checksum(absolute(path));
+}
+
 Result<std::unique_ptr<FileReader>> XrdEndpoint::open_read(const RelPath& path) {
   std::string abs = absolute(path);
   auto request = request_path(abs);
@@ -560,7 +598,8 @@ Result<std::unique_ptr<FileReader>> XrdEndpoint::open_read(const RelPath& path) 
   auto file = std::make_unique<XrdCl::File>();
   XrdCl::XRootDStatus st = file->Open(open_url(request.value()), XrdCl::OpenFlags::Read);
   if (!st.IsOK()) return xrd_error(st, "open " + url_of(abs));
-  return std::unique_ptr<FileReader>(new XrdReader(std::move(file), url_of(abs)));
+  return std::unique_ptr<FileReader>(
+      new XrdReader(std::move(file), url_of(abs), options_.read_window));
 }
 
 Result<std::unique_ptr<FileWriter>> XrdEndpoint::open_write(const RelPath& path,

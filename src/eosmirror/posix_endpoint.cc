@@ -119,13 +119,14 @@ class PosixWriter : public FileWriter {
     if (fd_ >= 0) abort();
   }
 
-  Status write(uint64_t offset, std::span<const std::byte> data) override {
-    if (offset != written_)
+  Status write(Chunk chunk) override {
+    if (chunk.offset != written_)
       return Error{ErrorKind::Other, "non-sequential write to " + temp_};
+    auto data = chunk.data();
     size_t done = 0;
     while (done < data.size()) {
       ssize_t n = pwrite(fd_, data.data() + done, data.size() - done,
-                         static_cast<off_t>(offset + done));
+                         static_cast<off_t>(chunk.offset + done));
       if (n < 0) {
         if (errno == EINTR) continue;
         return errno_error(errno, "write " + temp_);

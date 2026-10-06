@@ -2,6 +2,7 @@
 configure_file(eosmirror/version.hh.in ${CMAKE_CURRENT_BINARY_DIR}/generated/eosmirror/version.hh @ONLY)
 
 add_library(eosmirror_core STATIC
+  eosmirror/buffer.cc
   eosmirror/checksum.cc
   eosmirror/cli.cc
   eosmirror/copy.cc
@@ -10,6 +11,7 @@ add_library(eosmirror_core STATIC
   eosmirror/error.cc
   eosmirror/journal.cc
   eosmirror/log.cc
+  eosmirror/pipeline.cc
   eosmirror/posix_endpoint.cc
   eosmirror/progress_display.cc
   eosmirror/report.cc
@@ -17,7 +19,7 @@ add_library(eosmirror_core STATIC
   eosmirror/types.cc
 )
 target_include_directories(eosmirror_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/generated)
-target_link_libraries(eosmirror_core PUBLIC Threads::Threads SQLite::SQLite3)
+target_link_libraries(eosmirror_core PUBLIC Threads::Threads SQLite::SQLite3 ZLIB::ZLIB)
 
 if(EOSMIRROR_WITH_XROOTD)
   target_sources(eosmirror_core PRIVATE eosmirror/xrootd_endpoint.cc eosmirror/eos_endpoint.cc)

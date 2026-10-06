@@ -240,10 +240,10 @@ class FakeEndpoint : public eosmirror::Endpoint {
    public:
     Writer(FakeEndpoint& ep, RelPath path, eosmirror::CommitSpec spec)
         : ep_(ep), path_(std::move(path)), spec_(std::move(spec)) {}
-    Status write(uint64_t offset, std::span<const std::byte> data) override {
+    Status write(eosmirror::Chunk chunk) override {
       if (auto err = ep_.check("write", path_)) return *err;
-      if (offset != content_.size()) return Error{ErrorKind::Other, "non-sequential write"};
-      content_.append(reinterpret_cast<const char*>(data.data()), data.size());
+      if (chunk.offset != content_.size()) return Error{ErrorKind::Other, "non-sequential write"};
+      content_.append(reinterpret_cast<const char*>(chunk.data().data()), chunk.size);
       return {};
     }
     Result<eosmirror::CommitInfo> commit(const eosmirror::CommitSpec& spec) override {

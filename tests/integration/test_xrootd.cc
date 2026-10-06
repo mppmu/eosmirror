@@ -4,6 +4,7 @@
 // a writable directory on it, e.g. root://xrootd:1094//data; the tests use a
 // fresh subdirectory of it, and the fixtures that xrootd-server.sh creates.
 #include <XrdCl/XrdClDefaultEnv.hh>
+#include <XrdCl/XrdClFileSystem.hh>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -12,6 +13,7 @@
 #include <filesystem>
 
 #include "doctest/doctest.h"
+#include "eosmirror/copy.hh"
 #include "eosmirror/endpoints.hh"
 #include "eosmirror/engine.hh"
 #include "eosmirror/eos_endpoint.hh"
@@ -212,10 +214,67 @@ TEST_CASE("FS to xrootd and back") {
   Engine restore(dst, back, test_options(), r4, nullptr, cancel);
   REQUIRE(restore.run().ok());
   CHECK(r4.stats.files_copied == 4);
+  CHECK(r4.stats.files_unverified == 0);  // against the server's checksums
   CHECK(r4.stats.failures == 0);
   CHECK(tmp.read_file("back/a.txt") == "hello world");
   CHECK(tmp.read_file("back/big.bin") == tmp.read_file("src/big.bin"));
   CHECK(tmp.read_file("back/sub/nested/file") == pattern(1000));
+}
+
+TEST_CASE("xrootd to FS: pipelined reads of many chunks, and a file cut short meanwhile") {
+  if (!base_url()) return;
+  RemoteDir dir("reads");
+  std::string content = pattern(3 * 1024 * 1024 + 17);
+  CommitSpec spec;
+  spec.size = content.size();
+  Hasher hasher(ChecksumType::Adler32);
+  hasher.update(bytes(content));
+  spec.checksum = hasher.finish();
+  auto writer = dir.endpoint->open_write("f", spec);
+  REQUIRE(writer.ok());
+  REQUIRE(writer.value()->write(0, bytes(content)).ok());
+  REQUIRE(writer.value()->commit(spec).ok());
+
+  TempDir tmp;
+  Cancellation cancel;
+  CopyOptions options;
+  options.preserve_owner = false;
+  options.preserve_mtime = false;
+  BufferPool pool(64 * 1024);  // 49 chunks
+  for (int window : {1, 4}) {
+    INFO("window ", window);
+    XrdOptions xo;
+    xo.read_window = window;
+    auto src = XrdEndpoint::create(dir.url, xo);
+    REQUIRE(src.ok());
+    PosixEndpoint dst(tmp.sub("w" + std::to_string(window)));
+    REQUIRE(dst.mkdir("", 0755).ok());
+    auto copied = copy_file(*src.value(), dst, "f", src.value()->stat("f").value(), options, pool,
+                            cancel);
+    REQUIRE(copied.ok());
+    CHECK(copied.value().verified);  // against the server's checksum
+    CHECK(tmp.read_file("w" + std::to_string(window) + "/f") == content);
+  }
+  CHECK(pool.available() == pool.allocated());
+  CHECK(pool.allocated() <= 4 + 2);
+
+  // Truncated on the server while it is read ahead: the copy fails once,
+  // and nothing is left.
+  auto parts = parse_endpoint_url(dir.url).value();
+  XrdCl::FileSystem fs{XrdCl::URL(parts.server + "/")};
+  int chunks = 0;
+  options.on_chunk = [&](uint64_t) {
+    if (++chunks == 2) REQUIRE(fs.Truncate(parts.path + "/f", 1024 * 1024).IsOK());
+  };
+  PosixEndpoint dst(tmp.sub("cut"));
+  REQUIRE(dst.mkdir("", 0755).ok());
+  auto cut = copy_file(*dir.endpoint, dst, "f", dir.endpoint->stat("f").value(), options, pool,
+                       cancel);
+  REQUIRE_FALSE(cut.ok());
+  CHECK(cut.error().kind == ErrorKind::Changed);
+  CHECK(cut.error().message.find("shrank") != std::string::npos);
+  CHECK(dst.list("").value().empty());
+  CHECK(pool.available() == pool.allocated());
 }
 
 TEST_CASE("selftest against xrootd") {

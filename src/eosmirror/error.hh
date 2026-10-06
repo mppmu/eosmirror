@@ -45,6 +45,11 @@ struct Error {
 // Builds an error from an errno value, with the context as message.
 Error errno_error(int err, std::string_view context);
 
+// The error of a failed write or close of an upload. The target then holds
+// no file, so copying again is right unless space or permission is missing:
+// errors of other kinds become transient I/O errors.
+Error upload_error(Error e);
+
 // The result of an operation: either a value or an error.
 template <class T>
 class [[nodiscard]] Result {

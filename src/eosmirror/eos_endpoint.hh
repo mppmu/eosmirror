@@ -38,6 +38,8 @@ class EosEndpoint : public XrdEndpoint {
   Result<std::unique_ptr<FileReader>> open_read(const RelPath& path) override;
   Result<std::unique_ptr<FileWriter>> open_write(const RelPath& path,
                                                  const CommitSpec& spec) override;
+  // The checksum from the listing, without asking.
+  Result<Checksum> stored_checksum(const RelPath& path, const Entry& listed) override;
 
   // Stats an absolute path without following a final symlink; the result is
   // named by the last path component.
@@ -46,6 +48,10 @@ class EosEndpoint : public XrdEndpoint {
   // Sets the metadata of an absolute path through MGM commands.
   Status set_metadata_abs(const std::string& abs_path, const Entry& metadata, MetaFields fields,
                           bool is_symlink);
+
+  // Runs an MGM fsctl command (mgm.pcmd=<command><args>) on an absolute path,
+  // as a single query; it replies "<command>: retc=<errno>".
+  Status fsctl(const std::string& abs_path, const std::string& command, const std::string& args);
 
   struct ProcResult {
     int retc = 0;
