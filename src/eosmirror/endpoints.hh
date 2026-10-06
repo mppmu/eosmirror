@@ -7,13 +7,15 @@
 #include "eosmirror/endpoint.hh"
 #include "eosmirror/error.hh"
 #include "eosmirror/posix_endpoint.hh"
+#include "eosmirror/xrootd_endpoint.hh"
 
 namespace eosmirror {
 
-// Creates the endpoint for a command line argument: a local path, or a
-// URL such as root://host//path for XRootD and EOS.
+// Settings for the endpoints a command line argument can name: a local
+// path, or a URL such as root://host//path for XRootD and EOS.
 struct EndpointSettings {
   PosixOptions posix;
+  XrdOptions xrootd;
 };
 
 Result<std::unique_ptr<Endpoint>> make_endpoint(const std::string& spec,

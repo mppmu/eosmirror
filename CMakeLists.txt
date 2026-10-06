@@ -38,6 +38,32 @@ endif()
 find_package(Threads REQUIRED)
 find_package(SQLite3 REQUIRED)
 
+# The XRootD client library, for XRootD and EOS endpoints. CERN's eos-xrootd
+# lives under /opt/eos/xrootd and is preferred when present; its Ubuntu
+# packages ship no CMake config, hence the manual search as fallback.
+option(EOSMIRROR_WITH_XROOTD "Build the XRootD and EOS endpoints" ON)
+set(EOSMIRROR_XROOTD_PREFIX "/opt/eos/xrootd" CACHE PATH "Preferred XRootD installation (empty: system only)")
+if(EOSMIRROR_WITH_XROOTD)
+  if(EOSMIRROR_XROOTD_PREFIX)
+    list(PREPEND CMAKE_PREFIX_PATH ${EOSMIRROR_XROOTD_PREFIX})
+  endif()
+  find_package(XRootD QUIET COMPONENTS CLIENT)
+  if(XRootD_FOUND)
+    message(STATUS "XRootD ${XRootD_VERSION} from ${XRootD_DIR}")
+  else()
+    find_path(XROOTD_INCLUDE_DIR XrdCl/XrdClFile.hh PATH_SUFFIXES xrootd)
+    find_library(XRDCL_LIBRARY NAMES XrdCl PATH_SUFFIXES lib64)
+    if(NOT XROOTD_INCLUDE_DIR OR NOT XRDCL_LIBRARY)
+      message(FATAL_ERROR "XRootD client library not found (set EOSMIRROR_WITH_XROOTD=OFF to build without)")
+    endif()
+    add_library(XRootD::XrdCl SHARED IMPORTED)
+    set_target_properties(XRootD::XrdCl PROPERTIES
+      IMPORTED_LOCATION ${XRDCL_LIBRARY}
+      INTERFACE_INCLUDE_DIRECTORIES ${XROOTD_INCLUDE_DIR})
+    message(STATUS "XRootD client: ${XRDCL_LIBRARY}, headers in ${XROOTD_INCLUDE_DIR}")
+  endif()
+endif()
+
 add_subdirectory(src)
 
 if(EOSMIRROR_BUILD_TESTS)

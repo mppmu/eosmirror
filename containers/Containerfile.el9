@@ -1,8 +1,15 @@
 # Build and test environment for Enterprise Linux 9 (CERN's EOS platform).
+#
+# Has both the stock XRootD client (EPEL) and CERN's eos-xrootd (the XRootD
+# version EOS is built against), the latter under /opt/eos/xrootd.
 FROM almalinux:9
 RUN dnf -y install epel-release dnf-plugins-core \
  && dnf config-manager --set-enabled crb \
- && dnf -y install gcc-c++ cmake make ninja-build git sqlite-devel libasan libtsan libubsan \
-      xrootd-client-devel \
+ && dnf -y install gcc-c++ cmake make ninja-build git diffutils sqlite-devel \
+      libasan libtsan libubsan xrootd-client-devel \
+ && dnf clean all
+RUN printf '[eos-depend]\nname=EOS dependencies\nbaseurl=https://storage-ci.web.cern.ch/storage-ci/eos/diopside-depend/el-9/x86_64/\ngpgcheck=0\nenabled=1\n' \
+      > /etc/yum.repos.d/eos-depend.repo \
+ && dnf -y install eos-xrootd \
  && dnf clean all
 WORKDIR /build

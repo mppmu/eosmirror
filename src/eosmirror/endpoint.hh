@@ -22,6 +22,10 @@ struct Capabilities {
   bool can_set_owner = false;
   // Whether modes can be set.
   bool can_set_mode = true;
+  // Whether mtimes can be set. Without it, files are compared by size only.
+  bool can_set_mtime = true;
+  // Whether symlinks exist on the endpoint.
+  bool has_symlinks = true;
   // The checksum the endpoint computes itself for stored files (None if it
   // computes none), which a copy verifies against.
   ChecksumType checksum = ChecksumType::None;

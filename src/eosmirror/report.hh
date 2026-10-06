@@ -31,6 +31,7 @@ struct Stats {
   Counter files_unchanged{0};
   Counter symlinks_created{0};
   Counter symlinks_unchanged{0};
+  Counter symlinks_skipped{0};  // the target has no symlinks
   Counter metadata_fixed{0};
   Counter specials_skipped{0};
   Counter extras{0};

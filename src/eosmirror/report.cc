@@ -84,7 +84,8 @@ std::string Report::summary(bool dry_run) const {
     << format_bytes(stats.bytes_copied.load()) << "), " << stats.files_unchanged.load()
     << " unchanged\n"
     << "  symlinks: " << stats.symlinks_created.load() << " " << would << "created, "
-    << stats.symlinks_unchanged.load() << " unchanged\n"
+    << stats.symlinks_unchanged.load() << " unchanged, " << stats.symlinks_skipped.load()
+    << " skipped\n"
     << "  metadata " << would << "fixed: " << stats.metadata_fixed.load() << "\n"
     << "  special files skipped: " << stats.specials_skipped.load() << "\n"
     << "  extra entries on target: " << stats.extras.load() << ", " << would

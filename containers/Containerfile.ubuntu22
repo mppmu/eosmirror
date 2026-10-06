@@ -1,7 +1,13 @@
-# Build and test environment for Ubuntu 22.04 (gcc 11, the oldest supported compiler).
+# Build and test environment for Ubuntu 22.04 (gcc 11, the oldest supported
+# compiler), with CERN's eos-xrootd client library.
 FROM ubuntu:22.04
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      g++ cmake make ninja-build git ca-certificates libsqlite3-dev \
+      g++ cmake make ninja-build git ca-certificates curl libsqlite3-dev \
+ && curl -sSfL https://storage-ci.web.cern.ch/storage-ci/storageci.key -o /etc/apt/keyrings/storage-ci.asc \
+ && printf 'Types: deb\nURIs: https://storage-ci.web.cern.ch/storage-ci/ubuntu/eos/diopside\nSuites: jammy\nComponents: jammy/tag/5.5 jammy/deps/5.5\nSigned-By: /etc/apt/keyrings/storage-ci.asc\n' \
+      > /etc/apt/sources.list.d/eos.sources \
+ && apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libeosxrootd-client-dev \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /build

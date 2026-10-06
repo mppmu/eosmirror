@@ -24,5 +24,17 @@ if(EOSMIRROR_SANITIZER STREQUAL "thread")
 endif()
 
 add_test(NAME unit COMMAND ${test_launcher} $<TARGET_FILE:eosmirror_tests>)
+
+if(EOSMIRROR_WITH_XROOTD)
+  add_executable(eosmirror_integration_tests
+    integration/main.cc
+    integration/test_xrootd.cc
+  )
+  target_include_directories(eosmirror_integration_tests
+    PRIVATE ${PROJECT_SOURCE_DIR}/third_party ${CMAKE_CURRENT_SOURCE_DIR}/unit)
+  target_link_libraries(eosmirror_integration_tests PRIVATE eosmirror_core)
+  add_test(NAME integration COMMAND ${test_launcher} $<TARGET_FILE:eosmirror_integration_tests>)
+  set_tests_properties(integration PROPERTIES SKIP_RETURN_CODE 77)
+endif()
 add_test(NAME cli_smoke
   COMMAND ${test_launcher} bash ${CMAKE_CURRENT_SOURCE_DIR}/cli/smoke.sh $<TARGET_FILE:eosmirror>)

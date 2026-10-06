@@ -1,0 +1,8 @@
+# A plain XRootD server for the integration tests: exports /data, computes
+# adler32 checksums, no authentication.
+xrd.port 1094
+all.export /data
+all.adminpath /tmp
+all.pidpath /tmp
+xrootd.chksum adler32
+xrootd.async off

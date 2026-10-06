@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  ubuntu:
+    name: ${{ matrix.os }} ${{ matrix.sanitizer }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-22.04, sanitizer: "" }
+          - { os: ubuntu-22.04, sanitizer: address }
+          - { os: ubuntu-22.04, sanitizer: thread }
+          - { os: ubuntu-24.04, sanitizer: "" }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build libsqlite3-dev
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DEOSMIRROR_SANITIZER=${{ matrix.sanitizer }}
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  el9:
+    name: EL9 ${{ matrix.sanitizer }}
+    runs-on: ubuntu-24.04
+    container: almalinux:9
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: ["", address]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          dnf -y install epel-release dnf-plugins-core
+          dnf config-manager --set-enabled crb
+          dnf -y install gcc-c++ cmake make ninja-build git sqlite-devel libasan libubsan
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DEOSMIRROR_SANITIZER=${{ matrix.sanitizer }}
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        run: ctest --test-dir build --output-on-failure

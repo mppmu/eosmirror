@@ -17,6 +17,12 @@ add_library(eosmirror_core STATIC
 target_include_directories(eosmirror_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/generated)
 target_link_libraries(eosmirror_core PUBLIC Threads::Threads SQLite::SQLite3)
 
+if(EOSMIRROR_WITH_XROOTD)
+  target_sources(eosmirror_core PRIVATE eosmirror/xrootd_endpoint.cc)
+  target_compile_definitions(eosmirror_core PUBLIC EOSMIRROR_HAVE_XROOTD=1)
+  target_link_libraries(eosmirror_core PUBLIC XRootD::XrdCl)
+endif()
+
 add_executable(eosmirror eosmirror/main.cc)
 target_link_libraries(eosmirror PRIVATE eosmirror_core)
 
