@@ -902,3 +902,25 @@ TEST_CASE("fake: temporaries of the source are not entries of the tree") {
   CHECK_FALSE(dst.get(".tmp-upload"));
   CHECK_FALSE(dst.get("d1/.tmp-other"));
 }
+
+TEST_CASE("fake: read-only directories get their mtime before their mode") {
+  FakeEndpoint src, dst;
+  dst.utimes_needs_write = true;
+  src.add_dir("ro", 0555, {2345, 6});
+  src.add_file("ro/f", "x", 0444, {3456, 7});
+  Report r;
+  REQUIRE(run_sync(src, dst, fake_options(), r).ok());
+  CHECK(r.stats.failures == 0);
+  CHECK(dst.get("ro")->entry.mode == 0555);
+  CHECK(dst.get("ro")->entry.mtime == Timespec{2345, 6});
+
+  // Fixing the mtime of an existing read-only directory still works, since
+  // the fake applies the fields in the order given.
+  src.modify("ro", [](FakeEndpoint::Node& n) { n.entry.mtime = {2346, 0}; });
+  dst.modify("ro", [](FakeEndpoint::Node& n) { n.entry.mode = 0755; });
+  Report r2;
+  REQUIRE(run_sync(src, dst, fake_options(), r2).ok());
+  CHECK(r2.stats.failures == 0);
+  CHECK(dst.get("ro")->entry.mtime == Timespec{2346, 0});
+  CHECK(dst.get("ro")->entry.mode == 0555);
+}

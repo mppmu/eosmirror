@@ -374,16 +374,18 @@ Status PosixEndpoint::symlink(const RelPath& path, const std::string& target) {
 
 Status PosixEndpoint::set_metadata(const RelPath& path, const Entry& md, MetaFields fields) {
   std::string abs = absolute(path);
-  if (has(fields, MetaFields::Owner) && lchown(abs.c_str(), md.uid, md.gid) != 0)
-    return errno_error(errno, "chown " + abs);
-  if (has(fields, MetaFields::Mode) && md.type != EntryType::Symlink &&
-      fchmodat(AT_FDCWD, abs.c_str(), md.mode, 0) != 0)
-    return errno_error(errno, "chmod " + abs);
+  // The mtime first, then the owner, then the mode: the mode may take away
+  // write access, and chown clears setuid bits.
   if (has(fields, MetaFields::Mtime)) {
     struct timespec times[2] = {{0, UTIME_OMIT}, {md.mtime.sec, md.mtime.nsec}};
     if (utimensat(AT_FDCWD, abs.c_str(), times, AT_SYMLINK_NOFOLLOW) != 0)
       return errno_error(errno, "utimes " + abs);
   }
+  if (has(fields, MetaFields::Owner) && lchown(abs.c_str(), md.uid, md.gid) != 0)
+    return errno_error(errno, "chown " + abs);
+  if (has(fields, MetaFields::Mode) && md.type != EntryType::Symlink &&
+      fchmodat(AT_FDCWD, abs.c_str(), md.mode, 0) != 0)
+    return errno_error(errno, "chmod " + abs);
   return {};
 }
 

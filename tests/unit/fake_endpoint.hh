@@ -53,6 +53,7 @@ class FakeEndpoint : public eosmirror::Endpoint {
 
   eosmirror::Capabilities caps;
   std::function<void(std::string_view op, const RelPath& path)> hook;
+  bool utimes_needs_write = false;  // like EOS: utimes requires write access
 
   // ---- test setup -----------------------------------------------------------
 
@@ -146,7 +147,8 @@ class FakeEndpoint : public eosmirror::Endpoint {
     std::lock_guard lock(mutex_);
     if (nodes_.count(path)) return Error{ErrorKind::Exists, "mkdir " + path};
     if (Status s = require_parent(path); !s.ok()) return s;
-    Entry e = base(path, eosmirror::EntryType::Directory, mode, tick());
+    // Like the real endpoints: created with the owner's rwx bits added.
+    Entry e = base(path, eosmirror::EntryType::Directory, mode | 0700, tick());
     nodes_[path] = Node{e, {}};
     touch_parent(path);
     return {};
@@ -171,6 +173,9 @@ class FakeEndpoint : public eosmirror::Endpoint {
     std::lock_guard lock(mutex_);
     auto it = nodes_.find(path);
     if (it == nodes_.end()) return not_found(path);
+    if (utimes_needs_write && has(fields, eosmirror::MetaFields::Mtime) &&
+        !(it->second.entry.mode & 0200))
+      return Error{ErrorKind::Permission, "utimes " + path + ": no write access"};
     apply(it->second.entry, md, fields);
     return {};
   }

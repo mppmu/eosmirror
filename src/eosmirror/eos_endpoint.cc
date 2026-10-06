@@ -514,23 +514,7 @@ Status EosEndpoint::set_metadata(const RelPath& path, const Entry& md, MetaField
 
 Status EosEndpoint::set_metadata_abs(const std::string& abs, const Entry& md, MetaFields fields,
                                      bool is_symlink) {
-  // Owners and modes of symlinks are not EOS's to set (chown follows the link).
-  if (has(fields, MetaFields::Owner) && !is_symlink) {
-    auto result = proc("mgm.cmd=chown&mgm.path=" + curl_escape(abs) + "&eos.encodepath=1" +
-                       "&mgm.chown.owner=" + std::to_string(md.uid) + ":" + std::to_string(md.gid));
-    if (!result.ok()) return result.error();
-    if (result.value().retc != 0)
-      return errno_error(result.value().retc, "chown " + url_of(abs) + ": " + result.value().err);
-  }
-  if (has(fields, MetaFields::Mode) && !is_symlink) {
-    char mode[8];
-    std::snprintf(mode, sizeof mode, "%o", md.mode & 07777);
-    auto result = proc("mgm.cmd=chmod&mgm.path=" + curl_escape(abs) + "&eos.encodepath=1" +
-                       "&mgm.chmod.mode=" + mode);
-    if (!result.ok()) return result.error();
-    if (result.value().retc != 0)
-      return errno_error(result.value().retc, "chmod " + url_of(abs) + ": " + result.value().err);
-  }
+  // The mtime first: utimes needs write access, which the mode may take away.
   if (has(fields, MetaFields::Mtime)) {
     char nsec[16];
     std::snprintf(nsec, sizeof nsec, "%09d", md.mtime.nsec);
@@ -547,6 +531,23 @@ Status EosEndpoint::set_metadata_abs(const std::string& abs, const Entry& md, Me
       int retc = text.rfind("utimes: retc=", 0) == 0 ? std::atoi(text.c_str() + 13) : EIO;
       return errno_error(retc ? retc : EIO, "utimes " + url_of(abs) + ": " + text);
     }
+  }
+  // Owners and modes of symlinks are not EOS's to set (chown follows the link).
+  if (has(fields, MetaFields::Owner) && !is_symlink) {
+    auto result = proc("mgm.cmd=chown&mgm.path=" + curl_escape(abs) + "&eos.encodepath=1" +
+                       "&mgm.chown.owner=" + std::to_string(md.uid) + ":" + std::to_string(md.gid));
+    if (!result.ok()) return result.error();
+    if (result.value().retc != 0)
+      return errno_error(result.value().retc, "chown " + url_of(abs) + ": " + result.value().err);
+  }
+  if (has(fields, MetaFields::Mode) && !is_symlink) {
+    char mode[8];
+    std::snprintf(mode, sizeof mode, "%o", md.mode & 07777);
+    auto result = proc("mgm.cmd=chmod&mgm.path=" + curl_escape(abs) + "&eos.encodepath=1" +
+                       "&mgm.chmod.mode=" + mode);
+    if (!result.ok()) return result.error();
+    if (result.value().retc != 0)
+      return errno_error(result.value().retc, "chmod " + url_of(abs) + ": " + result.value().err);
   }
   return {};
 }
