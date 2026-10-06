@@ -28,6 +28,7 @@ struct Stats {
   Counter files_checked{0};
   Counter files_copied{0};
   Counter bytes_copied{0};
+  Counter bytes_written{0};  // every chunk written, including copies still running
   Counter files_unchanged{0};
   Counter files_unverified{0};  // copied where no checksum could be compared
   Counter symlinks_created{0};

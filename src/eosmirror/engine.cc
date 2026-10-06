@@ -89,6 +89,7 @@ struct Engine::Impl {
     copy_options.preserve_mode = options.preserve_mode;
     copy_options.verify = options.verify || options.require_checksum;
     copy_options.require_verification = options.require_checksum;
+    copy_options.bytes_written = &stats.bytes_written;
   }
 
   Endpoint& source;

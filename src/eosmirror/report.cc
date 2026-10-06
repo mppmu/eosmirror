@@ -65,9 +65,9 @@ std::string format_duration(std::chrono::steady_clock::duration d) {
 
 std::string Report::progress() const {
   auto secs = std::chrono::duration<double>(elapsed()).count();
-  uint64_t bytes = stats.bytes_copied.load();
+  uint64_t bytes = stats.bytes_written.load();
   std::ostringstream s;
-  s << "copied " << stats.files_copied.load() << " files (" << format_bytes(bytes) << ", "
+  s << "copied " << stats.files_copied.load() << " files, written " << format_bytes(bytes) << " ("
     << format_bytes(secs > 0 ? static_cast<uint64_t>(static_cast<double>(bytes) / secs) : 0)
     << "/s), unchanged " << stats.files_unchanged.load() << ", dirs " << stats.dirs_listed.load()
     << ", failed " << stats.failures.load() << ", " << format_duration(elapsed());
