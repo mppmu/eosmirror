@@ -50,6 +50,8 @@ if(EOSMIRROR_WITH_XROOTD)
   find_package(XRootD QUIET COMPONENTS CLIENT)
   if(XRootD_FOUND)
     message(STATUS "XRootD ${XRootD_VERSION} from ${XRootD_DIR}")
+    # The config lives in <libdir>/cmake/XRootD.
+    get_filename_component(EOSMIRROR_XROOTD_LIBDIR "${XRootD_DIR}/../.." ABSOLUTE)
   else()
     find_path(XROOTD_INCLUDE_DIR XrdCl/XrdClFile.hh PATH_SUFFIXES xrootd)
     find_library(XRDCL_LIBRARY NAMES XrdCl PATH_SUFFIXES lib64)
@@ -60,6 +62,7 @@ if(EOSMIRROR_WITH_XROOTD)
     set_target_properties(XRootD::XrdCl PROPERTIES
       IMPORTED_LOCATION ${XRDCL_LIBRARY}
       INTERFACE_INCLUDE_DIRECTORIES ${XROOTD_INCLUDE_DIR})
+    get_filename_component(EOSMIRROR_XROOTD_LIBDIR ${XRDCL_LIBRARY} DIRECTORY)
     message(STATUS "XRootD client: ${XRDCL_LIBRARY}, headers in ${XROOTD_INCLUDE_DIR}")
   endif()
 endif()

@@ -1,0 +1,5 @@
+# LeakSanitizer suppressions for the integration tests: global state of the
+# XRootD client and OpenSSL that is never freed.
+leak:libcrypto
+leak:libssl
+leak:libXrd

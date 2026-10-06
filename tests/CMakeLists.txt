@@ -24,6 +24,8 @@ if(EOSMIRROR_SANITIZER STREQUAL "thread")
 endif()
 
 add_test(NAME unit COMMAND ${test_launcher} $<TARGET_FILE:eosmirror_tests>)
+add_test(NAME cli_smoke
+  COMMAND ${test_launcher} bash ${CMAKE_CURRENT_SOURCE_DIR}/cli/smoke.sh $<TARGET_FILE:eosmirror>)
 
 if(EOSMIRROR_WITH_XROOTD)
   add_executable(eosmirror_integration_tests
@@ -36,6 +38,12 @@ if(EOSMIRROR_WITH_XROOTD)
   target_link_libraries(eosmirror_integration_tests PRIVATE eosmirror_core)
   add_test(NAME integration COMMAND ${test_launcher} $<TARGET_FILE:eosmirror_integration_tests>)
   set_tests_properties(integration PROPERTIES SKIP_RETURN_CODE 77)
+  # Under a sanitizer, XRootD's plugins (the security protocols) are loaded
+  # through the sanitizer's dlopen, which ignores the library's own search
+  # path, so the tests get it in LD_LIBRARY_PATH. Leaks in XRootD's and
+  # OpenSSL's global state are not ours (lsan.supp).
+  if(EOSMIRROR_SANITIZER AND EOSMIRROR_XROOTD_LIBDIR)
+    set_tests_properties(integration cli_smoke PROPERTIES ENVIRONMENT
+      "LD_LIBRARY_PATH=${EOSMIRROR_XROOTD_LIBDIR};LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/lsan.supp")
+  endif()
 endif()
-add_test(NAME cli_smoke
-  COMMAND ${test_launcher} bash ${CMAKE_CURRENT_SOURCE_DIR}/cli/smoke.sh $<TARGET_FILE:eosmirror>)
