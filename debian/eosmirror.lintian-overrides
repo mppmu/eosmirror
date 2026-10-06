@@ -1,0 +1,2 @@
+# eos-xrootd lives outside the linker's search path.
+custom-library-search-path RUNPATH /opt/eos/xrootd/* [usr/bin/eosmirror]

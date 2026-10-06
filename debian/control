@@ -1,0 +1,28 @@
+Source: eosmirror
+Section: utils
+Priority: optional
+Maintainer: Oliver Schulz <oschulz@mpp.mpg.de>
+# The XRootD client library is the distribution's or CERN's eos-xrootd, which
+# EOS is built against (installed under /opt/eos/xrootd, from the EOS
+# repositories at storage-ci.web.cern.ch). The build prefers eos-xrootd when
+# both are installed.
+Build-Depends: debhelper-compat (= 13),
+               cmake (>= 3.20),
+               g++ (>= 4:11),
+               ninja-build,
+               libsqlite3-dev,
+               libxrootd-client-dev | libeosxrootd-client-dev,
+Standards-Version: 4.7.4
+Rules-Requires-Root: no
+
+Package: eosmirror
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, ${xrootd:Depends}
+Description: one-way replication of large file trees between file systems, XRootD and EOS
+ eosmirror copies a file tree from a source to a target so that the target
+ ends up with the same files, symlinks, directories, owners, modes and
+ modification times. Sources and targets are local file systems, XRootD
+ servers and EOS instances. It is made for very large trees over
+ high-latency links: it keeps many transfers in flight, works directory by
+ directory with bounded memory, and keeps a journal so that a later run
+ retries exactly what failed.

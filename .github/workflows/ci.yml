@@ -11,19 +11,24 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Ubuntu 22.04's XRootD (5.3) is too old, so those builds leave the
+        # XRootD and EOS endpoints out; the package jobs build them against
+        # eos-xrootd.
         include:
-          - { os: ubuntu-22.04, sanitizer: "" }
-          - { os: ubuntu-22.04, sanitizer: address }
-          - { os: ubuntu-22.04, sanitizer: thread }
-          - { os: ubuntu-24.04, sanitizer: "" }
+          - { os: ubuntu-22.04, sanitizer: "", xrootd: "" }
+          - { os: ubuntu-22.04, sanitizer: address, xrootd: "" }
+          - { os: ubuntu-22.04, sanitizer: thread, xrootd: "" }
+          - { os: ubuntu-24.04, sanitizer: "", xrootd: libxrootd-client-dev }
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ninja-build libsqlite3-dev
+          sudo apt-get install -y --no-install-recommends ninja-build libsqlite3-dev ${{ matrix.xrootd }}
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DEOSMIRROR_SANITIZER=${{ matrix.sanitizer }}
+        run: >
+          cmake -S . -B build -G Ninja -DEOSMIRROR_SANITIZER=${{ matrix.sanitizer }}
+          -DEOSMIRROR_WITH_XROOTD=${{ matrix.xrootd && 'ON' || 'OFF' }}
       - name: Build
         run: cmake --build build
       - name: Test
@@ -43,10 +48,28 @@ jobs:
         run: |
           dnf -y install epel-release dnf-plugins-core
           dnf config-manager --set-enabled crb
-          dnf -y install gcc-c++ cmake make ninja-build git sqlite-devel libasan libubsan
+          dnf -y install gcc-c++ cmake make ninja-build git sqlite-devel xrootd-client-devel libasan libubsan
       - name: Configure
         run: cmake -S . -B build -G Ninja -DEOSMIRROR_SANITIZER=${{ matrix.sanitizer }}
       - name: Build
         run: cmake --build build
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+  packages:
+    name: Packages ${{ matrix.platform }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [el9, ubuntu22, ubuntu24]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: scripts/build-images.sh ${{ matrix.platform }}
+      - name: Build packages
+        run: scripts/build-packages.sh --output=${{ runner.temp }}/packages ${{ matrix.platform }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ matrix.platform }}
+          path: ${{ runner.temp }}/packages/${{ matrix.platform }}

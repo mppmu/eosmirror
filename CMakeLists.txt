@@ -39,8 +39,9 @@ find_package(Threads REQUIRED)
 find_package(SQLite3 REQUIRED)
 
 # The XRootD client library, for XRootD and EOS endpoints. CERN's eos-xrootd
-# lives under /opt/eos/xrootd and is preferred when present; its Ubuntu
-# packages ship no CMake config, hence the manual search as fallback.
+# lives under /opt/eos/xrootd and is preferred when present. Some packages
+# ship no CMake config, or one without the XRootD::XrdCl target (distribution
+# XRootD 5.6), hence the manual search as fallback.
 option(EOSMIRROR_WITH_XROOTD "Build the XRootD and EOS endpoints" ON)
 set(EOSMIRROR_XROOTD_PREFIX "/opt/eos/xrootd" CACHE PATH "Preferred XRootD installation (empty: system only)")
 if(EOSMIRROR_WITH_XROOTD)
@@ -48,12 +49,10 @@ if(EOSMIRROR_WITH_XROOTD)
     list(PREPEND CMAKE_PREFIX_PATH ${EOSMIRROR_XROOTD_PREFIX})
   endif()
   find_package(XRootD QUIET COMPONENTS CLIENT)
-  if(XRootD_FOUND)
+  if(XRootD_FOUND AND TARGET XRootD::XrdCl)
     message(STATUS "XRootD ${XRootD_VERSION} from ${XRootD_DIR}")
     # The config lives in <libdir>/cmake/XRootD.
     get_filename_component(EOSMIRROR_XROOTD_LIBDIR "${XRootD_DIR}/../.." ABSOLUTE)
-    # An installed binary must still find eos-xrootd under /opt.
-    list(APPEND CMAKE_INSTALL_RPATH ${EOSMIRROR_XROOTD_LIBDIR})
   else()
     find_path(XROOTD_INCLUDE_DIR XrdCl/XrdClFile.hh PATH_SUFFIXES xrootd)
     find_library(XRDCL_LIBRARY NAMES XrdCl PATH_SUFFIXES lib64)
@@ -65,8 +64,12 @@ if(EOSMIRROR_WITH_XROOTD)
       IMPORTED_LOCATION ${XRDCL_LIBRARY}
       INTERFACE_INCLUDE_DIRECTORIES ${XROOTD_INCLUDE_DIR})
     get_filename_component(EOSMIRROR_XROOTD_LIBDIR ${XRDCL_LIBRARY} DIRECTORY)
-    list(APPEND CMAKE_INSTALL_RPATH ${EOSMIRROR_XROOTD_LIBDIR})
     message(STATUS "XRootD client: ${XRDCL_LIBRARY}, headers in ${XROOTD_INCLUDE_DIR}")
+  endif()
+  # An installed binary must still find eos-xrootd under /opt. The system's
+  # library directories need no RPATH (and packaging checks reject them).
+  if(NOT EOSMIRROR_XROOTD_LIBDIR IN_LIST CMAKE_CXX_IMPLICIT_LINK_DIRECTORIES)
+    list(APPEND CMAKE_INSTALL_RPATH ${EOSMIRROR_XROOTD_LIBDIR})
   endif()
 endif()
 

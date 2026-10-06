@@ -12,4 +12,6 @@ RUN printf '[eos-depend]\nname=EOS dependencies\nbaseurl=https://storage-ci.web.
       > /etc/yum.repos.d/eos-depend.repo \
  && dnf -y install eos-xrootd \
  && dnf clean all
+# For scripts/build-packages.sh.
+RUN dnf -y install --setopt=install_weak_deps=False rpm-build rpmlint && dnf clean all
 WORKDIR /build

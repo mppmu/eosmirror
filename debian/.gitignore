@@ -1,0 +1,6 @@
+# Left behind by dpkg-buildpackage in the source tree.
+/.debhelper/
+/debhelper-build-stamp
+/eosmirror/
+/files
+/*.substvars

@@ -6,3 +6,4 @@ compile_commands.json
 *.sqlite-journal
 *.sqlite-wal
 *.sqlite-shm
+redhat-linux-build/

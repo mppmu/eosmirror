@@ -10,4 +10,8 @@ RUN apt-get update \
  && apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libeosxrootd-client-dev eos-xrootd-plugins \
  && rm -rf /var/lib/apt/lists/*
+# For scripts/build-packages.sh.
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential debhelper lintian \
+ && rm -rf /var/lib/apt/lists/*
 WORKDIR /build

@@ -112,6 +112,19 @@ them, optionally under AddressSanitizer or ThreadSanitizer.
 xrootd server and a single-host EOS instance started in containers from
 CERN's public EOS image.
 
+## Packaging
+
+`packaging/eosmirror.spec` builds an RPM (`rpmbuild -ta eosmirror-VERSION.tar.gz`)
+and `debian/` a Debian package (`dpkg-buildpackage -us -uc -b`).
+`scripts/build-packages.sh [--output=DIR] [PLATFORM...]` builds both from
+the working tree in the build containers, an RPM for EL9 and .debs for
+Ubuntu 22.04 and 24.04.
+
+The XRootD client library comes from CERN's eos-xrootd (under
+`/opt/eos/xrootd`, the XRootD that EOS is built against) or from the
+distribution. The RPM uses eos-xrootd unless built `--without eos_xrootd`,
+the Debian build uses it when it is installed.
+
 ## License
 
 GPL-3.0-or-later, see [LICENSE](LICENSE). The bundled test framework

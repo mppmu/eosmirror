@@ -1,0 +1,24 @@
+#!/usr/bin/make -f
+# SPDX-License-Identifier: GPL-3.0-or-later
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
+builddir = build-deb
+
+%:
+	dh $@ --buildsystem=cmake+ninja --builddirectory=$(builddir)
+
+# Compiler warnings must not fail a distribution build.
+override_dh_auto_configure:
+	dh_auto_configure -- -DEOSMIRROR_WERROR=OFF
+
+# The integration test needs servers, see scripts/integration-test.sh.
+override_dh_auto_test:
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+	ctest --test-dir $(builddir) --output-on-failure --exclude-regex '^integration$$'
+endif
+
+# XRootD loads the security plugins (sss, krb5) at run time: depend on the
+# plugins that go with the client library linked against.
+override_dh_gencontrol:
+	dh_gencontrol -- -Vxrootd:Depends=$$(grep -q '^shlibs:Depends=.*libeosxrdcl' debian/eosmirror.substvars \
+	  && echo eos-xrootd-plugins || echo xrootd-client-plugins)
