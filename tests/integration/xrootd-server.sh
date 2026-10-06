@@ -2,6 +2,7 @@
 # Starts or stops a plain XRootD server in a container for the integration
 # tests. The server joins the podman network "eosmirror-test" under the name
 # "xrootd", so that containers on that network reach it as root://xrootd:1094.
+# /data/fixtures holds a tree with symlink loops.
 #
 # Usage: xrootd-server.sh start|stop|status
 # Env:   EOSMIRROR_EOS_IMAGE  image with the xrootd server under
@@ -19,7 +20,11 @@ case ${1:-} in
     podman rm -f "$name" > /dev/null 2>&1 || true
     podman run -d --name "$name" --network "$network" --network-alias xrootd \
       -v "$here/xrootd.cf:/etc/xrootd.cf:ro" --entrypoint /bin/bash "$image" -c '
-        mkdir -p /data && chown daemon:daemon /data
+        mkdir -p /data/fixtures/loop/sub
+        echo fixture > /data/fixtures/loop/sub/f
+        ln -s .. /data/fixtures/loop/sub/up
+        ln -s . /data/fixtures/loop/self
+        chown -R daemon:daemon /data
         exec /opt/eos/xrootd/bin/xrootd -R daemon -c /etc/xrootd.cf' > /dev/null
     for i in $(seq 1 30); do
       if podman exec "$name" /opt/eos/xrootd/bin/xrdfs root://localhost:1094 stat /data > /dev/null 2>&1; then

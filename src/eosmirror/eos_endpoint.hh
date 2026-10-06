@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include <atomic>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
-#include <unordered_map>
+#include <vector>
 
 #include "eosmirror/xrootd_endpoint.hh"
 
@@ -20,11 +20,14 @@ namespace eosmirror {
 // atomically: EOS renames them into place at close.
 class EosEndpoint : public XrdEndpoint {
  public:
+  // Connects and resolves symlinks in the path, since EOS lists entries
+  // under their real paths.
   static Result<std::unique_ptr<EosEndpoint>> create(const std::string& url,
                                                      XrdOptions options = XrdOptions());
 
-  // Whether the server behind the URL is an EOS MGM.
-  static bool is_eos(const std::string& url);
+  // Whether the server behind the URL is an EOS MGM. An error if the server
+  // cannot be asked (unreachable, login refused).
+  static Result<bool> is_eos(const std::string& url);
 
   bool is_temporary(std::string_view name) const override;
   Result<std::string> request_path(const std::string& abs_path) const override;
@@ -36,8 +39,9 @@ class EosEndpoint : public XrdEndpoint {
   Result<std::unique_ptr<FileWriter>> open_write(const RelPath& path,
                                                  const CommitSpec& spec) override;
 
-  // The checksum type a directory forces on its files (None if none is set).
-  Result<ChecksumType> directory_checksum(const std::string& abs_dir);
+  // Stats an absolute path without following a final symlink; the result is
+  // named by the last path component.
+  Result<Entry> stat_abs(const std::string& abs_path);
 
   // Sets the metadata of an absolute path through MGM commands.
   Status set_metadata_abs(const std::string& abs_path, const Entry& metadata, MetaFields fields,
@@ -54,11 +58,22 @@ class EosEndpoint : public XrdEndpoint {
   Result<ProcResult> proc(const std::string& query);
 
  private:
-  EosEndpoint(std::string url, std::string server, std::string root, XrdOptions options);
+  EosEndpoint(const std::string& url, EndpointUrl parts, XrdOptions options);
   Status probe_identity();
 
-  std::mutex cache_mutex_;
-  std::unordered_map<std::string, ChecksumType> directory_checksums_;
+  // proc(), telling through answered whether a failure is the server's answer
+  // (rather than no answer).
+  Result<ProcResult> run_proc(const std::string& query, bool* answered);
+
+  // The path with all symlinks resolved, like realpath(3); a part that does
+  // not exist is kept as it is.
+  Result<std::string> resolve(const std::string& abs_path);
+
+  // Completes a listing that find cut short with the names of a plain
+  // directory listing, each stated on its own.
+  Status complete_listing(const std::string& abs_dir, std::vector<Entry>& entries);
+
+  std::atomic<bool> truncation_warned_{false};
 };
 
 // A path for a request to EOS: percent-encoded behind "/#curl#", which the
@@ -67,9 +82,15 @@ class EosEndpoint : public XrdEndpoint {
 std::string eos_encoded_path(const std::string& abs_path);
 std::string eos_request_path(const std::string& abs_path);
 
-// Whether a value can go unencoded into the opaque part of a request: no
-// '&', '=', '?', '#', '%' or control characters.
-bool opaque_safe(std::string_view value);
+// The RequestProto of the console's "file symlink" command (with force),
+// which carries the link path and target as bytes.
+std::string symlink_request(const std::string& abs_path, const std::string& target);
+
+// Whether EOS stores a symlink's path and target as they are, and lists
+// them back: the path must not contain "#AND#" (which EOS turns into '&'),
+// the target must not start like a file or container id ("fid:", "fxid:",
+// "cid:", "cxid:") and must not contain a line break.
+bool symlink_safe(std::string_view abs_path, std::string_view target);
 
 // Splits the reply to an MGM command, "mgm.proc.stdout=...&mgm.proc.stderr=...
 // &mgm.proc.retc=N". The output can contain anything, file names included,
@@ -82,5 +103,11 @@ EosEndpoint::ProcResult parse_proc_reply(const std::string& reply);
 // that cannot be parsed unambiguously or names no valid entry of abs_dir is
 // an error.
 Result<std::optional<Entry>> parse_find_line(std::string_view line, std::string_view abs_dir);
+
+// The names of the subdirectories of abs_dir that a find left out because the
+// identity may not read them, from the find's error output. Nothing if the
+// output reports anything else, abs_dir itself included.
+std::optional<std::vector<std::string>> parse_find_denials(std::string_view err,
+                                                           std::string_view abs_dir);
 
 }  // namespace eosmirror

@@ -14,6 +14,9 @@ TEST_CASE("errno mapping and transience") {
   CHECK(errno_error(EACCES, "open x").kind == ErrorKind::Permission);
   CHECK(errno_error(EIO, "read x").kind == ErrorKind::IO);
   CHECK(errno_error(EXDEV, "rename x").kind == ErrorKind::Other);
+  CHECK(errno_error(ENOSPC, "write x").kind == ErrorKind::NoSpace);
+  CHECK(errno_error(EDQUOT, "write x").kind == ErrorKind::NoSpace);
+  CHECK(to_string(ErrorKind::NoSpace) == "no space");
 
   CHECK(is_transient(ErrorKind::IO));
   CHECK(is_transient(ErrorKind::Timeout));
@@ -21,6 +24,7 @@ TEST_CASE("errno mapping and transience") {
   CHECK_FALSE(is_transient(ErrorKind::NotFound));
   CHECK_FALSE(is_transient(ErrorKind::Permission));
   CHECK_FALSE(is_transient(ErrorKind::Cancelled));
+  CHECK_FALSE(is_transient(ErrorKind::NoSpace));
 
   Error e = errno_error(ENOENT, "stat /x");
   CHECK(e.describe() == "stat /x: No such file or directory");

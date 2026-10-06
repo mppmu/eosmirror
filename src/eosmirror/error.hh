@@ -9,6 +9,7 @@
 
 namespace eosmirror {
 
+// Journals store kinds as numbers: new kinds go last.
 enum class ErrorKind : uint8_t {
   NotFound,
   Exists,
@@ -23,6 +24,7 @@ enum class ErrorKind : uint8_t {
   Checksum,   // the data arrived with the wrong checksum
   Cancelled,  // the run is being stopped
   Other,
+  NoSpace,  // no space left or quota exceeded
 };
 
 std::string_view to_string(ErrorKind kind);

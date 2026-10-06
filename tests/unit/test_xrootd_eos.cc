@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // The requests and replies of the XRootD and EOS endpoints, without a server.
+#include <XProtocol/XProtocol.hh>
+#include <XrdCl/XrdClXRootDResponses.hh>
+
+#include <cerrno>
+
 #include "doctest/doctest.h"
 #include "eosmirror/eos_endpoint.hh"
 
@@ -48,13 +53,84 @@ TEST_CASE("EOS request paths are encoded so that names cannot add parameters") {
   CHECK(request.find('&') == std::string::npos);
 }
 
-TEST_CASE("values that cannot go unencoded into a request") {
-  CHECK(opaque_safe("/eos/dir/a b+c,d:e@f~g"));
-  CHECK(opaque_safe("../target with spaces"));
-  for (char c : {'&', '=', '?', '#', '%', '\n', '\r', '\t', '\x7f'}) {
-    INFO("character ", static_cast<int>(c));
-    CHECK_FALSE(opaque_safe(std::string("a") + c + "b"));
+TEST_CASE("endpoint URLs keep their protocol and opaque parameters") {
+  auto parts = parse_endpoint_url("roots://user@host:1095//eos/dir/?authz=a%3Db&xrd.wantprot=krb5");
+  REQUIRE(parts.ok());
+  CHECK(parts.value().server == "roots://user@host:1095");
+  CHECK(parts.value().path == "/eos/dir");
+  CHECK(parts.value().cgi == "authz=a%3Db&xrd.wantprot=krb5");
+  CHECK(display_url("roots://user@host:1095//eos/dir/?authz=a%3Db") == "roots://user@host:1095//eos/dir/");
+
+  parts = parse_endpoint_url("root://host//data");
+  REQUIRE(parts.ok());
+  CHECK(parts.value().server == "root://host:1094");
+  CHECK(parts.value().path == "/data");
+  CHECK(parts.value().cgi.empty());
+  CHECK_FALSE(parse_endpoint_url("root://host/relative").ok());
+
+  // The parameters go after those of the request itself.
+  std::string cgi = "authz=token&xrd.wantprot=krb5";
+  CHECK(with_cgi("/data/f", cgi) == "/data/f?authz=token&xrd.wantprot=krb5");
+  CHECK(with_cgi("/data/f", "") == "/data/f");
+  CHECK(with_cgi(eos_request_path("/eos/a b"), cgi) ==
+        "/#curl#/eos/a%20b?eos.encodepath=1&authz=token&xrd.wantprot=krb5");
+  CHECK(with_cgi("root://mgm//proc/user/?mgm.cmd=whoami", cgi) ==
+        "root://mgm//proc/user/?mgm.cmd=whoami&authz=token&xrd.wantprot=krb5");
+}
+
+TEST_CASE("XRootD errors are classified for retries") {
+  auto kind = [](uint16_t code, uint32_t errnum = 0) {
+    return XrdEndpoint::xrd_error(XrdCl::XRootDStatus(XrdCl::stError, code, errnum, "x"), "op").kind;
+  };
+  auto server = [&](uint32_t xerr) { return kind(XrdCl::errErrorResponse, xerr); };
+  for (uint32_t busy : {kXR_Overloaded, kXR_ServerError, kXR_noReplicas, kXR_inProgress, kXR_FSError}) {
+    INFO("server error ", busy);
+    CHECK(server(busy) == ErrorKind::IO);
   }
+  CHECK(server(kXR_NotFound) == ErrorKind::NotFound);
+  CHECK(server(kXR_NotAuthorized) == ErrorKind::Permission);
+  CHECK(server(kXR_NoSpace) == ErrorKind::NoSpace);
+  CHECK(server(kXR_overQuota) == ErrorKind::NoSpace);
+  CHECK(server(kXR_ArgInvalid) == ErrorKind::Other);
+  for (uint16_t code : {XrdCl::errTlsError, XrdCl::errHandShakeFailed, XrdCl::errInvalidAddr,
+                        XrdCl::errNoMoreFreeSIDs, XrdCl::errSocketTimeout, XrdCl::errConnectionError}) {
+    INFO("client error ", code);
+    CHECK(is_transient(kind(code)));
+  }
+  CHECK(kind(XrdCl::errAuthFailed) == ErrorKind::Permission);
+  CHECK(kind(XrdCl::errLocalError, ENOSPC) == ErrorKind::NoSpace);
+}
+
+TEST_CASE("symlinks are created through the protobuf file command") {
+  // RequestProto.file (29) { md (1) { path (1) }, symlink (12) { target_path (1), force (2) } }
+  using namespace std::string_literals;
+  CHECK(symlink_request("/e", "t") == "\xea\x01\x0d\x0a\x04\x0a\x02/e\x62\x05\x0a\x01t\x10\x01"s);
+  std::string target = "a&b=c?d%e #f\"g'h";
+  std::string request = symlink_request("/eos/d/l", target);
+  CHECK(request.find(target) != std::string::npos);
+
+  CHECK(symlink_safe("/eos/d/a&b=c?d%e #f", "../x&y=z?%25 \"q\""));
+  CHECK(symlink_safe("/eos/d/l", "pid:5"));
+  CHECK_FALSE(symlink_safe("/eos/d/a#AND#b", "t"));
+  for (const char* id : {"fid:12", "fxid:ab", "cid:3", "cxid:4"}) CHECK_FALSE(symlink_safe("/eos/d/l", id));
+  CHECK_FALSE(symlink_safe("/eos/d/l", "line\nbreak"));
+}
+
+TEST_CASE("subdirectories that find leaves out for lack of permission") {
+  auto names = parse_find_denials(
+      "error(13): no permissions to read directory /eos/d/secret/\n"
+      "error(13): public access level restriction on directory /eos/d/deep dir/\n",
+      "/eos/d");
+  REQUIRE(names);
+  CHECK(*names == std::vector<std::string>{"secret", "deep dir"});
+  CHECK(parse_find_denials("error(13): no permissions to read directory /x/\n", "/") ==
+        std::vector<std::string>{"x"});
+  // The directory itself, entries elsewhere and anything else are not.
+  CHECK_FALSE(parse_find_denials("error(13): no permissions to read directory /eos/d/\n", "/eos/d"));
+  CHECK_FALSE(parse_find_denials("error(13): no permissions to read directory /eos/e/x/\n", "/eos/d"));
+  CHECK_FALSE(parse_find_denials("error(13): no permissions to read directory /eos/d/x/y/\n", "/eos/d"));
+  CHECK_FALSE(parse_find_denials("error: unable to run find in directory\n", "/eos/d"));
+  CHECK_FALSE(parse_find_denials("", "/eos/d"));
 }
 
 TEST_CASE("MGM replies are split from the end") {

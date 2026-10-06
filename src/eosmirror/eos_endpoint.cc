@@ -3,16 +3,18 @@
 
 #include <XrdCl/XrdClFile.hh>
 #include <XrdCl/XrdClFileSystem.hh>
-#include <XrdCl/XrdClURL.hh>
 #include <XrdCl/XrdClXRootDResponses.hh>
 
 #include <algorithm>
+#include <cerrno>
 #include <charconv>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <sstream>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "eosmirror/log.hh"
 
@@ -85,7 +87,8 @@ std::string base64(std::string_view data) {
   return out;
 }
 
-// Minimal protobuf wire encoding, enough for the console's find request.
+// Minimal protobuf wire encoding, enough for the console's find and symlink
+// requests.
 void put_varint(std::string& out, uint64_t v) {
   while (v >= 0x80) {
     out += static_cast<char>((v & 0x7f) | 0x80);
@@ -178,56 +181,77 @@ class EosReader : public FileReader {
 
 // Writes through EOS's atomic upload: the file is created under its final
 // name with eos.atomic=1 and eos.mtime=..., EOS stores it under a hidden
-// name and renames it at close. Owner and mode are set afterwards.
+// name and renames it at close. The stored checksum is then compared where
+// EOS computed one of the type that was computed here, and owner and mode
+// are set.
 class EosWriter : public FileWriter {
  public:
-  EosWriter(EosEndpoint& ep, std::unique_ptr<FileWriter> inner, std::string abs, ChecksumType stored)
-      : ep_(ep), inner_(std::move(inner)), abs_(std::move(abs)), stored_(stored) {}
+  EosWriter(EosEndpoint& ep, std::unique_ptr<FileWriter> inner, std::string abs, std::string url)
+      : ep_(ep), inner_(std::move(inner)), abs_(std::move(abs)), url_(std::move(url)) {}
 
   Status write(uint64_t offset, std::span<const std::byte> data) override {
     return inner_->write(offset, data);
   }
 
   Result<CommitInfo> commit(const CommitSpec& spec) override {
-    bool verifiable = spec.checksum.type != ChecksumType::None && stored_ == spec.checksum.type;
-    if (spec.require_verification && !verifiable) {
-      abort();
-      return Error{ErrorKind::Unsupported,
-                   "the directory of " + abs_ + " computes no " +
-                       std::string(to_string(spec.checksum.type)) + " checksum to verify against"};
-    }
     CommitSpec inner_spec = spec;
-    inner_spec.checksum = Checksum{};  // the directory decides the type, compared below
+    inner_spec.checksum = Checksum{};  // compared below
     auto committed = inner_->commit(inner_spec);
     if (!committed.ok()) return committed.error();
-    if (verifiable) {
+    // The file is in place now, with the source's size and mtime: what fails
+    // from here on has to take it away again.
+    bool verified = false;
+    if (spec.checksum.type != ChecksumType::None) {
       auto stored = ep_.query_checksum(abs_);
-      if (!stored.ok()) return stored.error();
-      if (!(stored.value() == spec.checksum))
-        return Error{ErrorKind::Checksum, abs_ + " has checksum " + stored.value().hex +
-                                              " instead of " + spec.checksum.hex};
+      if (!stored.ok()) return discard(stored.error());
+      if (stored.value().type == spec.checksum.type) {
+        if (!(stored.value() == spec.checksum))
+          return discard(Error{ErrorKind::Checksum, url_ + " has checksum " + stored.value().hex +
+                                                        " instead of " + spec.checksum.hex});
+        verified = true;
+      }
     }
+    if (spec.require_verification && !verified)
+      return discard(Error{ErrorKind::Unsupported,
+                           "EOS stores no " + std::string(to_string(spec.checksum.type)) +
+                               " checksum to verify " + url_ + " against"});
     MetaFields fields = spec.fields & (MetaFields::Owner | MetaFields::Mode);
     Status md = ep_.set_metadata_abs(abs_, spec.metadata, fields, false);
     if (!md.ok()) return md.error();
-    return CommitInfo{verifiable};
+    return CommitInfo{verified};
   }
 
   void abort() override { inner_->abort(); }
 
  private:
+  // Removes the committed file, or else sets its mtime to 0 so that the next
+  // run copies it again.
+  Error discard(Error e) {
+    Status removed = ep_.remove_abs(abs_);
+    if (removed.ok() || removed.error().kind == ErrorKind::NotFound) return e;
+    Entry md;
+    md.mtime = {0, 0};
+    Status reset = ep_.set_metadata_abs(abs_, md, MetaFields::Mtime, false);
+    if (!reset.ok())
+      log::error("cannot remove ", url_, " after a failed verification, nor reset its mtime: ",
+                 removed.error().describe(), "; ", reset.error().describe());
+    return e;
+  }
+
   EosEndpoint& ep_;
   std::unique_ptr<FileWriter> inner_;
   std::string abs_;
-  ChecksumType stored_;
+  std::string url_;
 };
 
 // The XRootD writer that EosWriter wraps: writes to the final URL with the
-// atomic upload parameters, and does nothing at commit beyond closing.
+// atomic upload parameters, one synchronous write at a time, and does
+// nothing at commit beyond closing. Erasure-coded layouts need the writes in
+// order (see docs/design.md).
 class EosUploadWriter : public FileWriter {
  public:
-  EosUploadWriter(std::unique_ptr<XrdCl::File> file, std::string url, int window)
-      : file_(std::move(file)), url_(std::move(url)), window_(window) {}
+  EosUploadWriter(std::unique_ptr<XrdCl::File> file, std::string url)
+      : file_(std::move(file)), url_(std::move(url)) {}
 
   ~EosUploadWriter() override { abort(); }
 
@@ -262,18 +286,27 @@ class EosUploadWriter : public FileWriter {
     return CommitInfo{};
   }
 
-  // Closing an atomic upload before its end discards it on the server.
+  // A storage node commits an atomic upload at any regular close, partial or
+  // not; told to delete it first, it discards the upload instead. A file that
+  // XrdCl gave up on is not closed at all, and the node discards its upload
+  // when the connection ends.
   void abort() override {
     if (!file_) return;
-    XrdCl::XRootDStatus st = file_->Close();
-    (void)st;
+    if (file_->IsOpen()) {
+      XrdCl::Buffer arg;
+      arg.FromString("delete");
+      XrdCl::Buffer* response = nullptr;
+      XrdCl::XRootDStatus st = file_->Fcntl(arg, response);
+      delete response;
+      if (!st.IsOK()) log::warn("cannot discard the upload of ", url_, ": ", st.ToStr());
+      st = file_->Close();  // fails after the delete
+    }
     file_.reset();
   }
 
  private:
   std::unique_ptr<XrdCl::File> file_;
   std::string url_;
-  int window_;
   uint64_t written_ = 0;
   std::chrono::steady_clock::time_point last_ack_ = std::chrono::steady_clock::now();
 };
@@ -290,11 +323,26 @@ std::string eos_request_path(const std::string& abs_path) {
   return eos_encoded_path(abs_path) + "?eos.encodepath=1";
 }
 
-bool opaque_safe(std::string_view value) {
-  return std::none_of(value.begin(), value.end(), [](char ch) {
-    auto c = static_cast<unsigned char>(ch);
-    return c < 0x20 || c == 0x7f || c == '&' || c == '=' || c == '?' || c == '#' || c == '%';
-  });
+std::string symlink_request(const std::string& abs_path, const std::string& target) {
+  std::string metadata;
+  put_bytes(metadata, 1, abs_path);  // Metadata.path
+  std::string symlink;
+  put_bytes(symlink, 1, target);  // FileSymlinkProto.target_path
+  put_bool(symlink, 2, true);     // FileSymlinkProto.force
+  std::string file;
+  put_bytes(file, 1, metadata);  // FileProto.md
+  put_bytes(file, 12, symlink);  // FileProto.symlink
+  std::string request;
+  put_bytes(request, 29, file);  // RequestProto.file
+  return request;
+}
+
+bool symlink_safe(std::string_view abs_path, std::string_view target) {
+  if (abs_path.find("#AND#") != std::string_view::npos) return false;
+  if (target.find('\n') != std::string_view::npos) return false;
+  for (std::string_view id : {"fid:", "fxid:", "cid:", "cxid:"})
+    if (target.starts_with(id)) return false;
+  return true;
 }
 
 EosEndpoint::ProcResult parse_proc_reply(const std::string& reply) {
@@ -315,6 +363,7 @@ EosEndpoint::ProcResult parse_proc_reply(const std::string& reply) {
   if (err_pos != std::string::npos && err_pos >= out_begin) {
     out_end = err_pos;
     result.err = reply.substr(err_pos + kErr.size(), retc_pos - err_pos - kErr.size());
+    while (!result.err.empty() && result.err.back() == '\n') result.err.pop_back();
   }
   result.out = reply.substr(out_begin, out_end - out_begin);
   result.retc = std::atoi(reply.c_str() + retc_pos + kRetc.size());
@@ -404,62 +453,115 @@ Result<std::optional<Entry>> parse_find_line(std::string_view line, std::string_
   return std::optional<Entry>(std::move(e));
 }
 
+std::optional<std::vector<std::string>> parse_find_denials(std::string_view err,
+                                                           std::string_view abs_dir) {
+  // "error(13): no permissions to read directory <path>/" or
+  // "error(13): public access level restriction on directory <path>/"
+  constexpr std::string_view kPrefixes[] = {"error(13): no permissions to read directory ",
+                                            "error(13): public access level restriction on "
+                                            "directory "};
+  std::string prefix = abs_dir == "/" ? "/" : std::string(abs_dir) + "/";
+  std::vector<std::string> names;
+  while (!err.empty()) {
+    std::string_view line = err.substr(0, err.find('\n'));
+    err.remove_prefix(std::min(err.size(), line.size() + 1));
+    if (line.empty()) continue;
+    auto it = std::find_if(std::begin(kPrefixes), std::end(kPrefixes),
+                           [&](std::string_view p) { return line.starts_with(p); });
+    if (it == std::end(kPrefixes)) return std::nullopt;
+    std::string_view path = line.substr(it->size());
+    if (path.size() > 1 && path.back() == '/') path.remove_suffix(1);
+    if (!path.starts_with(prefix)) return std::nullopt;
+    std::string_view name = path.substr(prefix.size());
+    if (!valid_entry_name(name)) return std::nullopt;
+    names.emplace_back(name);
+  }
+  if (names.empty()) return std::nullopt;
+  return names;
+}
+
 // ---- EosEndpoint ------------------------------------------------------------------------
 
-EosEndpoint::EosEndpoint(std::string url, std::string server, std::string root, XrdOptions options)
-    : XrdEndpoint(std::move(url), std::move(server), std::move(root), options) {
+EosEndpoint::EosEndpoint(const std::string& url, EndpointUrl parts, XrdOptions options)
+    : XrdEndpoint(url, std::move(parts), options) {
   caps_.mtime_resolution = 1;
+  caps_.has_owners = true;
   caps_.can_set_mtime = true;
   caps_.has_symlinks = true;
-  caps_.symlink_owner = false;
+  caps_.symlink_owner = false;  // settled by probe_identity()
   caps_.can_set_mode = true;
-  caps_.mode_bits = 07777;
+  // EOS keeps the permission bits of files, and clears setuid on directories
+  // (EOS 5.5 mgm/ofs/cmds/Chmod.inc).
+  caps_.file_mode_bits = 0777;
+  caps_.dir_mode_bits = 03777;
   caps_.checksum = ChecksumType::Adler32;
 }
 
 Result<std::unique_ptr<EosEndpoint>> EosEndpoint::create(const std::string& url,
                                                          XrdOptions options) {
-  XrdCl::URL parsed(url);
-  if (!parsed.IsValid() || parsed.GetHostName().empty())
-    return Error{ErrorKind::Other, "invalid EOS URL: " + display_url(url)};
-  std::string server = "root://" + parsed.GetHostId();
-  std::string root = parsed.GetPath();
-  while (root.size() > 1 && root.back() == '/') root.pop_back();
-  if (root.empty() || root[0] != '/')
-    return Error{ErrorKind::Other, "EOS URL needs an absolute path: " + display_url(url)};
-  std::unique_ptr<EosEndpoint> ep(new EosEndpoint(url, server, root, options));
+  auto parts = parse_endpoint_url(url);
+  if (!parts.ok()) return parts.error();
+  std::unique_ptr<EosEndpoint> ep(new EosEndpoint(url, std::move(parts).value(), options));
   Status probed = ep->probe_identity();
   if (!probed.ok()) return probed.error();
+  auto real = ep->resolve(ep->root_);
+  if (!real.ok()) return real.error();
+  if (real.value() != ep->root_) {
+    log::debug(ep->describe(), " is ", real.value());
+    ep->root_ = std::move(real).value();
+  }
   return ep;
 }
 
-bool EosEndpoint::is_eos(const std::string& url) {
-  XrdCl::URL parsed(url);
-  if (!parsed.IsValid() || parsed.GetHostName().empty()) return false;
-  std::unique_ptr<EosEndpoint> ep(new EosEndpoint(url, "root://" + parsed.GetHostId(), "/", {}));
-  auto result = ep->proc("mgm.cmd=whoami");
-  return result.ok() && result.value().out.find("Virtual Identity") != std::string::npos;
+Result<bool> EosEndpoint::is_eos(const std::string& url) {
+  auto parts = parse_endpoint_url(url);
+  if (!parts.ok()) return parts.error();
+  std::unique_ptr<EosEndpoint> ep(new EosEndpoint(url, std::move(parts).value(), {}));
+  bool answered = true;
+  auto result = ep->run_proc("mgm.cmd=whoami", &answered);
+  if (!result.ok()) {
+    // A server that refuses the command is no MGM; one that cannot be
+    // reached may still be one.
+    if (!answered) return result.error();
+    log::debug(display_url(url), ": ", result.error().describe());
+    return false;
+  }
+  return result.value().out.find("Virtual Identity: ") != std::string::npos;
 }
 
-// Finds out who EOS takes us for: root and sudoers may set owners.
+// Finds out who EOS takes us for. Only root may set owners: sudoers can set
+// neither the owner of directories nor the group of files, and modes only on
+// entries they own (EOS 5.5 mgm/ofs/cmds/Chown.inc and Chmod.inc).
 Status EosEndpoint::probe_identity() {
   auto result = proc("mgm.cmd=whoami");
   if (!result.ok()) return result.error();
   const std::string& out = result.value().out;
-  if (out.find("Virtual Identity") == std::string::npos)
+  constexpr std::string_view kUid = "Virtual Identity: uid=";
+  auto uid = out.find(kUid);
+  if (uid == std::string::npos)
     return Error{ErrorKind::Other, url_ + " is not an EOS instance (whoami: " + out + ")"};
-  bool root = out.find("uid=0 ") != std::string::npos;
-  bool sudoer = out.find("sudo*") != std::string::npos;
-  caps_.can_set_owner = root || sudoer;
+  bool root = out.compare(uid + kUid.size(), 2, "0 ") == 0;
+  caps_.can_set_owner = root;
+  caps_.symlink_owner = root;
   log::debug(url_, ": ", out);
+  if (!root && out.find(" sudo*") != std::string::npos)
+    log::debug(url_, ": a sudoer, but EOS lets only root set owners");
   return {};
 }
 
 Result<EosEndpoint::ProcResult> EosEndpoint::proc(const std::string& query) {
-  std::string url = server_ + "//proc/user/?" + query + std::string(kApp);
+  return run_proc(query, nullptr);
+}
+
+Result<EosEndpoint::ProcResult> EosEndpoint::run_proc(const std::string& query, bool* answered) {
+  std::string url = with_cgi(server_ + "//proc/user/?" + query + std::string(kApp), cgi_);
+  auto failed = [&](const XrdCl::XRootDStatus& st, const std::string& context) {
+    if (answered) *answered = st.code == XrdCl::errErrorResponse;
+    return xrd_error(st, context + display_url(server_));
+  };
   XrdCl::File file;
   XrdCl::XRootDStatus st = file.Open(url, XrdCl::OpenFlags::Read);
-  if (!st.IsOK()) return xrd_error(st, "command on " + display_url(server_));
+  if (!st.IsOK()) return failed(st, "command on ");
   std::string response;
   std::vector<char> buf(1 << 20);
   uint64_t offset = 0;
@@ -469,7 +571,7 @@ Result<EosEndpoint::ProcResult> EosEndpoint::proc(const std::string& query) {
     if (!st.IsOK()) {
       XrdCl::XRootDStatus closed = file.Close();
       (void)closed;
-      return xrd_error(st, "command response from " + display_url(server_));
+      return failed(st, "command response from ");
     }
     if (got == 0) break;
     response.append(buf.data(), got);
@@ -485,13 +587,19 @@ bool EosEndpoint::is_temporary(std::string_view name) const {
 }
 
 Result<std::string> EosEndpoint::request_path(const std::string& abs_path) const {
-  return eos_request_path(abs_path);
+  return with_cgi(eos_request_path(abs_path), cgi_);
 }
 
 Result<Entry> EosEndpoint::stat(const RelPath& path) {
-  std::string abs = absolute(path);
+  auto e = stat_abs(absolute(path));
+  if (e.ok() && path.empty()) e.value().name.clear();
+  return e;
+}
+
+Result<Entry> EosEndpoint::stat_abs(const std::string& abs) {
+  std::string request = request_path(abs).value();
   XrdCl::Buffer arg;
-  arg.FromString(eos_request_path(abs) + "&mgm.pcmd=stat" + std::string(kApp));
+  arg.FromString(request + "&mgm.pcmd=stat" + std::string(kApp));
   XrdCl::Buffer* response = nullptr;
   XrdCl::XRootDStatus st = fs_->Query(XrdCl::QueryCode::OpaqueFile, arg, response);
   if (!st.IsOK()) return xrd_error(st, "stat " + url_of(abs));
@@ -508,7 +616,7 @@ Result<Entry> EosEndpoint::stat(const RelPath& path) {
                   &v[11], &v[12], &v[13], &v[14], &v[15]) != 16)
     return Error{ErrorKind::Other, "unexpected stat response for " + url_of(abs) + ": " + text};
   Entry e;
-  e.name = path.empty() ? "" : name_of(path);
+  e.name = name_of(abs);
   auto mode = static_cast<unsigned>(v[2]);
   switch (mode & 0170000) {
     case 0040000: e.type = EntryType::Directory; break;
@@ -523,7 +631,7 @@ Result<Entry> EosEndpoint::stat(const RelPath& path) {
   e.mtime = {static_cast<int64_t>(v[11]), static_cast<int32_t>(v[14])};
   if (e.type == EntryType::Symlink) {
     XrdCl::Buffer link_arg;
-    link_arg.FromString(eos_request_path(abs) + "&mgm.pcmd=readlink" + std::string(kApp));
+    link_arg.FromString(request + "&mgm.pcmd=readlink" + std::string(kApp));
     XrdCl::Buffer* link_response = nullptr;
     st = fs_->Query(XrdCl::QueryCode::OpaqueFile, link_arg, link_response);
     if (!st.IsOK()) return xrd_error(st, "readlink " + url_of(abs));
@@ -540,20 +648,75 @@ Result<Entry> EosEndpoint::stat(const RelPath& path) {
   return e;
 }
 
+Result<std::string> EosEndpoint::resolve(const std::string& abs_path) {
+  std::vector<std::string> pending;  // the components still to resolve, the next one last
+  auto push = [&](std::string_view path) {
+    std::vector<std::string> parts;
+    for (size_t i = 0; i < path.size();) {
+      size_t slash = std::min(path.find('/', i), path.size());
+      if (slash > i) parts.emplace_back(path.substr(i, slash - i));
+      i = slash + 1;
+    }
+    pending.insert(pending.end(), parts.rbegin(), parts.rend());
+  };
+  push(abs_path);
+  std::string resolved;  // "" for the root
+  bool beyond = false;   // past a part that cannot be resolved
+  int links = 0;
+  while (!pending.empty()) {
+    std::string part = std::move(pending.back());
+    pending.pop_back();
+    if (part == ".") continue;
+    if (part == "..") {
+      resolved = parent_of(resolved);
+      continue;
+    }
+    std::string next = resolved + "/" + part;
+    if (!beyond) {
+      auto st = stat_abs(next);
+      if (!st.ok()) {
+        ErrorKind kind = st.error().kind;
+        if (kind != ErrorKind::NotFound && kind != ErrorKind::Permission) return st.error();
+        beyond = true;
+      } else if (st.value().type == EntryType::Symlink) {
+        if (++links > 40) return errno_error(ELOOP, "resolve " + url_of(abs_path));
+        const std::string& target = st.value().link_target;
+        if (target.starts_with('/')) resolved.clear();
+        push(target);
+        continue;
+      }
+    }
+    resolved = std::move(next);
+  }
+  return resolved.empty() ? std::string("/") : resolved;
+}
+
 Result<std::vector<Entry>> EosEndpoint::list(const RelPath& dir) {
   std::string abs = absolute(dir);
   // The link target comes last: parse_find_line takes it to the end of the line.
   std::string request = find_request(abs, "type,size,uid,gid,mode,flags,mtime,link");
   auto result = proc("mgm.cmd.proto=" + base64(request));
   if (!result.ok()) return result.error();
-  if (result.value().retc != 0)
-    return errno_error(result.value().retc, "list " + url_of(abs) + ": " + result.value().err);
+  const ProcResult& reply = result.value();
+  // For identities other than root and sudoers, find stops after 100000
+  // files (counting those of the subdirectories) or 50000 directories
+  // (E2BIG), and leaves out subdirectories they may not read (EACCES),
+  // naming them in its error output (EOS 5.5 mgm/proc/user/NewfindCmd.cc).
+  bool truncated = reply.retc == E2BIG;
+  std::vector<std::string> denied;
+  if (reply.retc == EACCES) {
+    auto names = parse_find_denials(reply.err, abs);
+    if (!names) return errno_error(EACCES, "list " + url_of(abs) + ": " + reply.err);
+    denied = std::move(*names);
+  } else if (reply.retc != 0 && !truncated) {
+    return errno_error(reply.retc, "list " + url_of(abs) + ": " + reply.err);
+  }
 
   std::vector<Entry> entries;
   bool listed_itself = false;
   size_t skipped = 0;
   std::string first_problem;
-  std::istringstream lines(result.value().out);
+  std::istringstream lines(reply.out);
   std::string line;
   while (std::getline(lines, line)) {
     if (line.empty()) continue;
@@ -567,11 +730,10 @@ Result<std::vector<Entry>> EosEndpoint::list(const RelPath& dir) {
     else
       listed_itself = true;
   }
-  // find prints paths below the directory's real path, which differs when
-  // the path leads through a symlink.
-  if (!listed_itself)
-    return Error{ErrorKind::Other, "the listing of " + url_of(abs) + " does not name the " +
-                                       "directory itself (a symlink in the path?)"};
+  // find prints paths below the directory's real path, which the root is.
+  if (!listed_itself && !truncated)
+    return Error{ErrorKind::Other,
+                 "the listing of " + url_of(abs) + " does not name the directory itself"};
   // A name listed twice means that a name with line breaks forged a line:
   // neither entry can be trusted.
   std::unordered_map<std::string, int> listed;
@@ -584,25 +746,62 @@ Result<std::vector<Entry>> EosEndpoint::list(const RelPath& dir) {
   if (skipped > 0)
     log::warn("skipping ", skipped, " entries of ", url_of(abs),
               " that cannot be listed safely, the first: ", first_problem);
+  if (truncated) {
+    Status completed = complete_listing(abs, entries);
+    if (!completed.ok()) return completed.error();
+  }
+  // Subdirectories left out for lack of permission are listed all the same,
+  // so that walking into them fails for them alone.
+  for (const std::string& name : denied) {
+    bool known = std::any_of(entries.begin(), entries.end(),
+                             [&](const Entry& e) { return e.name == name; });
+    if (known) continue;
+    auto e = stat_abs(abs == "/" ? "/" + name : abs + "/" + name);
+    if (!e.ok()) {
+      if (e.error().kind == ErrorKind::NotFound) continue;
+      return e.error();
+    }
+    entries.push_back(std::move(e).value());
+  }
   return entries;
+}
+
+Status EosEndpoint::complete_listing(const std::string& abs, std::vector<Entry>& entries) {
+  if (!truncation_warned_.exchange(true))
+    log::warn("EOS cuts find results short for this identity: large directories of ",
+              describe(), " are listed entry by entry, which is slow");
+  auto request = request_path(abs);
+  XrdCl::DirectoryList* listing = nullptr;
+  XrdCl::XRootDStatus st = fs_->DirList(request.value(), XrdCl::DirListFlags::None, listing);
+  if (!st.IsOK()) return xrd_error(st, "list " + url_of(abs));
+  std::unique_ptr<XrdCl::DirectoryList> owned(listing);
+  std::unordered_set<std::string> names;
+  for (auto it = listing->Begin(); it != listing->End(); ++it) names.insert((*it)->GetName());
+  // A line of the cut listing for a name that does not exist was forged.
+  std::erase_if(entries, [&](const Entry& e) { return !names.count(e.name); });
+  std::unordered_set<std::string> listed;
+  for (const Entry& e : entries) listed.insert(e.name);
+  for (const std::string& name : names) {
+    // find skips version directories, and so does this.
+    if (listed.count(name) || !valid_entry_name(name) || name.starts_with(".sys.v#.")) continue;
+    auto e = stat_abs(abs == "/" ? "/" + name : abs + "/" + name);
+    if (!e.ok()) {
+      if (e.error().kind == ErrorKind::NotFound) continue;
+      return e.error();
+    }
+    entries.push_back(std::move(e).value());
+  }
+  return {};
 }
 
 Status EosEndpoint::symlink(const RelPath& path, const std::string& target) {
   std::string abs = absolute(path);
-  // The MGM takes the source and target verbatim from the command's opaque
-  // part (mgm/proc/user/File.cc), so they cannot be encoded.
-  if (!opaque_safe(abs) || !opaque_safe(target))
+  if (!symlink_safe(abs, target))
     return Error{ErrorKind::Unsupported,
-                 "symlink " + url_of(abs) + ": EOS cannot create a symlink whose path or target " +
-                     "contains '&', '=', '?', '#', '%' or control characters"};
-  // EOS refuses to replace a symlink, so an existing one is removed first.
-  auto existing = stat(path);
-  if (existing.ok() && existing.value().type == EntryType::Symlink) {
-    Status removed = remove_abs(abs);
-    if (!removed.ok() && removed.error().kind != ErrorKind::NotFound) return removed;
-  }
-  auto result = proc("mgm.cmd=file&mgm.subcmd=symlink&mgm.path=" + eos_encoded_path(abs) +
-                     "&eos.encodepath=1&mgm.file.source=" + abs + "&mgm.file.target=" + target);
+                 "symlink " + url_of(abs) + ": EOS cannot store this path or target as it is"};
+  // The protobuf command takes path and target as bytes, and replaces an
+  // existing symlink.
+  auto result = proc("mgm.cmd.proto=" + base64(symlink_request(abs, target)));
   if (!result.ok()) return result.error();
   if (result.value().retc != 0)
     return errno_error(result.value().retc, "symlink " + url_of(abs) + ": " + result.value().err);
@@ -615,12 +814,13 @@ Status EosEndpoint::set_metadata(const RelPath& path, const Entry& md, MetaField
 
 Status EosEndpoint::set_metadata_abs(const std::string& abs, const Entry& md, MetaFields fields,
                                      bool is_symlink) {
+  std::string request = request_path(abs).value();
   // The mtime first: utimes needs write access, which the mode may take away.
   if (has(fields, MetaFields::Mtime)) {
     char nsec[16];
     std::snprintf(nsec, sizeof nsec, "%09d", md.mtime.nsec);
     XrdCl::Buffer arg;
-    arg.FromString(eos_request_path(abs) + "&mgm.pcmd=utimes&tv1_sec=0&tv1_nsec=0&tv2_sec=" +
+    arg.FromString(request + "&mgm.pcmd=utimes&tv1_sec=0&tv1_nsec=0&tv2_sec=" +
                    std::to_string(md.mtime.sec) + "&tv2_nsec=" + nsec + std::string(kApp));
     XrdCl::Buffer* response = nullptr;
     XrdCl::XRootDStatus st = fs_->Query(XrdCl::QueryCode::OpaqueFile, arg, response);
@@ -632,10 +832,11 @@ Status EosEndpoint::set_metadata_abs(const std::string& abs, const Entry& md, Me
       return errno_error(retc ? retc : EIO, "utimes " + url_of(abs) + ": " + text);
     }
   }
-  // Owners and modes of symlinks are not EOS's to set (chown follows the link).
-  if (has(fields, MetaFields::Owner) && !is_symlink) {
-    auto result = proc("mgm.cmd=chown&mgm.path=" + eos_encoded_path(abs) + "&eos.encodepath=1" +
-                       "&mgm.chown.owner=" + std::to_string(md.uid) + ":" + std::to_string(md.gid));
+  // chown with option h changes a symlink itself rather than its target.
+  if (has(fields, MetaFields::Owner) && (!is_symlink || caps_.symlink_owner)) {
+    auto result = proc("mgm.cmd=chown&mgm.chown.option=h&mgm.path=" + eos_encoded_path(abs) +
+                       "&eos.encodepath=1&mgm.chown.owner=" + std::to_string(md.uid) + ":" +
+                       std::to_string(md.gid));
     if (!result.ok()) return result.error();
     if (result.value().retc != 0)
       return errno_error(result.value().retc, "chown " + url_of(abs) + ": " + result.value().err);
@@ -652,32 +853,6 @@ Status EosEndpoint::set_metadata_abs(const std::string& abs, const Entry& md, Me
   return {};
 }
 
-Result<ChecksumType> EosEndpoint::directory_checksum(const std::string& abs_dir) {
-  {
-    std::lock_guard lock(cache_mutex_);
-    auto it = directory_checksums_.find(abs_dir);
-    if (it != directory_checksums_.end()) return it->second;
-  }
-  auto result = proc("mgm.cmd=attr&mgm.subcmd=get&mgm.attr.key=sys.forced.checksum&mgm.path=" +
-                     eos_encoded_path(abs_dir) + "&eos.encodepath=1");
-  if (!result.ok()) return result.error();
-  ChecksumType type = ChecksumType::Adler32;  // EOS's default
-  if (result.value().retc == 0) {
-    // sys.forced.checksum="adler"
-    std::string out = result.value().out;
-    auto q1 = out.find('"');
-    auto q2 = q1 == std::string::npos ? q1 : out.find('"', q1 + 1);
-    if (q1 != std::string::npos && q2 != std::string::npos) {
-      std::string name = out.substr(q1 + 1, q2 - q1 - 1);
-      auto parsed = parse_checksum_type(name);
-      type = parsed ? *parsed : ChecksumType::None;
-    }
-  }
-  std::lock_guard lock(cache_mutex_);
-  directory_checksums_[abs_dir] = type;
-  return type;
-}
-
 Result<std::unique_ptr<FileReader>> EosEndpoint::open_read(const RelPath& path) {
   auto inner = XrdEndpoint::open_read(path);
   if (!inner.ok()) return inner.error();
@@ -687,18 +862,15 @@ Result<std::unique_ptr<FileReader>> EosEndpoint::open_read(const RelPath& path) 
 Result<std::unique_ptr<FileWriter>> EosEndpoint::open_write(const RelPath& path,
                                                             const CommitSpec& spec) {
   std::string abs = absolute(path);
-  auto stored = directory_checksum(parent_of(abs));
-  if (!stored.ok()) return stored.error();
-  std::string url = open_url(eos_request_path(abs) + "&eos.atomic=1" + std::string(kApp));
+  std::string url = open_url(request_path(abs).value() + "&eos.atomic=1" + std::string(kApp));
   if (has(spec.fields, MetaFields::Mtime)) url += "&eos.mtime=" + format_timespec(spec.metadata.mtime);
   auto file = new_write_file();
   ModeBits mode = has(spec.fields, MetaFields::Mode) ? spec.metadata.mode : 0644;
   XrdCl::XRootDStatus st = file->Open(url, XrdCl::OpenFlags::Delete | XrdCl::OpenFlags::Write,
                                       static_cast<XrdCl::Access::Mode>(mode & 0777));
   if (!st.IsOK()) return xrd_error(st, "create " + url_of(abs));
-  std::unique_ptr<FileWriter> upload(
-      new EosUploadWriter(std::move(file), url_of(abs), options_.write_window));
-  return std::unique_ptr<FileWriter>(new EosWriter(*this, std::move(upload), abs, stored.value()));
+  std::unique_ptr<FileWriter> upload(new EosUploadWriter(std::move(file), url_of(abs)));
+  return std::unique_ptr<FileWriter>(new EosWriter(*this, std::move(upload), abs, url_of(abs)));
 }
 
 }  // namespace eosmirror

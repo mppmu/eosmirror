@@ -18,12 +18,16 @@ namespace eosmirror {
 struct Capabilities {
   // The resolution of stored mtimes in nanoseconds (1 = full, 1000000000 = seconds).
   int32_t mtime_resolution = 1;
+  // Whether entries have owners and groups (plain XRootD reports none).
+  bool has_owners = true;
   // Whether owner and group can be set to arbitrary ids.
   bool can_set_owner = false;
-  // Whether modes can be set, and which of the bits (plain XRootD carries
-  // only the permission bits, not setuid, setgid and sticky).
+  // Whether modes can be set, and which of the bits of files and directories
+  // (plain XRootD carries only the permission bits, EOS no setuid bit on
+  // directories and only the permission bits of files).
   bool can_set_mode = true;
-  ModeBits mode_bits = 07777;
+  ModeBits file_mode_bits = 07777;
+  ModeBits dir_mode_bits = 07777;
   // Whether mtimes can be set. Without it, files are compared by size only.
   bool can_set_mtime = true;
   // Whether symlinks exist on the endpoint.
@@ -89,6 +93,10 @@ class Endpoint {
   // Whether an entry name is one of the endpoint's own temporary files, so
   // that listings of a target never report them as foreign.
   virtual bool is_temporary(std::string_view /*name*/) const { return false; }
+
+  // A warning about writing to this endpoint, shown when a run starts with
+  // it as target; empty if there is none.
+  virtual std::string target_warning() const { return {}; }
 
   // Stats an entry without following symlinks. The result's name is the
   // last path component.

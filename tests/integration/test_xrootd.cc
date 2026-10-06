@@ -2,7 +2,8 @@
 //
 // Integration tests against a live XRootD server. EOSMIRROR_XROOTD_URL names
 // a writable directory on it, e.g. root://xrootd:1094//data; the tests use a
-// fresh subdirectory of it.
+// fresh subdirectory of it, and the fixtures that xrootd-server.sh creates.
+#include <XrdCl/XrdClDefaultEnv.hh>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -11,10 +12,13 @@
 #include <filesystem>
 
 #include "doctest/doctest.h"
+#include "eosmirror/endpoints.hh"
 #include "eosmirror/engine.hh"
+#include "eosmirror/eos_endpoint.hh"
 #include "eosmirror/posix_endpoint.hh"
 #include "eosmirror/selftest.hh"
 #include "eosmirror/xrootd_endpoint.hh"
+#include "stderr_capture.hh"
 #include "temp_dir.hh"
 
 using namespace eosmirror;
@@ -75,7 +79,10 @@ TEST_CASE("xrootd endpoint: stat, list, mkdir, write, checksum, rename, remove")
   XrdEndpoint& ep = *dir.endpoint;
   Capabilities caps = ep.capabilities();
   CHECK(caps.checksum == ChecksumType::Adler32);
+  CHECK_FALSE(caps.has_owners);
   CHECK_FALSE(caps.can_set_owner);
+  CHECK(caps.file_mode_bits == 0777);
+  CHECK(caps.dir_mode_bits == 0777);
   CHECK_FALSE(caps.can_set_mtime);
   CHECK_FALSE(caps.has_symlinks);
   CHECK(caps.mtime_resolution == 1000000000);
@@ -221,4 +228,54 @@ TEST_CASE("selftest against xrootd") {
   }
   CHECK(r.ok());
   CHECK(dir.endpoint->list("").value().empty());
+}
+
+TEST_CASE("xrootd endpoint: detection, and servers that cannot be asked") {
+  if (!base_url()) return;
+  EndpointSettings settings;
+  auto ep = make_endpoint(base_url(), settings);
+  REQUIRE(ep.ok());
+  CHECK_FALSE(ep.value()->capabilities().has_symlinks);
+  CHECK_FALSE(EosEndpoint::is_eos(base_url()).value());
+
+  // No answer is no reason to take a server for plain XRootD.
+  XrdCl::Env* env = XrdCl::DefaultEnv::GetEnv();
+  int window = 120, retry = 5;  // XrdCl's defaults
+  env->GetInt("ConnectionWindow", window);
+  env->GetInt("ConnectionRetry", retry);
+  env->PutInt("ConnectionWindow", 1);
+  env->PutInt("ConnectionRetry", 1);
+  auto parts = parse_endpoint_url(base_url()).value();
+  std::string closed = parts.server.substr(0, parts.server.rfind(':')) + ":1/" + parts.path;
+  auto unreachable = make_endpoint(closed, settings);
+  env->PutInt("ConnectionWindow", window);
+  env->PutInt("ConnectionRetry", retry);
+  REQUIRE_FALSE(unreachable.ok());
+  CHECK(is_transient(unreachable.error().kind));
+}
+
+TEST_CASE("xrootd to FS: owners and symlink loops of a server that follows symlinks") {
+  if (!base_url()) return;
+  // xrootd-server.sh creates loop/sub/up -> .. and loop/self -> ., which the
+  // server lists as directories.
+  std::string url = std::string(base_url()) + "/fixtures/loop";
+  auto src = XrdEndpoint::create(url);
+  REQUIRE(src.ok());
+  TempDir tmp;
+  PosixEndpoint dst(tmp.path());
+  SyncOptions options = test_options();
+  options.preserve_owner = true;  // nothing to preserve, so no reason to refuse
+  Cancellation cancel;
+  Report r;
+  StderrCapture err;
+  Engine engine(*src.value(), dst, options, r, nullptr, cancel);
+  REQUIRE(engine.run().ok());
+  CHECK(err.text().find("reports no owners") != std::string::npos);
+  CHECK(r.stats.failures == 2);
+  for (const Failure& f : r.failures()) {
+    INFO("failure ", f.path, ": ", f.error.describe());
+    CHECK((f.path == "self" || f.path == "sub/up"));
+    CHECK(f.error.message.find("directory cycle") != std::string::npos);
+  }
+  CHECK(tmp.read_file("sub/f") == "fixture\n");
 }

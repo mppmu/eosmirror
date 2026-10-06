@@ -25,11 +25,25 @@ struct XrdOptions {
 // the opaque parameters (authz tokens and the like).
 std::string display_url(std::string_view url);
 
+// The parts of an endpoint URL, proto://[user@]host[:port]//path[?cgi].
+struct EndpointUrl {
+  std::string server;  // proto://[user@]host:port
+  std::string path;    // absolute, without trailing slash
+  std::string cgi;     // the opaque parameters, without '?'
+};
+
+Result<EndpointUrl> parse_endpoint_url(const std::string& url);
+
+// A request path or URL with opaque parameters added after its own.
+std::string with_cgi(std::string request, std::string_view cgi);
+
 // The path of a request to an XRootD server. XRootD has no escaping for
 // paths: a '?' starts the opaque parameters, so paths with one are refused.
 Result<std::string> xrootd_request_path(const std::string& abs_path);
 
-// An endpoint on an XRootD server, given as root://host[:port]//path.
+// An endpoint on an XRootD server, given as root://host[:port]//path, or
+// roots:// for TLS. Opaque parameters of the URL (such as authz tokens) go
+// with every request.
 //
 // Plain XRootD has no symlinks, owners or settable mtimes, so this endpoint
 // reports those as missing capabilities; the EOS endpoint adds them through
@@ -63,11 +77,12 @@ class XrdEndpoint : public Endpoint {
     return display_url(server_) + "/" + abs_path;
   }
 
-  // An absolute path as sent to the server. EOS encodes paths and adds the
-  // opaque parameter that says so.
+  // An absolute path as sent to the server, with the URL's opaque
+  // parameters. EOS encodes paths and adds the opaque parameter that says so.
   virtual Result<std::string> request_path(const std::string& abs_path) const;
 
-  // Operations on absolute server paths, used by the writer.
+  // Operations on absolute server paths, used by the writer. A stored
+  // checksum of a type eosmirror cannot compute, or none, has type None.
   Result<Checksum> query_checksum(const std::string& abs_path);
   Status remove_abs(const std::string& abs_path);
   Status rename_abs(const std::string& from, const std::string& to);
@@ -79,7 +94,7 @@ class XrdEndpoint : public Endpoint {
   static std::unique_ptr<XrdCl::File> new_write_file();
 
  protected:
-  XrdEndpoint(std::string url, std::string server, std::string root, XrdOptions options);
+  XrdEndpoint(const std::string& url, EndpointUrl parts, XrdOptions options);
 
   // The URL for File::Open of a request path.
   std::string open_url(const std::string& request_path) const {
@@ -89,6 +104,7 @@ class XrdEndpoint : public Endpoint {
   std::string url_;     // as given, for display (display_url)
   std::string server_;  // root://[user[:password]@]host:port
   std::string root_;    // the path part, without trailing slash
+  std::string cgi_;     // the URL's opaque parameters
   XrdOptions options_;
   Capabilities caps_;
   std::unique_ptr<XrdCl::FileSystem> fs_;

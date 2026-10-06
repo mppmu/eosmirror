@@ -14,10 +14,11 @@ class Cancellation {
   void request() { requested_.store(true, std::memory_order_relaxed); }
   bool requested() const { return requested_.load(std::memory_order_relaxed); }
 
-  // Sleeps for the duration unless cancelled first. Returns true if cancelled.
-  bool wait(std::chrono::milliseconds duration) const {
+  // Sleeps for the duration unless cancelled first, or until the stop flag is
+  // set. Returns true if cancelled or stopped.
+  bool wait(std::chrono::milliseconds duration, const std::atomic<bool>* stop = nullptr) const {
     auto deadline = std::chrono::steady_clock::now() + duration;
-    while (!requested()) {
+    while (!requested() && !(stop && stop->load())) {
       auto now = std::chrono::steady_clock::now();
       if (now >= deadline) return false;
       auto slice = std::min<std::chrono::steady_clock::duration>(deadline - now,

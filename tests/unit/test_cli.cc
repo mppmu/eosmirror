@@ -88,3 +88,23 @@ TEST_CASE("usage errors are rejected") {
   CHECK(parse({"sync", "--help"}).value().command == Command::Help);
   CHECK(parse({"failures", "j.db"}).value().journal == "j.db");
 }
+
+TEST_CASE("paths below /eos name the EOS instance of the MGM") {
+  CHECK(parse({"sync", "--mgm", "root://mgm.example.org", "/eos/a", "/local"}).value().endpoints.mgm ==
+        "root://mgm.example.org");
+  CHECK(parse({"selftest", "--mgm=root://m", "/eos/a"}).value().endpoints.mgm == "root://m");
+  CHECK_FALSE(parse({"selftest", "/eos/a", "--mgm"}).ok());
+
+  CHECK(eos_path_url("/eos/user/x", "root://mgm:1094/", nullptr).value() ==
+        "root://mgm:1094//eos/user/x");
+  CHECK(eos_path_url("/eos", "", "root://env.example.org").value() == "root://env.example.org//eos");
+  CHECK(eos_path_url("/eos/x", "root://option", "root://env").value() == "root://option//eos/x");
+  CHECK(eos_path_url("/eos/x", "", "root://env//").value() == "root://env//eos/x");
+  auto unset = eos_path_url("/eos/x", "", nullptr);
+  REQUIRE_FALSE(unset.ok());
+  CHECK(unset.error().message.find("EOS_MGM_URL") != std::string::npos);
+  CHECK_FALSE(eos_path_url("/eos/x", "", "").ok());
+  // Other paths, and the explicit local form, stay as they are.
+  for (const char* spec : {"/eosuser/x", "/data/eos/x", "file:///eos/x", "root://h//eos/x", "eos"})
+    CHECK(eos_path_url(spec, "", "root://env").value() == spec);
+}

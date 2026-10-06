@@ -19,6 +19,7 @@ std::string_view to_string(ErrorKind kind) {
     case ErrorKind::Timeout: return "timeout";
     case ErrorKind::Changed: return "changed during copy";
     case ErrorKind::Checksum: return "checksum mismatch";
+    case ErrorKind::NoSpace: return "no space";
     case ErrorKind::Cancelled: return "cancelled";
     case ErrorKind::Other: return "error";
   }
@@ -55,14 +56,14 @@ Error errno_error(int err, std::string_view context) {
     case ENOSYS:
     case EOPNOTSUPP: kind = ErrorKind::Unsupported; break;
     case ETIMEDOUT: kind = ErrorKind::Timeout; break;
+    case ENOSPC:
+    case EDQUOT: kind = ErrorKind::NoSpace; break;
     case EIO:
     case EAGAIN:
     case EINTR:
     case ESTALE:
     case EBUSY:
     case ENOMEM:
-    case ENOSPC:
-    case EDQUOT:
     case ECONNRESET:
     case ECONNREFUSED:
     case EHOSTUNREACH:

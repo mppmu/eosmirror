@@ -60,6 +60,10 @@ TEST_CASE("posix listing reports every entry type with metadata") {
   REQUIRE(sub);
   CHECK(sub->type == EntryType::Directory);
   CHECK(sub->mode == 02750);
+  // Directories carry their identity, however they are reached.
+  CHECK_FALSE(sub->id.empty());
+  CHECK(sub->id == PosixEndpoint(tmp.path()).stat("src/sub").value().id);
+  CHECK(sub->id != ep.stat("").value().id);
 
   const Entry* link = find(entries, "link");
   REQUIRE(link);
@@ -282,4 +286,28 @@ TEST_CASE("posix mkdir, symlink, metadata and remove") {
   } else {
     CHECK_FALSE(ep.capabilities().can_set_owner);
   }
+}
+
+TEST_CASE("the file system type of a path comes from the longest mount point above it") {
+  std::string table =
+      "22 1 0:21 / / rw,relatime shared:1 - ext4 /dev/sda1 rw\n"
+      "23 22 0:22 / /eos rw shared:2 - tmpfs tmpfs rw\n"
+      "24 23 0:45 / /eos/user rw,nosuid,nodev,relatime shared:3 - fuse.eosxd eosuser rw,user_id=0\n"
+      "25 22 0:46 / /data/my\\040disk rw master:1 propagate_from:2 - xfs /dev/sdb rw\n"
+      "26 22 0:47 / /eos/user-old rw - nfs4 server:/x rw\n"
+      "garbage line\n";
+  CHECK(mount_type(table, "/eos/user/o/oschulz/data") == "fuse.eosxd");
+  CHECK(mount_type(table, "/eos/user") == "fuse.eosxd");
+  CHECK(mount_type(table, "/eos/user-old/x") == "nfs4");
+  CHECK(mount_type(table, "/eos/project") == "tmpfs");
+  CHECK(mount_type(table, "/data/my disk/x") == "xfs");
+  CHECK(mount_type(table, "/data/my") == "ext4");
+  CHECK(mount_type(table, "/home") == "ext4");
+  CHECK_FALSE(mount_type("", "/home"));
+  // A later mount on the same point covers the earlier one.
+  CHECK(mount_type(table + "27 24 0:48 / /eos/user rw - fuse.sshfs host:/ rw\n", "/eos/user/x") ==
+        "fuse.sshfs");
+
+  TempDir tmp;
+  CHECK(PosixEndpoint(tmp.path()).target_warning().empty());
 }

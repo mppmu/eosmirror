@@ -27,6 +27,10 @@ rc=0; "$bin" sync 2>/dev/null || rc=$?
 rc=0; "$bin" sync "$work/src" 2>/dev/null || rc=$?
 [[ $rc == 2 ]] || fail "usage error exit code, got $rc"
 
+# Paths below /eos name an EOS instance, which needs an MGM.
+rc=0; env -u EOS_MGM_URL "$bin" sync -q /eos/x "$work/eosdst" 2> "$work/eos.err" || rc=$?
+[[ $rc == 3 ]] && grep -q 'EOS_MGM_URL' "$work/eos.err" || fail "/eos path without an MGM: $rc $(cat "$work/eos.err")"
+
 # The self-test passes on a local directory and cleans up.
 mkdir "$work/target"
 "$bin" selftest "${owner_opt[@]}" "$work/target" > "$work/selftest.out" || fail "selftest: $(cat "$work/selftest.out")"

@@ -82,8 +82,9 @@ class Selftest {
                     static_cast<long long>(md.mtime.sec), md.mtime.nsec);
       problems += buf;
     }
-    if (has(fields, MetaFields::Mode) && (e.mode & caps_.mode_bits) != (md.mode & caps_.mode_bits)) {
-      std::snprintf(buf, sizeof buf, " mode %04o instead of %04o", e.mode, md.mode & caps_.mode_bits);
+    ModeBits bits = md.type == EntryType::Directory ? caps_.dir_mode_bits : caps_.file_mode_bits;
+    if (has(fields, MetaFields::Mode) && (e.mode & bits) != (md.mode & bits)) {
+      std::snprintf(buf, sizeof buf, " mode %04o instead of %04o", e.mode, md.mode & bits);
       problems += buf;
     }
     if (has(fields, MetaFields::Owner) && (e.uid != md.uid || e.gid != md.gid)) {

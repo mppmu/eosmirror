@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
+#include <cstdio>
 #include <limits>
 #include <map>
 #include <mutex>
@@ -147,7 +148,8 @@ struct Engine::Impl {
   bool use_mtimes = true;    // the target stores mtimes: compare and set them
   bool use_symlinks = true;  // the target has symlinks
   bool symlink_owner = true;  // symlinks on the target have settable owners
-  ModeBits mode_bits = 07777;  // the mode bits the target stores
+  ModeBits file_mode_bits = 07777;  // the mode bits the target stores
+  ModeBits dir_mode_bits = 07777;
   bool target_verifies = false;  // the target computes checksums of stored files
   bool relax_modes = false;  // make read-only target directories writable first
 
@@ -229,8 +231,8 @@ struct Engine::Impl {
     if (owner_matters && (src.uid != dst.uid || src.gid != dst.gid))
       fields = fields | MetaFields::Owner;
     bool mode_matters = options.preserve_mode && src.type != EntryType::Symlink;
-    if (mode_matters && (src.mode & mode_bits) != (dst.mode & mode_bits))
-      fields = fields | MetaFields::Mode;
+    ModeBits bits = src.type == EntryType::Directory ? dir_mode_bits : file_mode_bits;
+    if (mode_matters && (src.mode & bits) != (dst.mode & bits)) fields = fields | MetaFields::Mode;
     // Changing the owner clears setuid and setgid bits, so the mode is
     // reapplied afterwards.
     if (mode_matters && has(fields, MetaFields::Owner) && (src.mode & 06000))
@@ -440,6 +442,16 @@ struct Engine::Impl {
 
   void handle_dir(const std::shared_ptr<DirNode>& node, const Entry& e, const Entry* existing) {
     RelPath path = join(node->path, e.name);
+    // Listings that follow symlinks can lead back into an ancestor.
+    if (!e.id.empty()) {
+      for (const DirNode* a = node.get(); a; a = a->parent.get()) {
+        if (a->source.id != e.id) continue;
+        fail(path, EntryType::Directory,
+             Error{ErrorKind::Other, "directory cycle: " + path + " is " +
+                                         (a->path.empty() ? "the top directory" : a->path)});
+        return;
+      }
+    }
     auto child = std::make_shared<DirNode>();
     child->path = path;
     child->source = e;
@@ -621,8 +633,7 @@ struct Engine::Impl {
     double best_bytes = 0, best_files = 0;
     auto last = std::chrono::steady_clock::now();
     while (!controller_stop) {
-      if (cancel.wait(options.adapt_interval)) break;
-      if (controller_stop) break;
+      if (cancel.wait(options.adapt_interval, &controller_stop)) break;
       auto now = std::chrono::steady_clock::now();
       double secs = std::chrono::duration<double>(now - last).count();
       last = now;
@@ -703,6 +714,12 @@ struct Engine::Impl {
   Status preflight() {
     if (ran) return Error{ErrorKind::Other, "an engine runs only once"};
     ran = true;
+    if (std::string warning = target.target_warning(); !warning.empty()) log::warn(warning);
+    if (options.preserve_owner && !source.capabilities().has_owners) {
+      log::warn(source.describe(), " reports no owners: owners and groups are not synchronized");
+      options.preserve_owner = false;
+      copy_options.preserve_owner = false;
+    }
     if (options.preserve_owner && !target.capabilities().can_set_owner)
       return Error{ErrorKind::Permission,
                    "cannot set owners on " + target.describe() + " (use --no-owner to copy anyway)"};
@@ -720,10 +737,15 @@ struct Engine::Impl {
     use_mtimes = dst.can_set_mtime;
     use_symlinks = dst.has_symlinks;
     symlink_owner = dst.symlink_owner;
-    mode_bits = dst.mode_bits;
+    file_mode_bits = dst.file_mode_bits;
+    dir_mode_bits = dst.dir_mode_bits;
     target_verifies = dst.checksum != ChecksumType::None;
-    if (options.preserve_mode && mode_bits != 07777)
-      log::info(target.describe(), " stores only the permission bits of modes");
+    if (options.preserve_mode && (file_mode_bits != 07777 || dir_mode_bits != 07777)) {
+      char bits[80];
+      std::snprintf(bits, sizeof bits, "%04o of files and %04o of directories", file_mode_bits,
+                    dir_mode_bits);
+      log::info(target.describe(), " stores only the mode bits ", bits);
+    }
     relax_modes = !dst.can_set_owner && options.preserve_mode;
     copy_options.preserve_mtime = use_mtimes;
     if (!use_mtimes)

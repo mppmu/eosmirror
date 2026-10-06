@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <thread>
 
@@ -252,6 +253,23 @@ TEST_CASE("FS to FS: dry run changes nothing") {
   CHECK(r.stats.dirs_created == 4);
   CHECK(r.stats.symlinks_created == 3);
   CHECK_FALSE(fs::exists(tmp.sub("dst")));
+}
+
+TEST_CASE("FS to FS: the adaptive controller does not delay the end of a run") {
+  TempDir tmp;
+  make_source_tree(tmp);
+  PosixEndpoint src(tmp.sub("src"));
+  PosixEndpoint dst(tmp.sub("dst"));
+  SyncOptions options = test_options();
+  options.adaptive = true;
+  options.min_transfers = 1;
+  options.transfers = 2;
+  options.adapt_interval = std::chrono::seconds(60);
+  Report r;
+  auto start = std::chrono::steady_clock::now();
+  REQUIRE(run_sync(src, dst, options, r).ok());
+  CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds(10));
+  CHECK(r.stats.files_copied == 4);
 }
 
 TEST_CASE("FS to FS: symlink targets can be rewritten") {
@@ -791,6 +809,72 @@ TEST_CASE("fake: targets without mtimes compare sizes, targets without symlinks 
   CHECK(r2.stats.files_copied == 0);
   CHECK(r2.stats.files_unchanged == 3);
   CHECK(r2.stats.metadata_fixed == 0);
+}
+
+TEST_CASE("fake: owners of a source without owners are left alone") {
+  FakeEndpoint src, dst;
+  src.caps.has_owners = false;
+  dst.caps.can_set_owner = false;  // no reason to refuse the run
+  populate(src);
+  for (const RelPath& p : src.paths()) src.modify(p, [](FakeEndpoint::Node& n) { n.entry.uid = 0; });
+  Report r;
+  StderrCapture err;
+  REQUIRE(run_sync(src, dst, fake_options(), r).ok());
+  CHECK(err.text().find("reports no owners") != std::string::npos);
+  CHECK(r.stats.failures == 0);
+  CHECK(r.stats.files_copied == 3);
+  for (const RelPath& p : dst.paths()) {
+    INFO("entry ", p);
+    CHECK(dst.get(p)->entry.uid == 1000);
+  }
+  Report r2;
+  REQUIRE(run_sync(src, dst, fake_options(), r2).ok());
+  CHECK(r2.stats.metadata_fixed == 0);
+}
+
+TEST_CASE("fake: directories that lead back to an ancestor are failures, not walked") {
+  FakeEndpoint src, dst;
+  src.modify("", [](FakeEndpoint::Node& n) { n.entry.id = "top"; });
+  src.add_dir("a").id = "a";
+  src.add_dir("a/b").id = "b";
+  src.add_file("a/b/f", "content");
+  src.add_dir("a/b/up").id = "a";     // like a symlink to ..
+  src.add_dir("a/b/top").id = "top";  // like a symlink to the top
+  src.add_dir("a/b/c").id = "c";
+  src.add_dir("a/b/c/elsewhere").id = "b2";
+  Report r;
+  REQUIRE(run_sync(src, dst, fake_options(), r).ok());
+  CHECK(r.stats.failures == 2);
+  for (const Failure& f : r.failures()) {
+    CHECK((f.path == "a/b/up" || f.path == "a/b/top"));
+    CHECK(f.error.message.find("directory cycle") != std::string::npos);
+  }
+  CHECK(dst.get("a/b/f"));
+  CHECK(dst.get("a/b/c/elsewhere"));
+  CHECK_FALSE(dst.get("a/b/up"));
+  CHECK_FALSE(dst.get("a/b/top"));
+}
+
+TEST_CASE("fake: mode bits a target does not store are not compared") {
+  FakeEndpoint src, dst;
+  dst.caps.file_mode_bits = 0777;
+  dst.caps.dir_mode_bits = 03777;
+  src.add_dir("d", 06755);
+  src.add_file("d/f", "x", 04755);
+  Report r;
+  REQUIRE(run_sync(src, dst, fake_options(), r).ok());
+  // What a target like EOS keeps of them.
+  dst.modify("d", [](FakeEndpoint::Node& n) { n.entry.mode = 02755; });
+  dst.modify("d/f", [](FakeEndpoint::Node& n) { n.entry.mode = 0755; });
+  Report r2;
+  REQUIRE(run_sync(src, dst, fake_options(), r2).ok());
+  CHECK(r2.stats.metadata_fixed == 0);
+
+  dst.modify("d", [](FakeEndpoint::Node& n) { n.entry.mode = 0755; });  // setgid lost
+  Report r3;
+  REQUIRE(run_sync(src, dst, fake_options(), r3).ok());
+  CHECK(r3.stats.metadata_fixed == 1);
+  CHECK(dst.get("d")->entry.mode == 06755);
 }
 
 TEST_CASE("fake: an engine runs only once") {

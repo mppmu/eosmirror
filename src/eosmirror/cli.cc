@@ -41,7 +41,7 @@ Result<uint64_t> parse_size(const std::string& text) {
 
 std::string usage() {
   return R"(Usage: eosmirror sync [options] SOURCE TARGET
-       eosmirror selftest [--no-owner] TARGET
+       eosmirror selftest [--no-owner] [--mgm URL] TARGET
        eosmirror failures JOURNAL
        eosmirror --version
 
@@ -49,7 +49,9 @@ sync replicates the tree at SOURCE to TARGET: copies files that are missing
 or differ in size or mtime, recreates symlinks, and sets owners, modes and
 mtimes. selftest checks, in a temporary directory under TARGET, that
 everything a run needs works there. Endpoints are local paths or XRootD
-URLs (root://host//path); an EOS instance is recognized, or named with eos://.
+URLs (root://host//path, roots:// for TLS); an EOS instance is recognized,
+or named with eos://. Paths below /eos are on the EOS instance of --mgm or
+EOS_MGM_URL, not on a local FUSE mount (name that as file:///eos/...).
 
 Options:
   -n, --dry-run            report what would be done, change nothing
@@ -67,11 +69,14 @@ Options:
       --min-transfers N    copies running at the start (default 4); the limit then
                            rises while throughput improves and falls on retries
       --no-adaptive        run all transfers at once from the start
-      --write-window N     writes per file in flight on XRootD targets (default 2)
+      --write-window N     writes per file in flight on plain XRootD targets
+                           (default 2); EOS uploads keep one, in order
       --max-backlog N      queued copies before directory workers wait (default 10000)
       --buffer-size SIZE   copy buffer per transfer, e.g. 8M (default)
       --retries N          retries per operation (default 2)
       --retry-delay SEC    delay before the first retry (default 1)
+      --mgm URL            the EOS MGM for paths below /eos, root://host[:port]
+                           (default: EOS_MGM_URL)
       --journal FILE       record failures and finalized directories in FILE
       --resume             skip directories the journal records as finalized
       --retry-failed       process only the failures recorded in the journal
@@ -109,6 +114,12 @@ Result<CliOptions> parse_command_line(int argc, char** argv) {
     for (size_t i = 1; i < args.size(); ++i) {
       if (args[i] == "--no-owner")
         opts.sync.preserve_owner = false;
+      else if (args[i] == "--mgm" && i + 1 == args.size())
+        return usage_error("--mgm needs a value");
+      else if (args[i] == "--mgm")
+        opts.endpoints.mgm = args[++i];
+      else if (args[i].starts_with("--mgm="))
+        opts.endpoints.mgm = args[i].substr(6);
       else if (args[i] == "-v" || args[i] == "--verbose")
         opts.log_level = LogLevel::Debug;
       else if (args[i][0] == '-' && args[i].size() > 1)
@@ -186,6 +197,10 @@ Result<CliOptions> parse_command_line(int argc, char** argv) {
   integer("--retries", [&](long long n) { retries = static_cast<int>(n); });
   integer("--retry-delay", [&](long long n) {
     sync.retry.initial_delay = std::chrono::seconds(n);
+  });
+  value("--mgm", [&](const std::string& v) -> Status {
+    opts.endpoints.mgm = v;
+    return Status();
   });
   value("--journal", [&](const std::string& v) -> Status {
     opts.journal = v;

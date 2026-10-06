@@ -4,17 +4,20 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/vfs.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdlib>
+#include <fstream>
+#include <iterator>
 #include <mutex>
+#include <vector>
 
 namespace eosmirror {
 
 namespace {
-
-constexpr std::string_view kTempMarker = ".eosmirror-";
 
 Entry entry_from_stat(std::string name, const struct stat& st) {
   Entry e;
@@ -26,6 +29,8 @@ Entry entry_from_stat(std::string name, const struct stat& st) {
     default: e.type = EntryType::Other; break;
   }
   if (e.type == EntryType::File) e.size = static_cast<uint64_t>(st.st_size);
+  if (e.type == EntryType::Directory)
+    e.id = std::to_string(st.st_dev) + ":" + std::to_string(st.st_ino);
   e.mtime = {static_cast<int64_t>(st.st_mtim.tv_sec), static_cast<int32_t>(st.st_mtim.tv_nsec)};
   e.uid = st.st_uid;
   e.gid = st.st_gid;
@@ -56,13 +61,9 @@ std::string name_of(const std::string& path) {
   return slash == std::string::npos ? path : path.substr(slash + 1);
 }
 
-// ".<name>.eosmirror-<random>" next to the final path, with the name cut
-// so that the whole fits into NAME_MAX.
+// A temporary name next to the final path.
 std::string temp_path(const std::string& final_path) {
-  std::string name = name_of(final_path);
-  constexpr size_t kMaxName = 255 - 1 - 11 - 12;
-  if (name.size() > kMaxName) name.resize(kMaxName);
-  return parent_of(final_path) + "/." + name + std::string(kTempMarker) + random_suffix();
+  return parent_of(final_path) + "/" + temporary_name(name_of(final_path));
 }
 
 Status apply_metadata_fd(int fd, const std::string& context, const Entry& md, MetaFields fields,
@@ -274,7 +275,72 @@ int32_t PosixEndpoint::mtime_resolution() const {
 }
 
 bool PosixEndpoint::is_temporary(std::string_view name) const {
-  return name.size() > 1 && name[0] == '.' && name.find(kTempMarker) != std::string_view::npos;
+  return is_temporary_name(name);
+}
+
+std::optional<std::string> mount_type(std::string_view mountinfo, std::string_view path) {
+  // "36 35 98:0 /root /mount/point rw,noatime [optional fields] - type source options",
+  // with spaces, tabs, line breaks and backslashes in the mount point as \ooo.
+  auto unescape = [](std::string_view s) {
+    std::string out;
+    for (size_t i = 0; i < s.size(); ++i) {
+      if (s[i] == '\\' && i + 3 < s.size()) {
+        out += static_cast<char>(std::strtol(std::string(s.substr(i + 1, 3)).c_str(), nullptr, 8));
+        i += 3;
+      } else {
+        out += s[i];
+      }
+    }
+    return out;
+  };
+  std::optional<std::string> type;
+  size_t best = 0;
+  while (!mountinfo.empty()) {
+    std::string_view line = mountinfo.substr(0, mountinfo.find('\n'));
+    mountinfo.remove_prefix(std::min(mountinfo.size(), line.size() + 1));
+    std::vector<std::string_view> fields;
+    for (size_t i = 0; i < line.size();) {
+      size_t space = std::min(line.find(' ', i), line.size());
+      fields.push_back(line.substr(i, space - i));
+      i = space + 1;
+    }
+    auto separator = std::find(fields.begin() + std::min<size_t>(fields.size(), 6), fields.end(), "-");
+    if (fields.size() < 5 || separator == fields.end() || separator + 1 == fields.end()) continue;
+    std::string point = unescape(fields[4]);
+    bool above = point == "/" || path == point ||
+                 (path.starts_with(point) && path.size() > point.size() && path[point.size()] == '/');
+    if (!above || point.size() < best) continue;
+    best = point.size();
+    type = std::string(*(separator + 1));
+  }
+  return type;
+}
+
+// Writing to EOS through eosxd breaks erasure-coded files: up to EOS 5.5.2,
+// stripes written out of order get zero parity.
+std::string PosixEndpoint::target_warning() const {
+  constexpr std::string_view kAdvice =
+      "writing EOS through a FUSE mount is slow and unsafe for erasure-coded directories; use "
+      "root://... or /eos/... instead";
+  std::ifstream in("/proc/self/mountinfo");
+  std::string table{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+  std::optional<std::string> type = mount_type(table, root_);
+  if (type == "fuse.eosxd") return root_ + " is on an EOS FUSE mount: " + std::string(kAdvice);
+  if (!type) {
+    // Without a mount table, any FUSE file system may be one.
+    constexpr long kFuseSuperMagic = 0x65735546;  // FUSE_SUPER_MAGIC
+    std::string path = root_;
+    struct statfs fs{};
+    while (statfs(path.c_str(), &fs) != 0) {
+      if (path.empty() || path == "/") return {};
+      path = parent_of(path);
+      if (path.empty()) path = "/";
+    }
+    if (fs.f_type == kFuseSuperMagic) type = "fuse";
+  }
+  if (type != "fuse") return {};
+  return root_ + " is on a FUSE file system; if that is an EOS FUSE mount, " +
+         std::string(kAdvice);
 }
 
 std::string PosixEndpoint::absolute(const RelPath& path) const {

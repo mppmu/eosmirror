@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -32,6 +33,8 @@ class PosixEndpoint : public Endpoint {
   std::string describe() const override { return root_; }
   Capabilities capabilities() const override;
   bool is_temporary(std::string_view name) const override;
+  // Warns about EOS FUSE mounts.
+  std::string target_warning() const override;
 
   Result<Entry> stat(const RelPath& path) override;
   Result<std::vector<Entry>> list(const RelPath& dir) override;
@@ -55,5 +58,10 @@ class PosixEndpoint : public Endpoint {
   mutable std::once_flag probe_once_;
   mutable int32_t probed_resolution_ = 1;
 };
+
+// The type of the file system that a path is on, from a mount table in the
+// format of /proc/self/mountinfo: that of the mount with the longest mount
+// point above the path. Nothing if no mount matches.
+std::optional<std::string> mount_type(std::string_view mountinfo, std::string_view path);
 
 }  // namespace eosmirror

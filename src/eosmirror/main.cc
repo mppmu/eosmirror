@@ -2,6 +2,7 @@
 #include <csignal>
 #include <cstdio>
 #include <thread>
+#include <utility>
 
 #include "eosmirror/cli.hh"
 #include "eosmirror/engine.hh"
@@ -62,15 +63,34 @@ int selftest(const CliOptions& opts) {
   return usable ? kOk : kFailures;
 }
 
+// A specification split into the part with the path and the opaque
+// parameters of a URL ("?..."), which belong to every directory on it.
+std::pair<std::string, std::string> split_spec(const std::string& spec) {
+  auto scheme = spec.find("://");
+  if (scheme == std::string::npos || spec.compare(0, scheme, "file") == 0) return {spec, ""};
+  auto query = spec.find('?');
+  if (query == std::string::npos) return {spec, ""};
+  return {spec.substr(0, query), spec.substr(query)};
+}
+
 // The specification of the directory above the one given ("" at the top).
 std::string parent_spec(const std::string& spec) {
-  auto scheme = spec.find("://");
-  size_t path_start = scheme == std::string::npos ? 0 : spec.find("//", scheme + 3);
+  auto [path, cgi] = split_spec(spec);
+  while (path.size() > 1 && path.back() == '/') path.pop_back();
+  auto scheme = path.find("://");
+  size_t path_start = scheme == std::string::npos ? 0 : path.find("//", scheme + 3);
   if (path_start == std::string::npos) return "";
   if (scheme != std::string::npos) path_start += 1;  // the path's leading slash
-  auto slash = spec.rfind('/');
+  auto slash = path.rfind('/');
   if (slash == std::string::npos || slash <= path_start) return "";
-  return spec.substr(0, slash);
+  return path.substr(0, slash) + cgi;
+}
+
+// The last path component of a specification.
+std::string spec_name(const std::string& spec) {
+  auto [path, cgi] = split_spec(spec);
+  while (path.size() > 1 && path.back() == '/') path.pop_back();
+  return path.substr(path.rfind('/') + 1);
 }
 
 // Creates the target's missing ancestors, like mkdir -p; the engine creates
@@ -83,17 +103,17 @@ Status ensure_parents(const std::string& spec, const EndpointSettings& settings,
   auto st = ep.value()->stat("");
   if (st.ok()) {
     if (st.value().type != EntryType::Directory)
-      return Error{ErrorKind::NotADirectory, parent + " is not a directory"};
+      return Error{ErrorKind::NotADirectory, ep.value()->describe() + " is not a directory"};
     return {};
   }
   if (st.error().kind != ErrorKind::NotFound) return st.error();
   Status above = ensure_parents(parent, settings, dry_run);
   if (!above.ok()) return above;
-  log::info(dry_run ? "would create " : "creating ", parent);
+  log::info(dry_run ? "would create " : "creating ", ep.value()->describe());
   if (dry_run) return {};
   auto grand = make_endpoint(parent_spec(parent), settings);
   if (!grand.ok()) return grand.error();
-  return grand.value()->mkdir(parent.substr(parent.rfind('/') + 1), 0755);
+  return grand.value()->mkdir(spec_name(parent), 0755);
 }
 
 int sync(const CliOptions& opts) {

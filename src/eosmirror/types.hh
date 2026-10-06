@@ -2,6 +2,7 @@
 #pragma once
 
 #include <compare>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -54,6 +55,9 @@ struct Entry {
   uint32_t gid = 0;
   ModeBits mode = 0;
   std::string link_target;  // symlinks only
+  // Identifies a directory however it was reached (such as device and inode),
+  // to find cycles in listings that follow symlinks; empty where unknown.
+  std::string id;
 };
 
 // Paths handed to endpoints are relative to the endpoint's root: "" for the
@@ -74,5 +78,12 @@ bool valid_entry_name(std::string_view name);
 
 // 48 random bits as 12 hex digits, for temporary names.
 std::string random_suffix();
+
+// The name of a temporary for a file name, ".<name>.eosmirror-<random>", with
+// the name cut so that the whole is at most max_size bytes long.
+std::string temporary_name(std::string_view name, size_t max_size = 255);
+
+// Whether a name has the form of temporary_name().
+bool is_temporary_name(std::string_view name);
 
 }  // namespace eosmirror

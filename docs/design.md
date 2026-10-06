@@ -63,21 +63,29 @@ the progress display and the summary replace control characters and invalid
 UTF-8 in names with `?`.
 
 Each endpoint describes its capabilities: mtime resolution (POSIX probes
-it on the target), whether owners, modes (and which mode bits) and mtimes
-can be set, whether symlinks exist and have owners, which checksum it
-computes. The engine adapts: comparison granularity, size-only comparison
-without mtimes, skipped symlinks, masked mode comparison, which checksum to
-compute, what the preflight checks. Without the privilege to set owners,
-the engine makes read-only target directories writable while it changes
-their entries and restores their mode afterwards.
+it on the target), whether entries have owners at all, whether owners,
+modes (and which mode bits of files and of directories) and mtimes can be
+set, whether symlinks exist and have owners, which checksum it computes. The
+engine adapts: comparison granularity, size-only comparison without mtimes,
+skipped symlinks, masked mode comparison, no owners from a source that has
+none (with a warning), which checksum to compute, what the preflight checks.
+Without the privilege to set owners, the engine makes read-only target
+directories writable while it changes their entries and restores their mode
+afterwards. An endpoint can also warn about being used as a target (a POSIX
+target on an EOS FUSE mount, see below).
+
+Listings of endpoints that follow symlinks (plain XRootD servers do) can
+lead back into a directory being walked. Such endpoints, and POSIX, give
+directories an identity (device and inode); a subdirectory with the identity
+of one of its ancestors is reported as a failure and not walked.
 
 `eosmirror selftest TARGET` exercises all of this in a temporary directory
 under a target before a long run and reports what the target cannot do.
 
 Endpoint operations are synchronous; concurrency comes from the worker pools
-below. Remote endpoints may pipeline internally (for instance several writes
-of one file in flight), which the interface allows because writes are
-sequential and only `commit()` has to confirm them.
+below. Remote endpoints may pipeline internally (plain XRootD keeps several
+writes of one file in flight, EOS deliberately one), which the interface
+allows because writes are sequential and only `commit()` has to confirm them.
 
 ### Engine
 
@@ -105,7 +113,8 @@ adapt to measured throughput.
 ### Retries and the journal
 
 Operations are retried with exponential backoff while the error is
-transient (I/O errors, timeouts, the source changing). What still fails is
+transient (I/O errors, timeouts, busy or failing servers, the source
+changing). A full disk or exceeded quota is not retried. What still fails is
 recorded in the journal (`--journal FILE`, SQLite) with the path, the kind of
 entry and the last error, and the run goes on. Finalized directories are
 recorded too. Modes:
@@ -142,17 +151,37 @@ interrupted.
 
 ## XRootD endpoint
 
+URLs are `root://host[:port]//path`, or `roots://` for TLS. The protocol is
+kept for every connection, and opaque parameters of the URL (`?authz=...`,
+`xrd.wantprot=...`) go with every request and open, after the request's own
+parameters; messages and the journal show the URL without them.
+
+An XRootD URL is first asked for EOS (an MGM answers the `whoami` command).
+A server that refuses the command is a plain XRootD server; one that cannot
+be reached or refuses the login is an error, never a reason to fall back to
+plain XRootD. The same holds for the checksum configuration query of a plain
+server. The detected type is logged.
+
 Plain XRootD servers list directories with per-entry stat in one call, store
-no symlinks, cannot set owners or mtimes, and compute a checksum only when
-configured (`query config chksum` tells which). The endpoint reports these
-as capabilities; the engine then compares files by size only, skips symlinks
-(counted), and applies no mtimes. Writes go to a temporary name with up to
-four writes in flight per file, the stored checksum is verified by a checksum
-query, and the file is renamed into place.
+no symlinks, report no owners, cannot set owners or mtimes, keep only the
+permission bits of modes, and compute a checksum only when configured
+(`query config chksum` tells which). Their listings and stats follow
+symlinks. The endpoint reports these as capabilities; the engine then
+compares files by size only, skips symlinks (counted), applies no mtimes,
+ignores owners of such a source, and detects directory cycles. Writes go to
+a temporary name `.<name>.eosmirror-<12 hex digits>` with up to
+`--write-window` writes in flight per file, the stored checksum is verified
+by a checksum query, and the file is renamed into place.
 
 XRootD has no escaping for paths: the server takes everything after the
 first `?` as opaque parameters, in opens as in all other requests. Paths
 containing `?` are therefore refused with an error instead of being sent.
+
+Server errors that mean a busy or failing server (`kXR_Overloaded`,
+`kXR_ServerError`, `kXR_noReplicas`, `kXR_inProgress` and `kXR_FSError`,
+which servers send for errnos without a protocol code such as `EAGAIN`,
+`EBUSY` or `ESTALE`) and client errors of the connection (TLS, handshake,
+address, exhausted stream ids) are retried like I/O errors.
 
 ## EOS specifics (milestone 3)
 
@@ -160,6 +189,10 @@ XRootD has no symlink, chown or utimes operations and its stat lacks owners,
 modes and link targets. The EOS endpoint uses the MGM's commands, sent the
 way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
 
+- Endpoints are `root://mgm//eos/...` URLs, or paths below `/eos` on the
+  command line, which name the instance of `--mgm` or `EOS_MGM_URL` (the eos
+  client's convention) and never a local FUSE mount; `file:///eos/...` names
+  the mount explicitly.
 - Paths are sent percent-encoded behind `/#curl#` (`/#curl#/eos/a%20b`),
   with `eos.encodepath=1` among the opaque parameters: in opens, in plain
   XRootD requests (mkdir, rm, rmdir, checksum queries, which take
@@ -171,6 +204,10 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
   `mgm.cmd.proto=<base64 of a RequestProto>`. The output of protobuf
   commands is not escaped and can contain the markers, so they are searched
   from the end of the reply.
+- The root is resolved to its real path once, by stating each path component
+  and following symlinks like realpath(3), since find prints entries under
+  real paths and limits its depth by the depth of the path it was given. The
+  URL as given is kept for messages and the journal.
 - Listing: `find` (RequestProto field 5, FindProto) with `Files`,
   `Directories`, `Maxdepth=1` (a oneof, so it must be sent), `Path` and
   `Format="type,size,uid,gid,mode,flags,mtime,link"`, plus
@@ -179,48 +216,72 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
   mtime=<sec>.<nsec> target="<link target>"`, the fields in the order of the
   format and the target only for symlinks.
   The start directory itself is listed too and skipped; a listing without it
-  is an error (find prints paths below the real path, which differs when the
-  path leads through a symlink). Paths and targets are printed raw: lines
-  with more than one `" type=` (which a name or target can contain), names
-  with control characters, entries outside the directory and names listed
-  twice are skipped with a warning.
+  is an error. Paths and targets are printed raw: lines with more than one
+  `" type=` (which a name or target can contain), names with control
+  characters, entries outside the directory and names listed twice are
+  skipped with a warning.
+- find limits identities other than root and sudoers (EOS 5.5
+  `mgm/proc/user/NewfindCmd.cc`): it stops with `E2BIG` after 100000 files,
+  counting the files of the listed subdirectories, or 50000 directories
+  (access rules can change the limits), and it leaves out subdirectories the
+  identity may not read, with `EACCES` and an `error(13): ... directory
+  <path>/` line per subdirectory in its error output. A listing cut short is
+  completed from a plain XRootD directory listing (names only) with one stat
+  per missing entry, which keeps full metadata but is slow (warned about
+  once); its lines for names that the plain listing lacks are dropped. Left
+  out subdirectories are stated and listed, so that walking into them fails
+  for them alone; error output of another form fails the listing.
 - Single stat: `mgm.pcmd=stat` as an OpaqueFile query on the path; the reply
   `stat: dev ino mode nlink uid gid rdev size blksize blocks atime mtime
   ctime atime_ns mtime_ns ctime_ns` has nanoseconds.
-- Symlink: `mgm.cmd=file&mgm.subcmd=symlink&mgm.path=<encoded>&eos.encodepath=1
-  &mgm.file.source=<path>&mgm.file.target=<target>`. The MGM takes source
-  and target verbatim (EOS 5.5.2 `mgm/proc/user/File.cc`), so they are sent
-  unencoded.
+- Symlink: the protobuf file command (RequestProto field 29, FileProto with
+  `md.path` and `symlink` = FileSymlinkProto with `target_path` and
+  `force`), which carries path and target as bytes and replaces an existing
+  symlink. The MGM turns `#AND#` in the path into `&` and resolves targets
+  starting with `fid:`, `fxid:`, `cid:` or `cxid:`, and find could not list a
+  target with a line break back, so such symlinks are refused as failures.
 - mtime: `eos.mtime=<sec>.<nsec>` on the open URL for new files; otherwise
   the OpaqueFile query `<encoded path>?eos.encodepath=1&mgm.pcmd=utimes
   &tv1_sec=0&tv1_nsec=0&tv2_sec=S&tv2_nsec=<9 digits>`, which works for
   directories and symlinks as well.
-- Owner and mode: `mgm.cmd=chown&mgm.path=...&mgm.chown.owner=uid:gid` and
-  `mgm.cmd=chmod&mgm.path=...&mgm.chmod.mode=<octal>`; chown needs a root or
-  sudoer identity, which the preflight checks.
+- Owner and mode: `mgm.cmd=chown&mgm.chown.option=h&mgm.path=...
+  &mgm.chown.owner=uid:gid` (`h`: the entry itself, so symlinks get their
+  own owner) and `mgm.cmd=chmod&mgm.path=...&mgm.chmod.mode=<octal>`. EOS
+  stores only the permission bits of files and clears setuid on directories
+  (`mgm/ofs/cmds/Chmod.inc`), so those bits are not compared.
+- Only root can set owners: sudoers can set neither the owner of a directory
+  nor the group of a file (the latter is silently dropped) and no mode of an
+  entry they do not own (`mgm/ofs/cmds/Chown.inc`, `Chmod.inc`). `whoami`
+  tells whether the identity is root; a sudoer gets a note in the debug log.
 - Writes use EOS's atomic upload (`eos.atomic=1` on the open URL, with
-  `eos.mtime`), so EOS itself renames the file into place at close and a
-  close before the end discards the upload. The checksum is read back with
-  a checksum query and compared when the directory's `sys.forced.checksum`
-  attribute (cached per directory) names the type that was computed. Owner
-  and mode are applied after the close, since an upload runs under the
-  client's identity: the file is briefly visible with the uploader's owner.
-- EOS cannot change the owner of a symlink (chown follows the link) and
-  cannot replace one in place, so symlink owners are not synchronized and a
-  changed symlink is removed and recreated. Since the symlink command takes
-  its source path and target unencoded, a symlink whose path or target
-  contains `&`, `=`, `?`, `#`, `%` or a control character cannot be created
-  and is reported as a failure.
-- Whether the identity may set owners comes from `whoami` (root or
-  `sudo*`).
+  `eos.mtime`), so EOS itself renames the file into place at close. A
+  storage node commits an upload at any regular close, complete or not, and
+  discards it only on a client disconnect, a write error or when told to
+  delete it (`fst/XrdFstOfsFile.cc`): an aborted upload sends the fctl
+  `delete` (XrdCl `File::Fcntl`) before it closes, and the previous file
+  stays as it was.
+- After the close, a checksum query on the file tells the type EOS stored
+  and its value; they are compared when the type is the one computed while
+  copying (adler32). Files without checksums (`none`, the default without
+  `sys.forced.checksum`) or with another type (from the directory or a space
+  policy) are counted as unverified, and refused with `--require-checksum`.
+  A file that does not match, cannot be queried or is refused is removed
+  again, or else gets mtime 0, since it already carries the size and mtime
+  of the source and would pass for a good copy. Owner and mode are applied
+  after the close, since an upload runs under the client's identity: the
+  file is briefly visible with the uploader's owner.
 - EOS's own hidden entries (atomic temporaries `.sys.a#.`, version
   directories `.sys.v#.`) are never treated as entries of the tree.
-- Files are written through XRootD with one writer per file and sequential
-  offsets. EOS computes the checksum while storing the file and returns it
-  at close. Erasure-coded layouts require this write order (EOS up to 5.5.2
-  stores zero parity for files written out of order), so ranges of a file
-  are never written in parallel and a target that is an EOS FUSE mount is
-  warned about.
+- Files are written through XRootD with one writer per file, one write in
+  flight at a time, in order, by design: EOS up to 5.5.2 stores zero parity
+  for erasure-coded files written out of order. `--write-window` applies to
+  plain XRootD targets only. EOS computes the checksum while storing the
+  file.
+- A POSIX target on an EOS FUSE mount (`fuse.eosxd` for the longest mount
+  point above the target in `/proc/self/mountinfo`; more cautiously, a FUSE
+  mount of unknown kind, or any FUSE file system where that table is
+  missing) gets a warning at the start of a run: writing through eosxd is
+  slow and breaks erasure-coded files.
 - The directory's layout and checksum settings decide how a file is stored;
   the tool passes no layout hints.
 - EOS to EOS copies use XRootD third-party copy where available, with
@@ -242,7 +303,12 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
 - EOS's find output prints names raw, one entry per line. A name with line
   breaks can therefore add lines that look like entries. Lines that cannot be
   parsed and names listed twice are skipped, but a forged line for a name
-  that is not otherwise in the directory cannot be told from a real one.
+  that is not otherwise in the directory cannot be told from a real one. In
+  a listing that find cut short, a forged line can also stand in for an
+  existing entry whose own line was cut off.
+- Directories that find leaves out for lack of permission are recognized by
+  the paths in its error output, which are printed raw as well: a name with
+  line breaks there fails the whole listing.
 
 ## Not in scope (for now)
 

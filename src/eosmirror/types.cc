@@ -34,4 +34,25 @@ std::string random_suffix() {
   return buf;
 }
 
+namespace {
+
+constexpr std::string_view kTempMarker = ".eosmirror-";
+constexpr size_t kTempFixed = 1 + kTempMarker.size() + 12;  // '.', marker, random_suffix()
+
+}  // namespace
+
+std::string temporary_name(std::string_view name, size_t max_size) {
+  if (name.size() + kTempFixed > max_size) name = name.substr(0, max_size - kTempFixed);
+  std::string result = ".";
+  result.append(name).append(kTempMarker).append(random_suffix());
+  return result;
+}
+
+bool is_temporary_name(std::string_view name) {
+  if (name.size() <= kTempFixed || name[0] != '.') return false;
+  std::string_view tail = name.substr(name.size() - kTempFixed + 1);
+  return tail.starts_with(kTempMarker) &&
+         tail.find_first_not_of("0123456789abcdef", kTempMarker.size()) == std::string_view::npos;
+}
+
 }  // namespace eosmirror

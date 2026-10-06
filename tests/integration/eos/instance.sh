@@ -107,6 +107,8 @@ do_init() {
   fi
   [[ -e $S/eos-client.keytab ]] || grep ' n:eosmirror-client ' "$S/eos.keytab" > "$S/eos-client.keytab"
   [[ -e $S/eos-root.keytab ]] || grep ' n:eosmirror-root ' "$S/eos.keytab" > "$S/eos-root.keytab"
+  # The daemon's key, a sudoer, for the test that needs one.
+  [[ -e $S/eos-daemon.keytab ]] || grep ' n:eosmirror-daemon ' "$S/eos.keytab" > "$S/eos-daemon.keytab"
   for f in qdb.password macaroon.secret; do
     [[ -e $S/$f ]] || openssl rand -hex 32 | tr -d '\n' > "$S/$f"
   done
@@ -165,6 +167,10 @@ do_configure() {
   vid=$(eos vid ls)
   grep -q 'sss:"<pwd>":uid => root' <<< "$vid" || eos vid enable sss
   grep -q 'sudoer *=> uids(daemon)' <<< "$vid" || eos vid set membership 2 +sudo
+  # Small find limits for nobody (whom root becomes when it asks for another
+  # identity), for the tests of listings that find cuts short.
+  eos access set limit 20 rate:user:nobody:FindFiles > /dev/null
+  eos access set limit 10 rate:user:nobody:FindDirs > /dev/null
 
   [[ -n $(eos space ls -m default) ]] || eos space define default 8 1
   local registered i bay

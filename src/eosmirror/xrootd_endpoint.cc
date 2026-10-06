@@ -25,8 +25,6 @@ namespace eosmirror {
 
 namespace {
 
-constexpr std::string_view kTempMarker = ".eosmirror-";
-
 std::string parent_of(const std::string& path) {
   auto slash = path.rfind('/');
   return slash == std::string::npos ? "" : path.substr(0, slash);
@@ -51,6 +49,7 @@ Entry entry_from_stat(std::string name, const XrdCl::StatInfo& info) {
   else
     e.type = EntryType::File;
   if (e.type == EntryType::File) e.size = info.GetSize();
+  if (e.type == EntryType::Directory) e.id = info.GetId();  // device and inode
   e.mtime = {static_cast<int64_t>(info.GetModTime()), 0};
   if (info.ExtendedFormat()) {
     // The raw octal string from the server ("0640"); GetModeAsOctString()
@@ -61,12 +60,20 @@ Entry entry_from_stat(std::string name, const XrdCl::StatInfo& info) {
   return e;
 }
 
+// A checksum reply, "<type> <hex>". EOS replies "none" for files without a
+// checksum; those and types that cannot be computed here come back as None.
 Result<Checksum> parse_checksum(const std::string& text, const std::string& context) {
   std::istringstream in(text);
   std::string type, value;
   in >> type >> value;
+  if (type.empty())
+    return Error{ErrorKind::Other, "unexpected checksum response for " + context + ": " + text};
   auto parsed = parse_checksum_type(type);
-  if (!parsed || value.empty())
+  if (!parsed || *parsed == ChecksumType::None) {
+    if (!parsed) log::debug(context, " has a checksum of type ", type);
+    return Checksum{};
+  }
+  if (value.empty())
     return Error{ErrorKind::Other, "unexpected checksum response for " + context + ": " + text};
   for (auto& c : value) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
   return Checksum{*parsed, value};
@@ -137,9 +144,11 @@ class XrdWriter : public FileWriter {
       ++in_flight_;
     }
     buffers_[index].assign(data.begin(), data.end());
+    auto* pending = new Pending{this, index};
     XrdCl::XRootDStatus st = file_->Write(offset, static_cast<uint32_t>(data.size()),
-                                          buffers_[index].data(), new Pending{this, index});
+                                          buffers_[index].data(), pending);
     if (!st.IsOK()) {
+      delete pending;  // XrdCl takes the handler only when the request is sent
       std::lock_guard lock(mutex_);
       free_.push_back(index);
       --in_flight_;
@@ -226,8 +235,10 @@ class XrdWriter : public FileWriter {
       auto stored = ep_.query_checksum(temp_);
       if (!stored.ok()) return stored.error();
       if (!(stored.value() == spec.checksum))
-        return Error{ErrorKind::Checksum, temp_ + " has checksum " + stored.value().hex +
-                                              " instead of " + spec.checksum.hex};
+        return Error{ErrorKind::Checksum,
+                     temp_ + " has checksum " +
+                         (stored.value().hex.empty() ? "none" : stored.value().hex) +
+                         " instead of " + spec.checksum.hex};
       verified_ = true;
     } else if (spec.require_verification) {
       return Error{ErrorKind::Unsupported, "the server computes no checksum to verify " + temp_ +
@@ -268,6 +279,27 @@ std::string display_url(std::string_view url) {
   return std::string(url);
 }
 
+Result<EndpointUrl> parse_endpoint_url(const std::string& url) {
+  XrdCl::URL parsed(url);
+  if (!parsed.IsValid() || parsed.GetProtocol().empty() || parsed.GetHostName().empty())
+    return Error{ErrorKind::Other, "invalid URL: " + display_url(url)};
+  EndpointUrl parts;
+  parts.server = parsed.GetProtocol() + "://" + parsed.GetHostId();
+  parts.path = parsed.GetPath();
+  while (parts.path.size() > 1 && parts.path.back() == '/') parts.path.pop_back();
+  if (parts.path.empty() || parts.path[0] != '/')
+    return Error{ErrorKind::Other, "the URL needs an absolute path: " + display_url(url)};
+  if (auto query = url.find('?'); query != std::string::npos) parts.cgi = url.substr(query + 1);
+  return parts;
+}
+
+std::string with_cgi(std::string request, std::string_view cgi) {
+  if (cgi.empty()) return request;
+  request += request.find('?') == std::string::npos ? '?' : '&';
+  request += cgi;
+  return request;
+}
+
 Result<std::string> xrootd_request_path(const std::string& abs_path) {
   if (abs_path.find('?') != std::string::npos)
     return Error{ErrorKind::Unsupported,
@@ -281,8 +313,16 @@ Error XrdEndpoint::xrd_error(const XrdCl::XRootDStatus& st, const std::string& c
   if (st.code == XrdCl::errErrorResponse || st.code == XrdCl::errLocalError ||
       st.code == XrdCl::errOSError) {
     int err = static_cast<int>(st.errNo);
-    if (err >= kXR_ArgInvalid) err = XProtocol::toErrno(err);
+    bool busy = false;
+    if (err >= kXR_ArgInvalid) {
+      // Overloaded or failing servers; kXR_FSError is what servers send for
+      // errnos without a protocol code, such as EAGAIN, EBUSY and ESTALE.
+      busy = err == kXR_Overloaded || err == kXR_ServerError || err == kXR_noReplicas ||
+             err == kXR_inProgress || err == kXR_FSError;
+      err = XProtocol::toErrno(err);
+    }
     Error e = errno_error(err, context);
+    if (busy) e.kind = ErrorKind::IO;
     if (!st.GetErrorMessage().empty()) e.message += " (" + st.GetErrorMessage() + ")";
     return e;
   }
@@ -297,6 +337,10 @@ Error XrdEndpoint::xrd_error(const XrdCl::XRootDStatus& st, const std::string& c
     case XrdCl::errOperationExpired:
     case XrdCl::errSocketTimeout: kind = ErrorKind::Timeout; break;
     case XrdCl::errRetry:
+    case XrdCl::errInvalidAddr:
+    case XrdCl::errTlsError:
+    case XrdCl::errHandShakeFailed:
+    case XrdCl::errNoMoreFreeSIDs:
     case XrdCl::errSocketError:
     case XrdCl::errSocketDisconnected:
     case XrdCl::errStreamDisconnect:
@@ -324,21 +368,19 @@ std::unique_ptr<XrdCl::File> XrdEndpoint::new_write_file() {
 
 Result<std::unique_ptr<XrdEndpoint>> XrdEndpoint::create(const std::string& url,
                                                          XrdOptions options) {
-  XrdCl::URL parsed(url);
-  if (!parsed.IsValid() || parsed.GetProtocol().empty() || parsed.GetHostName().empty())
-    return Error{ErrorKind::Other, "invalid XRootD URL: " + display_url(url)};
-  std::string server = parsed.GetProtocol() + "://" + parsed.GetHostId();
-  std::string root = parsed.GetPath();
-  while (root.size() > 1 && root.back() == '/') root.pop_back();
-  if (root.empty() || root[0] != '/')
-    return Error{ErrorKind::Other, "XRootD URL needs an absolute path: " + display_url(url)};
-  std::unique_ptr<XrdEndpoint> ep(new XrdEndpoint(url, server, root, options));
+  auto parts = parse_endpoint_url(url);
+  if (!parts.ok()) return parts.error();
+  std::unique_ptr<XrdEndpoint> ep(new XrdEndpoint(url, std::move(parts).value(), options));
 
-  // The checksum the server computes, if any.
+  // The checksum the server computes, if any. A server that cannot be
+  // reached or refuses the login is no endpoint to work with.
   XrdCl::Buffer arg;
   arg.FromString("chksum");
   XrdCl::Buffer* response = nullptr;
   XrdCl::XRootDStatus st = ep->fs_->Query(XrdCl::QueryCode::Config, arg, response);
+  std::unique_ptr<XrdCl::Buffer> owned(response);
+  if (!st.IsOK() && st.code != XrdCl::errErrorResponse)
+    return xrd_error(st, "query the configuration of " + ep->describe());
   if (st.IsOK() && response) {
     // The response lists the configured types as "0:adler32,1:crc32c"; the
     // first one is the default. A server without checksums echoes "chksum".
@@ -350,21 +392,23 @@ Result<std::unique_ptr<XrdEndpoint>> XrdEndpoint::create(const std::string& url,
     else if (first != "chksum")
       log::debug(ep->describe(), ": unknown checksum type ", first);
   }
-  delete response;
   return ep;
 }
 
-XrdEndpoint::XrdEndpoint(std::string url, std::string server, std::string root,
-                         XrdOptions options)
+XrdEndpoint::XrdEndpoint(const std::string& url, EndpointUrl parts, XrdOptions options)
     : url_(display_url(url)),
-      server_(std::move(server)),
-      root_(std::move(root)),
+      server_(std::move(parts.server)),
+      root_(std::move(parts.path)),
+      cgi_(std::move(parts.cgi)),
       options_(options),
-      fs_(std::make_unique<XrdCl::FileSystem>(XrdCl::URL(server_))) {
+      // The URL's parameters with the login, such as xrd.wantprot.
+      fs_(std::make_unique<XrdCl::FileSystem>(XrdCl::URL(with_cgi(server_ + "/", cgi_)))) {
   caps_.mtime_resolution = 1000000000;
+  caps_.has_owners = false;
   caps_.can_set_owner = false;
   caps_.can_set_mode = true;
-  caps_.mode_bits = 0777;
+  caps_.file_mode_bits = 0777;
+  caps_.dir_mode_bits = 0777;
   caps_.can_set_mtime = false;
   caps_.has_symlinks = false;
   caps_.checksum = ChecksumType::None;
@@ -373,7 +417,7 @@ XrdEndpoint::XrdEndpoint(std::string url, std::string server, std::string root,
 XrdEndpoint::~XrdEndpoint() = default;
 
 bool XrdEndpoint::is_temporary(std::string_view name) const {
-  return name.size() > 1 && name[0] == '.' && name.find(kTempMarker) != std::string_view::npos;
+  return is_temporary_name(name);
 }
 
 std::string XrdEndpoint::absolute(const RelPath& path) const {
@@ -382,7 +426,9 @@ std::string XrdEndpoint::absolute(const RelPath& path) const {
 }
 
 Result<std::string> XrdEndpoint::request_path(const std::string& abs_path) const {
-  return xrootd_request_path(abs_path);
+  auto request = xrootd_request_path(abs_path);
+  if (!request.ok()) return request.error();
+  return with_cgi(std::move(request).value(), cgi_);
 }
 
 Result<Entry> XrdEndpoint::stat(const RelPath& path) {
@@ -520,9 +566,7 @@ Result<std::unique_ptr<FileReader>> XrdEndpoint::open_read(const RelPath& path) 
 Result<std::unique_ptr<FileWriter>> XrdEndpoint::open_write(const RelPath& path,
                                                             const CommitSpec& spec) {
   std::string abs = absolute(path);
-  std::string name = name_of(abs);
-  if (name.size() > 231) name.resize(231);  // keep the temporary name within NAME_MAX
-  std::string temp = parent_of(abs) + "/." + name + std::string(kTempMarker) + random_suffix();
+  std::string temp = parent_of(abs) + "/" + temporary_name(name_of(abs));
   auto request = request_path(temp);
   if (!request.ok()) return request.error();
   auto file = new_write_file();
