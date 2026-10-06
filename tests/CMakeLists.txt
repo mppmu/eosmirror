@@ -2,8 +2,11 @@
 add_executable(eosmirror_tests
   unit/test_main.cc
   unit/test_checksum.cc
+  unit/test_engine.cc
   unit/test_error.cc
+  unit/test_journal.cc
   unit/test_posix_endpoint.cc
+  unit/test_queue.cc
 )
 target_include_directories(eosmirror_tests PRIVATE ${PROJECT_SOURCE_DIR}/third_party)
 target_link_libraries(eosmirror_tests PRIVATE eosmirror_core)
