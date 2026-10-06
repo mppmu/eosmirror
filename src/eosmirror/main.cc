@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+#include <algorithm>
 #include <csignal>
 #include <cstdio>
+#include <cstdlib>
 #include <thread>
 #include <utility>
 
@@ -16,7 +18,7 @@ using namespace eosmirror;
 
 namespace {
 
-enum ExitCode { kOk = 0, kFailures = 1, kUsage = 2, kFatal = 3, kInterrupted = 130 };
+enum ExitCode { kOk = 0, kFailures = 1, kUsage = 2, kFatal = 3, kStopped = 4, kInterrupted = 130 };
 
 Cancellation g_cancel;
 volatile sig_atomic_t g_signals = 0;
@@ -73,17 +75,24 @@ std::pair<std::string, std::string> split_spec(const std::string& spec) {
   return {spec.substr(0, query), spec.substr(query)};
 }
 
-// The specification of the directory above the one given ("" at the top).
+// The specification of the directory above the one given ("" above the
+// root). A relative local path without a slash is in the current directory.
 std::string parent_spec(const std::string& spec) {
   auto [path, cgi] = split_spec(spec);
-  while (path.size() > 1 && path.back() == '/') path.pop_back();
-  auto scheme = path.find("://");
-  size_t path_start = scheme == std::string::npos ? 0 : path.find("//", scheme + 3);
-  if (path_start == std::string::npos) return "";
-  if (scheme != std::string::npos) path_start += 1;  // the path's leading slash
+  // Where the absolute path starts: after file://, or at the second slash
+  // after the server of other URLs (root://host//path).
+  size_t path_start = 0;
+  if (auto scheme = path.find("://"); scheme != std::string::npos) {
+    bool file = path.compare(0, scheme, "file") == 0;
+    path_start = file ? scheme + 3 : path.find("//", scheme + 3);
+    if (path_start == std::string::npos) return "";
+    if (!file) path_start += 1;
+  }
+  while (path.size() > path_start + 1 && path.back() == '/') path.pop_back();
   auto slash = path.rfind('/');
-  if (slash == std::string::npos || slash <= path_start) return "";
-  return path.substr(0, slash) + cgi;
+  if (slash == std::string::npos) return path == "." || path == ".." ? "" : ".";
+  if (slash < path_start || path.size() == path_start + 1) return "";
+  return path.substr(0, std::max(slash, path_start + 1)) + cgi;
 }
 
 // The last path component of a specification.
@@ -113,7 +122,11 @@ Status ensure_parents(const std::string& spec, const EndpointSettings& settings,
   if (dry_run) return {};
   auto grand = make_endpoint(parent_spec(parent), settings);
   if (!grand.ok()) return grand.error();
-  return grand.value()->mkdir(spec_name(parent), 0755);
+  Status made = grand.value()->mkdir(spec_name(parent), 0755);
+  if (made.ok() || made.error().kind != ErrorKind::Exists) return made;
+  // Shards started together race for it.
+  st = ep.value()->stat("");
+  return st.ok() && st.value().type == EntryType::Directory ? Status() : made;
 }
 
 int sync(const CliOptions& opts) {
@@ -122,11 +135,18 @@ int sync(const CliOptions& opts) {
     log::error(source.error().describe());
     return kFatal;
   }
-  if (Status s = ensure_parents(opts.target, opts.endpoints, opts.sync.dry_run); !s.ok()) {
+  // A path below /eos is resolved first, so that an error names it rather
+  // than one of its parents.
+  auto target_spec = eos_path_url(opts.target, opts.endpoints.mgm, std::getenv("EOS_MGM_URL"));
+  if (!target_spec.ok()) {
+    log::error(target_spec.error().describe());
+    return kFatal;
+  }
+  if (Status s = ensure_parents(target_spec.value(), opts.endpoints, opts.sync.dry_run); !s.ok()) {
     log::error(s.error().describe());
     return kFatal;
   }
-  auto target = make_endpoint(opts.target, opts.endpoints);
+  auto target = make_endpoint(target_spec.value(), opts.endpoints);
   if (!target.ok()) {
     log::error(target.error().describe());
     return kFatal;
@@ -197,7 +217,9 @@ int sync(const CliOptions& opts) {
   std::fputs(report.summary(opts.sync.dry_run).c_str(), stdout);
   if (!status.ok()) {
     log::error(status.error().describe());
-    return status.error().kind == ErrorKind::Cancelled ? kInterrupted : kFatal;
+    if (status.error().kind != ErrorKind::Cancelled) return kFatal;
+    // Without a signal, the engine stopped the run after failures in a row.
+    return g_cancel.requested() ? kInterrupted : kStopped;
   }
   return report.failure_count() > 0 ? kFailures : kOk;
 }

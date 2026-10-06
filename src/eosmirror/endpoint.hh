@@ -114,6 +114,11 @@ class Endpoint {
   // it as target; empty if there is none.
   virtual std::string target_warning() const { return {}; }
 
+  // Finds out what the endpoint can do as a target where that takes writing
+  // to it (POSIX probes how precisely the file system stores mtimes), once
+  // its root exists. Sources and dry runs are never probed.
+  virtual void probe_target() {}
+
   // Stats an entry without following symlinks. The result's name is the
   // last path component.
   virtual Result<Entry> stat(const RelPath& path) = 0;

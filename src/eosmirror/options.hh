@@ -47,6 +47,10 @@ struct SyncOptions {
   bool resume = false;  // skip directories the journal records as finalized
 
   RetryPolicy retry;
+  // The run stops after this many failures without a success in between
+  // (0: never), so that an outage of an endpoint does not turn every
+  // remaining entry into a failure.
+  uint64_t max_consecutive_failures = 1000;
 
   int shard_index = 0;
   int shard_count = 1;

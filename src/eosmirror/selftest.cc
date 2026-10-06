@@ -234,6 +234,7 @@ bool SelftestReport::ok() const {
 }
 
 SelftestReport run_selftest(Endpoint& target, bool with_owner) {
+  target.probe_target();
   return Selftest(target, with_owner).run();
 }
 

@@ -84,6 +84,9 @@ Options:
                            a transfer holds at most both windows plus one
       --retries N          retries per operation (default 2)
       --retry-delay SEC    delay before the first retry (default 1)
+      --max-consecutive-failures N
+                           stop the run after N failures in a row, without a
+                           success in between (default 1000, or "unlimited")
       --mgm URL            the EOS MGM for paths below /eos, root://host[:port]
                            (default: EOS_MGM_URL)
       --journal FILE       record failures and finalized directories in FILE
@@ -169,16 +172,22 @@ Result<CliOptions> parse_command_line(int argc, char** argv) {
   flag("-n", [&] { sync.dry_run = true; });
   flag("--dry-run", [&] { sync.dry_run = true; });
   flag("--delete", [&] { sync.delete_extra = true; });
-  value("--max-delete", [&](const std::string& v) -> Status {
-    if (v == "unlimited") {
-      sync.max_delete = UINT64_MAX;
+  // An option that takes a count, or "unlimited" for the given value.
+  auto limit = [&](const std::string& name, uint64_t& out, uint64_t unlimited) {
+    value(name, [name, &out, unlimited](const std::string& v) -> Status {
+      if (v == "unlimited") {
+        out = unlimited;
+        return Status();
+      }
+      auto n = parse_integer(v, name);
+      if (!n.ok()) return n.error();
+      if (n.value() < 0) return usage_error(name + " must not be negative");
+      out = static_cast<uint64_t>(n.value());
       return Status();
-    }
-    auto n = parse_integer(v, "--max-delete");
-    if (!n.ok()) return n.error();
-    sync.max_delete = static_cast<uint64_t>(n.value());
-    return Status();
-  });
+    });
+  };
+  limit("--max-delete", sync.max_delete, UINT64_MAX);
+  limit("--max-consecutive-failures", sync.max_consecutive_failures, 0);
   flag("--no-owner", [&] { sync.preserve_owner = false; });
   flag("--no-mode", [&] { sync.preserve_mode = false; });
   flag("--no-verify", [&] { sync.verify = false; });

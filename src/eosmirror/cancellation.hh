@@ -11,8 +11,14 @@ namespace eosmirror {
 // so waiting polls instead of using condition variables.
 class Cancellation {
  public:
+  Cancellation() = default;
+  // A cancellation that is also requested whenever the parent is.
+  explicit Cancellation(const Cancellation* parent) : parent_(parent) {}
+
   void request() { requested_.store(true, std::memory_order_relaxed); }
-  bool requested() const { return requested_.load(std::memory_order_relaxed); }
+  bool requested() const {
+    return requested_.load(std::memory_order_relaxed) || (parent_ && parent_->requested());
+  }
 
   // Sleeps for the duration unless cancelled first, or until the stop flag is
   // set. Returns true if cancelled or stopped.
@@ -30,6 +36,7 @@ class Cancellation {
 
  private:
   std::atomic<bool> requested_{false};
+  const Cancellation* parent_ = nullptr;
 };
 
 }  // namespace eosmirror

@@ -17,7 +17,11 @@ A run walks the source tree directory by directory and makes the target match:
   all its entries have been processed, since changing entries changes mtimes.
 - Special files (devices, sockets, fifos) are skipped and counted.
 - Entries that exist only on the target are counted, and deleted only with
-  `--delete`, up to `--max-delete` deletions per run.
+  `--delete`, up to `--max-delete` deletions per run. A source whose top
+  directory is empty, against a target that is not, is more likely an
+  unmounted file system or a broken server than a tree to delete: such a run
+  stops without deleting anything. A missing source stops a run before it
+  starts.
 
 Every copy writes to a temporary name (or uses EOS's atomic upload) and
 renames into place, so an interrupted run never leaves a partial file under
@@ -67,16 +71,20 @@ the progress display and the summary replace control characters and invalid
 UTF-8 in names with `?`.
 
 Each endpoint describes its capabilities: mtime resolution (POSIX probes
-it on the target), whether entries have owners at all, whether owners,
+it on the target, by writing a file there, so never on a source or in a dry
+run), whether entries have owners at all, whether owners,
 modes (and which mode bits of files and of directories) and mtimes can be
 set, whether symlinks exist and have owners, which checksum it computes. The
 engine adapts: comparison granularity, size-only comparison without mtimes,
 skipped symlinks, masked mode comparison, no owners from a source that has
 none (with a warning), which checksum to compute, what the preflight checks.
 Without the privilege to set owners, the engine makes read-only target
-directories writable while it changes their entries and restores their mode
-afterwards. An endpoint can also warn about being used as a target (a POSIX
-target on an EOS FUSE mount, see below).
+directories writable (the owner's rwx bits) while it changes their entries
+or sets their mtime, which EOS allows only with write access, and restores
+their mode afterwards, also in directories that another shard owns.
+Read-only directories that `--delete` removes are made writable first. An
+endpoint can also warn about being used as a target (a POSIX target on an
+EOS FUSE mount, see below).
 
 Listings of endpoints that follow symlinks (plain XRootD servers do) can
 lead back into a directory being walked. Such endpoints, and POSIX, give
@@ -117,34 +125,53 @@ Two pools of worker threads, like rclone's checkers and transfers:
 
 Each directory has a completion counter: its own listing, each copy job and
 each subdirectory. When it reaches zero, the directory is *finalized*: its
-metadata is applied and the parent's counter is decremented. The run ends
-when the root is finalized and the queues are drained.
+metadata is applied and the parent's counter is decremented. A transfer
+releases its slot before it finalizes a directory. The run ends when the
+root is finalized and the queues are drained.
 
 Separate pools matter because a tree of tiny files is bound by metadata
 latency and a tree of huge files by bandwidth. The number of transfers
 running at once adapts: it starts at `--min-transfers` and every 10 s rises
-by half (at least 2) while the throughput in bytes or files grows by more
-than 5 %, up to `--transfers`, and falls by a quarter, down to the start
-value, when operations were retried, which is how an overloaded target shows.
+by half (at least 2) while the throughput in bytes or files beats the one
+measured at the previous limit by more than 5 %, up to `--transfers`. It
+falls by a quarter, down to the start value, when copies had to be retried
+for errors of the target (opening, writing or committing a file), which is
+how an overloaded target shows; retries for a changing or failing source do
+not count. The interval after a decrease only measures the lower limit. The
+throughput to beat decays by 0.5 % per interval, so that a record from a
+faster part of the tree blocks growth only for a while, and a flat
+throughput tries a higher limit about every 100 s.
 
 ### Retries and the journal
 
 Operations are retried with exponential backoff while the error is
 transient (I/O errors, timeouts, busy or failing servers, the source
-changing). A full disk or exceeded quota is not retried. What still fails is
-recorded in the journal (`--journal FILE`, SQLite) with the path, the kind of
-entry and the last error, and the run goes on. Finalized directories are
-recorded too. Modes:
+changing). A full disk or exceeded quota is not retried. A retry that
+cancellation cuts short is no failure. What still fails is recorded in the
+journal (`--journal FILE`, SQLite) with the path, the kind of entry and the
+last error, and the run goes on. Finalized directories are recorded too.
+
+An endpoint that becomes unusable during a run (a target outage, an
+unmounted source) would make every remaining entry fail and fill the
+journal. After `--max-consecutive-failures` failures (default 1000) without
+a success in between, the run therefore stops with exit status 4, and the
+journal marks it as interrupted, so that `--resume` continues it later.
+
+Modes:
 
 - A plain run with a journal walks everything. Paths that succeed (copied,
-  metadata fixed, deleted, or gone from both sides) drop out of the failure
-  table, paths that fail replace their row.
+  metadata fixed, deleted, or gone from both sides, also with the directory
+  above them) drop out of the failure table, paths that fail replace their
+  row.
 - `--resume` skips directories finalized by the previous run if that run
   was interrupted; after a completed run there is nothing to resume and
   everything is walked. Recorded failures are not retried by resuming.
 - `--retry-failed` processes only the recorded failures: each within its
   parent directory, failed directories as subtree walks (rows below them are
-  covered by that walk).
+  covered by that walk), the top directory as a walk of the whole tree, and
+  failed deletions with `--delete`. Rows whose directory is gone from the
+  source are dropped; rows whose target directory cannot be created again
+  (when one above it is gone) are kept, and a plain run recreates it.
 - A journal belongs to one source, target and shard, with local paths in
   canonical form; dry runs read it but never change it.
 
@@ -162,9 +189,11 @@ Counters for everything that happened (directories, files copied with
 bytes, unchanged, metadata fixed, symlinks, skipped special files, deleted,
 skipped invalid names, failed by kind, retries) go to a summary at the end
 and optionally to a periodic progress line. Exit status: 0 when everything succeeded, 1 when
-something failed after retries, 2 for usage errors, 3 when the run could not
-start (unreadable source, unusable journal, failed preflight), 130 when
-interrupted.
+something failed after retries (also the metadata of the top directory), 2
+for usage errors, 3 when the run could not start (unreadable source,
+unusable journal, failed preflight, a top directory that cannot be listed,
+an empty source against a target that is not), 4 when it stopped after
+failures in a row, 130 when interrupted.
 
 ## XRootD endpoint
 
@@ -354,8 +383,8 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
   slow and breaks erasure-coded files.
 - The directory's layout and checksum settings decide how a file is stored;
   the tool passes no layout hints.
-- EOS to EOS copies use XRootD third-party copy where available, with
-  streaming through the client as the fallback.
+- EOS to EOS copies stream through the client; XRootD third-party copy is a
+  possible later addition.
 
 ## Known limitations
 
@@ -368,6 +397,9 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
   run does.
 - Shards sharing a target can finalize a directory's mtime before another
   shard creates a subdirectory in it; the next run fixes it.
+- Shards running as a user other than root can restore the mode of a
+  read-only directory while another shard still changes entries in it.
+  Those changes fail, and the next run makes them.
 - POSIX mtime resolutions coarser than one second (FAT) are treated as one
   second.
 - EOS's find output prints names raw, one entry per line. A name with line

@@ -9,7 +9,8 @@
 #include <fstream>
 #include <string>
 
-// A fresh directory under $TMPDIR, removed with its contents on destruction.
+// A fresh directory under $TMPDIR, removed with its contents on destruction,
+// also read-only directories in it.
 class TempDir {
  public:
   TempDir() {
@@ -19,6 +20,9 @@ class TempDir {
   }
   ~TempDir() {
     std::error_code ec;
+    for (auto it = std::filesystem::recursive_directory_iterator(path_, ec);
+         !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec))
+      if (it->is_directory(ec) && !it->is_symlink(ec)) chmod(it->path().c_str(), 0700);
     std::filesystem::remove_all(path_, ec);
   }
   TempDir(const TempDir&) = delete;

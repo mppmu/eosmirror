@@ -66,8 +66,14 @@ Result<CopyOutcome> copy_file(Endpoint& source, Endpoint& target, const RelPath&
     first = std::move(chunk).value();
   }
 
+  // An error of an operation on the target, reported as such.
+  auto target_failed = [&](const Error& e) {
+    if (options.on_target_error) options.on_target_error(e);
+    return e;
+  };
+
   auto created = target.open_write(path, spec);
-  if (!created.ok()) return created.error();
+  if (!created.ok()) return target_failed(created.error());
   std::unique_ptr<FileWriter> writer = std::move(created).value();
 
   Hasher hasher(type);
@@ -94,7 +100,7 @@ Result<CopyOutcome> copy_file(Endpoint& source, Endpoint& target, const RelPath&
     Status written = writer->write(std::move(chunk));
     if (!written.ok()) {
       writer->abort();
-      return written.error();
+      return target_failed(written.error());
     }
     if (options.on_chunk) options.on_chunk(size);
     offset += size;
@@ -137,7 +143,7 @@ Result<CopyOutcome> copy_file(Endpoint& source, Endpoint& target, const RelPath&
   }
   spec.require_verification = options.require_verification && !source_verified;
   auto committed = writer->commit(spec);
-  if (!committed.ok()) return committed.error();
+  if (!committed.ok()) return target_failed(committed.error());
   return CopyOutcome{src.size, spec.checksum, committed.value().verified || source_verified};
 }
 

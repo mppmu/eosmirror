@@ -9,6 +9,7 @@ add_executable(eosmirror_tests
   unit/test_log.cc
   unit/test_pipeline.cc
   unit/test_posix_endpoint.cc
+  unit/test_progress_display.cc
   unit/test_queue.cc
   unit/test_selftest.cc
   unit/test_types.cc
@@ -31,6 +32,11 @@ if(EOSMIRROR_SANITIZER STREQUAL "thread")
 endif()
 
 add_test(NAME unit COMMAND ${test_launcher} $<TARGET_FILE:eosmirror_tests>)
+# The tests of what users other than root cannot do, as nobody if needed.
+add_test(NAME unit_unprivileged
+  COMMAND ${test_launcher} sh ${CMAKE_CURRENT_SOURCE_DIR}/unit/unprivileged.sh
+          $<TARGET_FILE:eosmirror_tests> --test-suite=unprivileged)
+set_tests_properties(unit_unprivileged PROPERTIES SKIP_RETURN_CODE 77)
 add_test(NAME cli_smoke
   COMMAND ${test_launcher} bash ${CMAKE_CURRENT_SOURCE_DIR}/cli/smoke.sh $<TARGET_FILE:eosmirror>)
 
@@ -52,7 +58,7 @@ if(EOSMIRROR_WITH_XROOTD)
   # sees in glibc's time zone setup (tsan.supp). The unit tests load the
   # client library too.
   if(EOSMIRROR_SANITIZER AND EOSMIRROR_XROOTD_LIBDIR)
-    set_tests_properties(unit integration cli_smoke PROPERTIES ENVIRONMENT
+    set_tests_properties(unit unit_unprivileged integration cli_smoke PROPERTIES ENVIRONMENT
       "LD_LIBRARY_PATH=${EOSMIRROR_XROOTD_LIBDIR};LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/lsan.supp;TSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tsan.supp")
   endif()
 endif()

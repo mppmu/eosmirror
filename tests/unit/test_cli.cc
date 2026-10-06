@@ -72,7 +72,14 @@ TEST_CASE("the sync command line maps onto the options") {
   CHECK(defaults.value().endpoints.xrootd.read_window == 4);
   CHECK_FALSE(defaults.value().endpoints.xrootd.connection_per_thread);
 
+  CHECK(defaults.value().sync.max_consecutive_failures == 1000);
   CHECK(parse({"sync", "--max-delete", "unlimited", "a", "b"}).value().sync.max_delete == UINT64_MAX);
+  CHECK(parse({"sync", "--max-consecutive-failures", "10", "a", "b"})
+            .value()
+            .sync.max_consecutive_failures == 10);
+  CHECK(parse({"sync", "--max-consecutive-failures=unlimited", "a", "b"})
+            .value()
+            .sync.max_consecutive_failures == 0);
   CHECK(parse({"sync", "--", "-weird", "b"}).value().source == "-weird");
 }
 
@@ -91,6 +98,8 @@ TEST_CASE("usage errors are rejected") {
   CHECK_FALSE(parse({"sync", "--write-window", "0", "a", "b"}).ok());
   CHECK_FALSE(parse({"sync", "--read-window", "0", "a", "b"}).ok());
   CHECK_FALSE(parse({"sync", "--buffer-size", "2G", "a", "b"}).ok());
+  CHECK_FALSE(parse({"sync", "--max-delete", "-1", "a", "b"}).ok());
+  CHECK_FALSE(parse({"sync", "--max-consecutive-failures", "x", "a", "b"}).ok());
   CHECK_FALSE(parse({"failures"}).ok());
 
   CHECK(parse({"--version"}).value().command == Command::Version);

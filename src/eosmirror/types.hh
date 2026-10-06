@@ -22,8 +22,8 @@ struct Timespec {
 
   auto operator<=>(const Timespec&) const = default;
 
-  // The time truncated to the given resolution (1 = whole seconds,
-  // 1000000000 = unchanged).
+  // The time truncated to the given resolution in nanoseconds (1 = unchanged,
+  // 1000000000 = whole seconds).
   Timespec truncated(int32_t nsec_resolution) const {
     return {sec, nsec / nsec_resolution * nsec_resolution};
   }

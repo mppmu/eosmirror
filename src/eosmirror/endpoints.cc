@@ -2,6 +2,9 @@
 #include "eosmirror/endpoints.hh"
 
 #include <cstdlib>
+#include <mutex>
+#include <set>
+#include <string_view>
 
 #include "eosmirror/log.hh"
 
@@ -11,6 +14,22 @@
 #endif
 
 namespace eosmirror {
+
+#ifdef EOSMIRROR_HAVE_XROOTD
+namespace {
+
+// Logs what kind of server an endpoint is on, once per server.
+void log_server(const std::string& url, std::string_view kind) {
+  static std::mutex mutex;
+  static std::set<std::string> logged;
+  auto parts = parse_endpoint_url(url);
+  std::string server = display_url(parts.ok() ? parts.value().server : url);
+  std::lock_guard lock(mutex);
+  if (logged.insert(server).second) log::info(server, ": ", kind);
+}
+
+}  // namespace
+#endif
 
 Result<std::string> eos_path_url(const std::string& spec, const std::string& mgm,
                                  const char* env_mgm) {
@@ -48,12 +67,12 @@ Result<std::unique_ptr<Endpoint>> make_endpoint(const std::string& given,
       if (is_eos) {
         auto ep = EosEndpoint::create(url, settings.xrootd);
         if (!ep.ok()) return ep.error();
-        log::info(ep.value()->describe(), ": EOS instance");
+        log_server(url, "EOS instance");
         return std::unique_ptr<Endpoint>(std::move(ep).value());
       }
       auto ep = XrdEndpoint::create(url, settings.xrootd);
       if (!ep.ok()) return ep.error();
-      log::info(ep.value()->describe(), ": XRootD server");
+      log_server(url, "XRootD server");
       return std::unique_ptr<Endpoint>(std::move(ep).value());
 #else
       return Error{ErrorKind::Unsupported, "built without XRootD support: " + spec};

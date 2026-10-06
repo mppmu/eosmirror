@@ -24,11 +24,14 @@ class ProgressDisplay {
   // Removes the display from the terminal and stops redrawing.
   void stop();
 
+  // The display's lines for a terminal of the given width, each narrower,
+  // so that it can be redrawn in place.
+  std::string lines(int terminal_width) const;
+
  private:
   void loop();
   void render();
   void erase();
-  std::string render_lines();
 
   const Report& report_;
   std::string title_;

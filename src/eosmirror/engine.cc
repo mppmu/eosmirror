@@ -38,7 +38,8 @@ struct DirNode {
   std::atomic<int> pending{1};  // own processing plus unfinished entries
   std::atomic<bool> touched{false};        // entries were created, replaced or removed
   std::atomic<bool> failed{false};         // listing, creation or metadata failed
-  std::atomic<bool> made_writable{false};  // the target's mode was relaxed for writing
+  std::atomic<bool> relaxing_tried{false};
+  std::atomic<bool> made_writable{false};  // the target's mode was relaxed for changes
   std::atomic<bool> unverified_warned{false};
   std::mutex writable_mutex;
 };
@@ -118,6 +119,30 @@ size_t next_transfer_limit(size_t limit, size_t min_limit, size_t max_limit, boo
   return limit;
 }
 
+TransferController::TransferController(size_t min_limit, size_t max_limit)
+    : min_limit_(min_limit), max_limit_(std::max(min_limit, max_limit)), limit_(min_limit) {}
+
+size_t TransferController::update(double byte_rate, double file_rate, bool target_retries) {
+  constexpr double kDecay = 0.995, kMargin = 1.05;
+  byte_record_ *= kDecay;
+  file_record_ *= kDecay;
+  if (target_retries) {
+    limit_ = next_transfer_limit(limit_, min_limit_, max_limit_, true, false);
+    measuring_ = true;
+    return limit_;
+  }
+  bool improved = byte_rate > byte_record_ * kMargin || file_rate > file_record_ * kMargin;
+  if (measuring_ || improved) {
+    // The throughput at this limit is the one that a higher limit must beat.
+    byte_record_ = byte_rate;
+    file_record_ = file_rate;
+  }
+  if (improved && !measuring_)
+    limit_ = next_transfer_limit(limit_, min_limit_, max_limit_, false, true);
+  measuring_ = false;
+  return limit_;
+}
+
 struct Engine::Impl {
   Impl(Endpoint& src, Endpoint& dst, SyncOptions opts, Report& rep, Journal* jnl,
        const Cancellation& cnl)
@@ -127,7 +152,7 @@ struct Engine::Impl {
         report(rep),
         stats(rep.stats),
         journal(jnl),
-        cancel(cnl),
+        cancel(&cnl),
         dirs(std::numeric_limits<size_t>::max(), /*lifo=*/true),
         copies(std::max<size_t>(1, options.max_backlog)),
         gate(initial_limit()) {
@@ -135,6 +160,9 @@ struct Engine::Impl {
     copy_options.preserve_mode = options.preserve_mode;
     copy_options.verify = options.verify || options.require_checksum;
     copy_options.require_verification = options.require_checksum;
+    // Before a display can look at them.
+    report.init_slots(max_transfers(), options.max_backlog);
+    stats.transfer_limit.store(gate.limit());
   }
 
   Endpoint& source;
@@ -143,7 +171,7 @@ struct Engine::Impl {
   Report& report;
   Stats& stats;
   Journal* journal;
-  const Cancellation& cancel;
+  Cancellation cancel;  // the caller's, or the engine's own when it ends the run
   CopyOptions copy_options;
 
   // Settled once the target root exists, since probing it may need that.
@@ -176,9 +204,17 @@ struct Engine::Impl {
   std::condition_variable done_cv;
   size_t roots_pending = 0;
 
-  std::unordered_set<RelPath> prior_failures;  // paths to clear in the journal on success
+  std::mutex end_mutex;
+  std::optional<Error> end_error;  // the run ends with this error, set at most once
+
+  // The names of the journal's failures by directory, to clear on success.
+  std::map<RelPath, std::unordered_set<std::string>> prior_failures;
   std::atomic<uint64_t> deletions{0};
   std::atomic<bool> delete_cap_reported{false};
+  std::atomic<uint64_t> failures_in_a_row{0};
+  // Transient errors of transfers on the target, which is how an overloaded
+  // target shows.
+  std::atomic<uint64_t> target_errors{0};
 
   // ---- helpers -------------------------------------------------------------
 
@@ -204,11 +240,35 @@ struct Engine::Impl {
     return link_target;
   }
 
+  // Ends the run with the error once the workers are done; the first one
+  // counts.
+  void end_run(Error error) {
+    std::lock_guard lock(end_mutex);
+    if (!end_error) end_error = std::move(error);
+  }
+
   void fail(const RelPath& path, EntryType type, const Error& error) {
     if (error.kind == ErrorKind::Cancelled) return;
     Failure f{path, type, error};
     if (journal && !options.dry_run) journal->record_failure(f);
     report.add_failure(std::move(f));
+    // An endpoint that has become unusable would fail everything that is
+    // left, and fill the journal with it.
+    if (failures_in_a_row.fetch_add(1) + 1 == options.max_consecutive_failures) {
+      std::string message = "stopped after " + std::to_string(options.max_consecutive_failures) +
+                            " failures in a row (--max-consecutive-failures), the last: " +
+                            std::string(to_string(type)) + " " + (path.empty() ? "." : path) +
+                            ": " + error.describe();
+      log::error(message);
+      end_run(Error{ErrorKind::Cancelled, message});
+      cancel.request();
+    }
+  }
+
+  // Something worked: failures are no longer in a row.
+  void healthy() {
+    if (failures_in_a_row.load(std::memory_order_relaxed) != 0)
+      failures_in_a_row.store(0, std::memory_order_relaxed);
   }
 
   // Drops listed entries whose names cannot be joined into paths.
@@ -225,7 +285,40 @@ struct Engine::Impl {
 
   // Drops the journal's record of an earlier failure of the path.
   void succeeded(const RelPath& path) {
-    if (journal && !options.dry_run && prior_failures.count(path)) journal->clear_failure(path);
+    healthy();
+    if (!journal || options.dry_run) return;
+    auto rows = prior_failures.find(parent_path(path));
+    if (rows != prior_failures.end() && rows->second.count(name_of(path)))
+      journal->clear_failure(path);
+  }
+
+  // Drops the journal's records of earlier failures of entries in a
+  // directory, or below them, whose names are gone from both sides, which
+  // leaves nothing to retry.
+  void clear_vanished(const RelPath& dir, const std::vector<Entry>& src_entries,
+                      const std::unordered_map<std::string, Entry>& dst_extras) {
+    if (!journal || options.dry_run) return;
+    std::string prefix = dir.empty() ? "" : dir + "/";
+    auto rows = prior_failures.find(dir);
+    auto below = prior_failures.lower_bound(prefix);
+    if (below != prior_failures.end() && below->first == dir) ++below;  // dir "" itself
+    bool any_below = below != prior_failures.end() && below->first.starts_with(prefix);
+    if (rows == prior_failures.end() && !any_below) return;
+
+    std::unordered_set<std::string_view> in_source;
+    for (const Entry& e : src_entries) in_source.insert(e.name);
+    auto gone = [&](std::string_view name) {
+      return !name.empty() && !in_source.count(name) && !dst_extras.count(std::string(name));
+    };
+    if (rows != prior_failures.end())
+      for (const std::string& name : rows->second)
+        if (gone(name)) journal->clear_failure(join(dir, name));
+    for (; below != prior_failures.end() && below->first.starts_with(prefix); ++below) {
+      std::string_view rest = std::string_view(below->first).substr(prefix.size());
+      if (!gone(rest.substr(0, rest.find('/')))) continue;
+      for (const std::string& name : below->second)
+        journal->clear_failure(join(below->first, name));
+    }
   }
 
   // The metadata fields of the target entry that differ from the source.
@@ -259,19 +352,23 @@ struct Engine::Impl {
     return true;
   }
 
-  // Before changing entries of an existing target directory that may not be
-  // writable for us, adds the owner's rwx bits; finalize restores the mode.
+  // Before changing an existing target directory that may not be writable
+  // for us (its entries, or its mtime), adds the owner's rwx bits to its
+  // mode; finalize restores the mode.
   void ensure_writable(const std::shared_ptr<DirNode>& node) {
-    if (!relax_modes || node->created || options.dry_run || node->made_writable) return;
+    if (!relax_modes || node->created || options.dry_run || (node->target.mode & 0700) == 0700 ||
+        node->relaxing_tried)
+      return;
     std::lock_guard lock(node->writable_mutex);
-    if (node->made_writable) return;
-    if ((node->target.mode & 0700) != 0700) {
-      Entry relaxed = node->target;
-      relaxed.mode |= 0700;
-      Status s = retry([&] { return target.set_metadata(node->path, relaxed, MetaFields::Mode); });
-      if (!s.ok()) log::warn("cannot make ", node->path, " writable: ", s.error().describe());
-    }
-    node->made_writable = true;
+    if (node->relaxing_tried) return;
+    Entry relaxed = node->target;
+    relaxed.mode |= 0700;
+    Status s = retry([&] { return target.set_metadata(node->path, relaxed, MetaFields::Mode); });
+    if (s.ok())
+      node->made_writable = true;
+    else
+      log::warn("cannot make ", node->path, " writable: ", s.error().describe());
+    node->relaxing_tried = true;
   }
 
   // ---- directory completion -------------------------------------------------
@@ -290,10 +387,18 @@ struct Engine::Impl {
       } else {
         fields = differences(node->source, node->target);
         if (node->touched && use_mtimes) fields = fields | MetaFields::Mtime;
+        // Setting the mtime takes write access as well (EOS checks it).
+        if (has(fields, MetaFields::Mtime)) ensure_writable(node);
         if (node->made_writable && options.preserve_mode) fields = fields | MetaFields::Mode;
-        if (fields != MetaFields::None) stats.metadata_fixed.fetch_add(1);
       }
-      if (!apply_metadata(node->path, node->source, fields)) node->failed = true;
+      if (!apply_metadata(node->path, node->source, fields))
+        node->failed = true;
+      else if (!node->created && fields != MetaFields::None)
+        stats.metadata_fixed.fetch_add(1);
+    } else if (!cancel.requested() && !node->failed && node->made_writable) {
+      // The shard that owns the directory sets its metadata, but the mode
+      // relaxed for creating a subdirectory is restored here.
+      if (!apply_metadata(node->path, node->source, MetaFields::Mode)) node->failed = true;
     }
     if (!node->failed && !cancel.requested()) succeeded(node->path);
     if (journal && !options.dry_run && !node->failed && !node->only && !cancel.requested())
@@ -328,9 +433,7 @@ struct Engine::Impl {
 
     auto listed = retry([&] { return source.list(node->path); });
     if (!listed.ok()) {
-      node->failed = true;
-      fail(node->path, EntryType::Directory, listed.error());
-      entry_done(node);
+      dir_failed(node, listed.error());
       return;
     }
     std::vector<Entry>& src_entries = listed.value();
@@ -351,14 +454,24 @@ struct Engine::Impl {
                              ? create_dir(node)
                              : Status(dst_listed.error());
         if (!created.ok()) {
-          node->failed = true;
-          fail(node->path, EntryType::Directory, created.error());
-          entry_done(node);
+          dir_failed(node, created.error());
           return;
         }
       }
     }
     stats.dirs_listed.fetch_add(1);
+    healthy();
+
+    if (options.delete_extra && !node->parent && !node->only && empty_source(src_entries) &&
+        !empty_target(dst_entries)) {
+      // More likely an unmounted file system or a broken server than a tree
+      // whose whole copy is to be deleted.
+      node->failed = true;
+      end_run(Error{ErrorKind::Other, source.describe() + " is empty, but " + target.describe() +
+                                          " is not: refusing to delete everything there"});
+      entry_done(node);
+      return;
+    }
 
     for (Entry& e : src_entries) {
       if (cancel.requested()) break;
@@ -387,15 +500,34 @@ struct Engine::Impl {
       if (it != dst_entries.end()) dst_entries.erase(it);
     }
 
-    if (node->only) {
-      // Names gone from both sides have nothing left to retry.
-      std::unordered_set<std::string_view> in_source;
-      for (const Entry& e : src_entries) in_source.insert(e.name);
-      for (const std::string& name : *node->only)
-        if (!in_source.count(name) && !dst_entries.count(name)) succeeded(join(node->path, name));
-    } else if (node->owned && !cancel.requested()) {
+    // What is left of the target's entries is not in the source.
+    clear_vanished(node->path, src_entries, dst_entries);
+    if (node->owned && !cancel.requested()) {
+      // A retry handles only its own names, among them failed deletions.
+      if (node->only)
+        std::erase_if(dst_entries, [&](const auto& e) { return !node->only->count(e.first); });
       handle_extras(node, dst_entries);
     }
+    entry_done(node);
+  }
+
+  bool empty_source(const std::vector<Entry>& entries) const {
+    return std::all_of(entries.begin(), entries.end(),
+                       [&](const Entry& e) { return source.is_temporary(e.name); });
+  }
+
+  bool empty_target(const std::unordered_map<std::string, Entry>& entries) const {
+    return std::all_of(entries.begin(), entries.end(),
+                       [&](const auto& e) { return target.is_temporary(e.first); });
+  }
+
+  // Reports a directory that could not be listed or created. For the top
+  // directory of a run, that ends the run.
+  void dir_failed(const std::shared_ptr<DirNode>& node, const Error& error) {
+    node->failed = true;
+    fail(node->path, EntryType::Directory, error);
+    if (!node->parent && !node->only && error.kind != ErrorKind::Cancelled)
+      end_run(Error{error.kind, "could not process the top directory: " + error.describe()});
     entry_done(node);
   }
 
@@ -531,13 +663,16 @@ struct Engine::Impl {
     }
     ensure_writable(node);
     node->touched = true;
-    stats.symlinks_created.fetch_add(1);
-    if (options.dry_run) return;
+    if (options.dry_run) {
+      stats.symlinks_created.fetch_add(1);
+      return;
+    }
     Status s = retry([&] { return target.symlink(path, link_target); });
     if (!s.ok()) {
       fail(path, EntryType::Symlink, s.error());
       return;
     }
+    stats.symlinks_created.fetch_add(1);
     MetaFields fields = MetaFields::None;
     if (use_mtimes) fields = fields | MetaFields::Mtime;
     if (options.preserve_owner && symlink_owner) fields = fields | MetaFields::Owner;
@@ -569,20 +704,25 @@ struct Engine::Impl {
       ensure_writable(node);
       node->touched = true;
       Status removed = delete_tree(path, e);
-      if (removed.ok()) {
-        succeeded(path);
-      } else if (!removed.error().message.starts_with("deletion cap") ||
-                 !delete_cap_reported.exchange(true)) {
+      if (!removed.ok() && (!removed.error().message.starts_with("deletion cap") ||
+                            !delete_cap_reported.exchange(true)))
         fail(path, e.type, removed.error());
-      }
     }
   }
 
   // Deletes a target entry, directories recursively, within the deletion
-  // cap. Reports nothing; the error of the first entry that could not be
-  // removed is returned.
+  // cap. Reports no failures but returns the error of the first entry that
+  // could not be removed.
   Status delete_tree(const RelPath& path, const Entry& e) {
     if (e.type == EntryType::Directory) {
+      // Without the owner's rwx bits, its entries can be neither listed nor
+      // removed. The mode need not be restored.
+      if (relax_modes && !options.dry_run && (e.mode & 0700) != 0700) {
+        Entry relaxed = e;
+        relaxed.mode |= 0700;
+        Status s = retry([&] { return target.set_metadata(path, relaxed, MetaFields::Mode); });
+        if (!s.ok()) return s;
+      }
       auto listed = retry([&] { return target.list(path); });
       if (!listed.ok()) return listed.error();
       drop_invalid_names(target, path, listed.value());
@@ -606,6 +746,7 @@ struct Engine::Impl {
       }
     }
     stats.deleted.fetch_add(1);
+    succeeded(path);
     return {};
   }
 
@@ -616,54 +757,44 @@ struct Engine::Impl {
     TransferSlot& slot = *report.slots[index];
     while (auto job = copies.pop()) {
       stats.queued_copies.fetch_sub(1);
-      if (!gate.acquire()) {
-        entry_done(job->dir);
-        continue;
+      if (gate.acquire()) {
+        run_copy(*job, pool, slot);
+        gate.release();
       }
-      run_copy(*job, pool, slot);
-      gate.release();
+      // Finalizing the directory takes no transfer slot.
+      entry_done(job->dir);
     }
   }
 
-  // Adjusts the transfer limit every interval: up while throughput (bytes
-  // or files) improves, down when operations were retried, which is how an
-  // overloaded target shows.
+  // Adjusts the transfer limit every interval, see TransferController.
   void controller_loop() {
-    const size_t min_limit = initial_limit();
-    const size_t max_limit = max_transfers();
+    TransferController limits(initial_limit(), max_transfers());
     uint64_t last_bytes = stats.bytes_written.load();
     uint64_t last_files = stats.files_copied.load();
-    uint64_t last_retries = stats.retries.load();
-    double best_bytes = 0, best_files = 0;
+    uint64_t last_errors = target_errors.load();
     auto last = std::chrono::steady_clock::now();
     while (!controller_stop) {
       if (cancel.wait(options.adapt_interval, &controller_stop)) break;
       auto now = std::chrono::steady_clock::now();
       double secs = std::chrono::duration<double>(now - last).count();
+      if (secs <= 0) continue;
       last = now;
       uint64_t bytes = stats.bytes_written.load(), files = stats.files_copied.load();
-      uint64_t retries = stats.retries.load();
+      uint64_t errors = target_errors.load();
       double byte_rate = static_cast<double>(bytes - last_bytes) / secs;
       double file_rate = static_cast<double>(files - last_files) / secs;
-      bool retried = retries != last_retries;
+      bool retried = errors != last_errors;
       last_bytes = bytes;
       last_files = files;
-      last_retries = retries;
+      last_errors = errors;
 
-      bool improved = byte_rate > best_bytes * 1.05 || file_rate > best_files * 1.05;
-      if (retried) {
-        best_bytes = byte_rate;
-        best_files = file_rate;
-      } else if (improved) {
-        best_bytes = std::max(best_bytes, byte_rate);
-        best_files = std::max(best_files, file_rate);
-      }
-      size_t limit = gate.limit();
-      size_t wanted = next_transfer_limit(limit, min_limit, max_limit, retried, improved);
+      size_t limit = limits.limit();
+      size_t wanted = limits.update(byte_rate, file_rate, retried);
       if (wanted != limit) {
-        log::info("transfer limit ", limit, " -> ", wanted, " (", format_bytes(static_cast<uint64_t>(byte_rate)),
-                  "/s, ", static_cast<uint64_t>(file_rate), " files/s",
-                  retried ? ", retries" : "", ")");
+        log::info("transfer limit ", limit, " -> ", wanted, " (",
+                  format_bytes(static_cast<uint64_t>(byte_rate)), "/s, ",
+                  static_cast<uint64_t>(file_rate), " files/s",
+                  retried ? ", target errors" : "", ")");
         gate.set_limit(wanted);
         stats.transfer_limit.store(wanted);
       }
@@ -691,8 +822,13 @@ struct Engine::Impl {
         stats.bytes_written.fetch_add(n);
         slot.written.fetch_add(n);
       };
-      auto result = retry(
-          [&] { return copy_file(source, target, path, job.source, job_options, pool, cancel); });
+      job_options.on_target_error = [&](const Error& e) {
+        if (is_transient(e.kind)) target_errors.fetch_add(1);
+      };
+      auto result = retry([&] {
+        slot.written = 0;
+        return copy_file(source, target, path, job.source, job_options, pool, cancel);
+      });
       slot.active = false;
       if (result.ok()) {
         stats.files_copied.fetch_add(1);
@@ -711,7 +847,6 @@ struct Engine::Impl {
         fail(path, EntryType::File, result.error());
       }
     }
-    entry_done(job.dir);
   }
 
   // ---- running ----------------------------------------------------------------------
@@ -736,6 +871,7 @@ struct Engine::Impl {
 
   // Settles what the endpoints can do, once the target root exists.
   void adapt_to_capabilities() {
+    if (!options.dry_run) target.probe_target();
     Capabilities src = source.capabilities();
     Capabilities dst = target.capabilities();
     mtime_resolution = std::max(src.mtime_resolution, dst.mtime_resolution);
@@ -760,16 +896,21 @@ struct Engine::Impl {
       log::info("comparing mtimes at a resolution of ", mtime_resolution, " ns");
   }
 
-  // Prepares a node for a source directory: stats both sides and creates the
-  // target directory if needed.
-  Result<std::shared_ptr<DirNode>> make_node(const RelPath& path) {
+  // The source's entry of a directory that a run starts from.
+  Result<Entry> source_dir(const RelPath& path) {
     auto src = retry([&] { return source.stat(path); });
     if (!src.ok()) return src.error();
     if (src.value().type != EntryType::Directory)
       return Error{ErrorKind::NotADirectory, source.describe() + "/" + path + " is not a directory"};
+    return src;
+  }
+
+  // Prepares a node for a source directory: stats the target and creates the
+  // target directory if needed.
+  Result<std::shared_ptr<DirNode>> make_node(const RelPath& path, const Entry& src) {
     auto node = std::make_shared<DirNode>();
     node->path = path;
-    node->source = src.value();
+    node->source = src;
     node->owned = shard_owns(path);
     auto dst = retry([&] { return target.stat(path); });
     if (dst.ok()) {
@@ -785,18 +926,26 @@ struct Engine::Impl {
     return node;
   }
 
+  // Synchronizes the whole tree.
+  Status run_tree() {
+    auto src = source_dir("");
+    if (!src.ok()) return src.error();
+    auto root = make_node("", src.value());
+    if (!root.ok()) return root.error();
+    return run_nodes({root.value()});
+  }
+
   Status run_nodes(std::vector<std::shared_ptr<DirNode>> roots) {
     adapt_to_capabilities();
     if (journal) {
-      for (const Failure& f : journal->failures()) prior_failures.insert(f.path);
+      for (const Failure& f : journal->failures())
+        prior_failures[parent_path(f.path)].insert(name_of(f.path));
     }
     {
       std::lock_guard lock(done_mutex);
       roots_pending = roots.size();
     }
     size_t transfers = max_transfers();
-    report.init_slots(transfers, options.max_backlog);
-    stats.transfer_limit.store(gate.limit());
     for (int i = 0; i < std::max(1, options.checkers); ++i)
       threads.emplace_back([this] { checker_loop(); });
     for (size_t i = 0; i < transfers; ++i)
@@ -816,10 +965,8 @@ struct Engine::Impl {
     for (auto& t : threads) t.join();
     threads.clear();
     if (controller.joinable()) controller.join();
+    if (end_error) return *end_error;
     if (cancel.requested()) return Error{ErrorKind::Cancelled, "run cancelled"};
-    for (auto& root : roots)
-      if (root->failed && !root->only)
-        return Error{ErrorKind::Other, "could not process " + source.describe() + "/" + root->path};
     return {};
   }
 };
@@ -833,9 +980,7 @@ Engine::~Engine() = default;
 Status Engine::run() {
   Status pre = impl_->preflight();
   if (!pre.ok()) return pre;
-  auto root = impl_->make_node("");
-  if (!root.ok()) return root.error();
-  return impl_->run_nodes({root.value()});
+  return impl_->run_tree();
 }
 
 Status Engine::run(const std::vector<Failure>& entries) {
@@ -863,18 +1008,21 @@ Status Engine::run(const std::vector<Failure>& entries) {
     else
       groups[parent_path(f.path)].insert(name_of(f.path));
   }
-  if (whole_tree) return run();
+  if (whole_tree) return impl_->run_tree();
 
   std::vector<std::shared_ptr<DirNode>> roots;
   for (auto& [dir, names] : groups) {
-    auto node = impl_->make_node(dir);
+    auto src = impl_->source_dir(dir);
+    if (!src.ok() && src.error().kind == ErrorKind::NotFound) {
+      // Gone from the source: nothing left to retry.
+      if (impl_->journal && !impl_->options.dry_run)
+        for (const auto& name : names) impl_->journal->clear_failure(join(dir, name));
+      continue;
+    }
+    auto node = src.ok() ? impl_->make_node(dir, src.value())
+                         : Result<std::shared_ptr<DirNode>>(src.error());
     if (!node.ok()) {
-      if (node.error().kind == ErrorKind::NotFound) {
-        if (impl_->journal && !impl_->options.dry_run)
-          for (const auto& name : names) impl_->journal->clear_failure(join(dir, name));
-      } else {
-        impl_->fail(dir, EntryType::Directory, node.error());
-      }
+      impl_->fail(dir, EntryType::Directory, node.error());
       continue;
     }
     node.value()->only = std::move(names);

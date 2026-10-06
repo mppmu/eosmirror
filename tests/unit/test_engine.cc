@@ -1252,3 +1252,533 @@ TEST_CASE("the transfer limit grows by half while throughput improves") {
   }
   CHECK(intervals == 6);
 }
+
+TEST_CASE("the transfer controller grows with the throughput and backs off on target retries") {
+  TransferController c(4, 32);
+  CHECK(c.limit() == 4);
+  CHECK(c.update(0, 0, false) == 4);  // nothing copied yet
+  CHECK(c.update(100, 10, false) == 6);
+  CHECK(c.update(200, 10, false) == 9);   // bytes improved
+  CHECK(c.update(200, 20, false) == 13);  // files improved
+  CHECK(c.update(205, 20, false) == 13);  // within 5 % of the rate at 9
+  CHECK(c.update(190, 19, false) == 13);
+
+  // Retries on the target take a quarter away. The next interval measures
+  // the lower limit, which a later one then has to beat.
+  CHECK(c.update(150, 15, true) == 10);
+  CHECK(c.update(120, 12, false) == 10);
+  CHECK(c.update(125, 12, false) == 10);
+  CHECK(c.update(140, 12, false) == 15);
+  CHECK(c.update(100, 10, true) == 12);
+  CHECK(c.update(100, 10, true) == 9);
+  for (int i = 0; i < 10; ++i) c.update(0, 0, true);
+  CHECK(c.limit() == 4);  // not below the start
+}
+
+TEST_CASE("the transfer controller tries higher limits only now and then at a flat rate") {
+  TransferController c(4, 1000);
+  c.update(100, 10, false);
+  size_t settled = c.limit();
+  int raised = 0;
+  for (int i = 0; i < 100; ++i) {
+    size_t before = c.limit();
+    if (c.update(100, 10, false) > before) ++raised;
+  }
+  CHECK(raised >= 2);   // the record decays
+  CHECK(raised <= 20);  // but slowly
+  CHECK(c.limit() > settled);
+
+  // A record from a faster part of the tree blocks growth only for a while.
+  TransferController d(4, 1000);
+  d.update(1000, 100, false);
+  size_t after_fast = d.limit();
+  int intervals = 0;
+  while (d.limit() == after_fast && intervals < 1000) {
+    d.update(500, 50, false);
+    ++intervals;
+  }
+  CHECK(d.limit() > after_fast);
+  CHECK(intervals > 50);
+  CHECK(intervals < 300);
+}
+
+TEST_CASE("copies report errors of the target, not of the source") {
+  FakeEndpoint src, dst;
+  src.add_file("f", std::string(10000, 'x'));
+  src.add_file("g", "y");
+  BufferPool pool(4096);
+  Cancellation cancel;
+  std::vector<ErrorKind> target_errors;
+  CopyOptions options;
+  options.on_target_error = [&](const Error& e) { target_errors.push_back(e.kind); };
+  auto copy = [&](const RelPath& path) {
+    return copy_file(src, dst, path, src.stat(path).value(), options, pool, cancel);
+  };
+
+  src.fail("read", "f", Error{ErrorKind::IO, "source trouble"});
+  CHECK_FALSE(copy("f").ok());
+  src.fail("open_read", "f", Error{ErrorKind::Timeout, "source trouble"});
+  CHECK_FALSE(copy("f").ok());
+  CHECK(target_errors.empty());
+
+  dst.fail("open_write", "f", Error{ErrorKind::Timeout, "target trouble"});
+  CHECK_FALSE(copy("f").ok());
+  dst.fail("write", "f", Error{ErrorKind::IO, "target trouble"});
+  CHECK_FALSE(copy("f").ok());
+  dst.fail("commit", "g", Error{ErrorKind::NoSpace, "full"});
+  CHECK_FALSE(copy("g").ok());
+  CHECK(target_errors == std::vector{ErrorKind::Timeout, ErrorKind::IO, ErrorKind::NoSpace});
+  CHECK(copy("f").ok());
+}
+
+TEST_CASE("fake: the transfer slots exist before the run starts") {
+  FakeEndpoint src, dst;
+  Cancellation cancel;
+  Report r;
+  SyncOptions o = fake_options();
+  o.transfers = 5;
+  Engine engine(src, dst, o, r, nullptr, cancel);
+  CHECK(r.slots.size() == 5);
+  CHECK(r.backlog_capacity == o.max_backlog);
+}
+
+TEST_CASE("fake: a directory's metadata is set without holding a transfer slot") {
+  FakeEndpoint src, dst;
+  src.add_dir("a");
+  src.add_file("a/f", "x");
+  src.add_dir("b");
+  src.add_file("b/g", "y");
+  SyncOptions o = fake_options();
+  o.transfers = 2;
+  o.adaptive = true;
+  o.min_transfers = 1;  // one copy at a time
+  o.adapt_interval = std::chrono::seconds(60);
+  // Finalizing a directory waits for the other copy, which needs the slot.
+  std::atomic<int> writes{0};
+  std::atomic<bool> waited_in_vain{false};
+  dst.hook = [&](std::string_view op, const RelPath& path) {
+    if (op == "open_write") ++writes;
+    if (op != "set_metadata" || (path != "a" && path != "b")) return;
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (writes < 2 && std::chrono::steady_clock::now() < deadline)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    if (writes < 2) waited_in_vain = true;
+  };
+  Report r;
+  REQUIRE(run_sync(src, dst, o, r).ok());
+  CHECK(r.stats.files_copied == 2);
+  CHECK_FALSE(waited_in_vain);
+}
+
+TEST_CASE("fake: cancelling during a retry wait records no failure") {
+  TempDir tmp;
+  auto journal = Journal::open(tmp.sub("j.sqlite"), "fake", "fake");
+  REQUIRE(journal.ok());
+  REQUIRE(journal.value()->begin_run(false).ok());
+  FakeEndpoint src, dst;
+  src.add_file("f", "x");
+  src.fail("open_read", "f", Error{ErrorKind::IO, "flaky"}, 100);
+  SyncOptions o = fake_options();
+  o.retry.initial_delay = std::chrono::seconds(30);
+  Cancellation cancel;
+  std::thread stopper([&] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    cancel.request();
+  });
+  Report r;
+  Engine engine(src, dst, o, r, journal.value().get(), cancel);
+  auto start = std::chrono::steady_clock::now();
+  Status s = engine.run();
+  stopper.join();
+  CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds(10));
+  REQUIRE_FALSE(s.ok());
+  CHECK(s.error().kind == ErrorKind::Cancelled);
+  CHECK(r.stats.retries == 1);
+  CHECK(r.stats.failures == 0);
+  CHECK(journal.value()->failures().empty());
+}
+
+TEST_CASE("fake: only what succeeded is counted") {
+  FakeEndpoint src, dst;
+  src.add_dir("d", 0755, {2001, 0});
+  src.add_symlink("d/l", "target");
+  dst.add_dir("d", 0755, {2002, 0});
+  dst.fail("symlink", "d/l", Error{ErrorKind::Permission, "denied"});
+  dst.fail("set_metadata", "d", Error{ErrorKind::Permission, "denied"});
+  Report r;
+  REQUIRE(run_sync(src, dst, fake_options(), r).ok());
+  CHECK(r.stats.failures == 2);
+  CHECK(r.stats.symlinks_created == 0);
+  CHECK(r.stats.metadata_fixed == 0);
+
+  Report r2;
+  REQUIRE(run_sync(src, dst, fake_options(), r2).ok());
+  CHECK(r2.stats.failures == 0);
+  CHECK(r2.stats.symlinks_created == 1);
+  CHECK(r2.stats.metadata_fixed == 1);
+}
+
+TEST_CASE("fake: a top directory whose metadata cannot be set is a failure that can be retried") {
+  TempDir tmp;
+  auto journal = Journal::open(tmp.sub("j.sqlite"), "fake", "fake");
+  REQUIRE(journal.ok());
+  Journal& j = *journal.value();
+  FakeEndpoint src, dst;
+  populate(src);
+  dst.fail("set_metadata", "", Error{ErrorKind::Permission, "not the owner"}, 2);
+  REQUIRE(j.begin_run(false).ok());
+  Report r;
+  REQUIRE(run_sync(src, dst, fake_options(), r, &j).ok());
+  REQUIRE(j.end_run(true).ok());
+  CHECK(r.stats.failures == 1);
+  CHECK(r.stats.files_copied == 3);
+  REQUIRE(j.failures().size() == 1);
+  CHECK(j.failures()[0].path == "");
+
+  // Retrying the row walks the whole tree.
+  for (uint64_t failures : {1, 0}) {
+    REQUIRE(j.begin_run(false).ok());
+    Report r2;
+    Cancellation cancel;
+    Engine engine(src, dst, fake_options(), r2, &j, cancel);
+    REQUIRE(engine.run(j.failures()).ok());
+    REQUIRE(j.end_run(true).ok());
+    CHECK(r2.stats.dirs_listed == 3);
+    CHECK(r2.stats.failures == failures);
+    CHECK(j.failures().size() == failures);
+  }
+  CHECK(dst.get("")->entry.mtime == src.get("")->entry.mtime);
+}
+
+TEST_CASE("fake: retrying keeps the rows of a directory that cannot be recreated") {
+  TempDir tmp;
+  auto journal = Journal::open(tmp.sub("j.sqlite"), "fake", "fake");
+  REQUIRE(journal.ok());
+  Journal& j = *journal.value();
+  FakeEndpoint src, dst;
+  populate(src);
+  // As if d1/d2/f2 had failed and d1 then vanished from the target.
+  REQUIRE(j.begin_run(false).ok());
+  j.record_failure({"d1/d2/f2", EntryType::File, Error{ErrorKind::IO, "earlier"}});
+  REQUIRE(j.end_run(true).ok());
+
+  REQUIRE(j.begin_run(false).ok());
+  Report r;
+  Cancellation cancel;
+  Engine engine(src, dst, fake_options(), r, &j, cancel);
+  REQUIRE(engine.run(j.failures()).ok());
+  REQUIRE(j.end_run(true).ok());
+  REQUIRE(r.stats.failures == 1);
+  CHECK(r.failures()[0].path == "d1/d2");
+  CHECK(r.failures()[0].error.kind == ErrorKind::NotFound);
+  auto rows = j.failures();
+  REQUIRE(rows.size() == 2);
+  CHECK(rows[0].path == "d1/d2");
+  CHECK(rows[1].path == "d1/d2/f2");
+
+  // A full run recreates everything and clears both.
+  REQUIRE(j.begin_run(false).ok());
+  Report r2;
+  REQUIRE(run_sync(src, dst, fake_options(), r2, &j).ok());
+  REQUIRE(j.end_run(true).ok());
+  CHECK(r2.stats.failures == 0);
+  CHECK(j.failures().empty());
+  expect_mirrored(src, dst);
+}
+
+TEST_CASE("fake: retrying a failed deletion deletes, with --delete") {
+  TempDir tmp;
+  auto journal = Journal::open(tmp.sub("j.sqlite"), "fake", "fake");
+  REQUIRE(journal.ok());
+  Journal& j = *journal.value();
+  FakeEndpoint src, dst;
+  populate(src);
+  Report mirror;
+  REQUIRE(run_sync(src, dst, fake_options(), mirror).ok());
+  dst.add_file("d1/extra", "x");
+  dst.add_dir("gone");
+  dst.add_file("gone/inner", "y");
+  REQUIRE(j.begin_run(false).ok());
+  j.record_failure({"d1/extra", EntryType::File, Error{ErrorKind::Permission, "locked"}});
+  j.record_failure({"gone", EntryType::Directory, Error{ErrorKind::Permission, "locked"}});
+  j.record_failure({"gone/inner", EntryType::File, Error{ErrorKind::IO, "earlier"}});
+  REQUIRE(j.end_run(true).ok());
+
+  for (bool delete_extra : {false, true}) {
+    SyncOptions o = fake_options();
+    o.delete_extra = delete_extra;
+    REQUIRE(j.begin_run(false).ok());
+    Report r;
+    Cancellation cancel;
+    Engine engine(src, dst, o, r, &j, cancel);
+    REQUIRE(engine.run(j.failures()).ok());
+    REQUIRE(j.end_run(true).ok());
+    CHECK(r.stats.failures == 0);
+    CHECK(r.stats.extras == 2);
+    CHECK(r.stats.deleted == (delete_extra ? 3 : 0));
+    CHECK(j.failures().size() == (delete_extra ? 0 : 3));
+    CHECK(static_cast<bool>(dst.get("gone/inner")) == !delete_extra);
+  }
+  CHECK_FALSE(dst.get("d1/extra"));
+  CHECK(dst.get("d1/f1"));
+}
+
+TEST_CASE("fake: plain runs clear the rows of entries gone from both sides") {
+  TempDir tmp;
+  auto journal = Journal::open(tmp.sub("j.sqlite"), "fake", "fake");
+  REQUIRE(journal.ok());
+  Journal& j = *journal.value();
+  FakeEndpoint src, dst;
+  populate(src);
+  Report mirror;
+  REQUIRE(run_sync(src, dst, fake_options(), mirror).ok());
+  dst.add_file("d1/extra", "x");
+  REQUIRE(j.begin_run(false).ok());
+  for (const char* path : {"d1/vanished", "d1/extra", "nowhere/deep/file", "d1/d2/gone/f"})
+    j.record_failure({path, EntryType::File, Error{ErrorKind::IO, "earlier"}});
+  j.record_failure({"nowhere", EntryType::Directory, Error{ErrorKind::IO, "earlier"}});
+  REQUIRE(j.end_run(true).ok());
+
+  REQUIRE(j.begin_run(false).ok());
+  Report r;
+  REQUIRE(run_sync(src, dst, fake_options(), r, &j).ok());
+  REQUIRE(j.end_run(true).ok());
+  // Only the extra, which a run with --delete would delete, is left.
+  auto rows = j.failures();
+  REQUIRE(rows.size() == 1);
+  CHECK(rows[0].path == "d1/extra");
+}
+
+TEST_CASE("fake: read-only target directories are made writable for changes, and restored") {
+  FakeEndpoint src, dst;
+  dst.caps.can_set_owner = false;
+  dst.utimes_needs_write = true;
+  dst.entries_need_write = true;
+  SyncOptions o = fake_options();
+  o.preserve_owner = false;
+  src.add_dir("ro", 0555, {2345, 6});
+  src.add_file("ro/f", "x", 0444, {3456, 7});
+  src.add_dir("ro/sub", 0555, {2346, 0});
+  Report r;
+  REQUIRE(run_sync(src, dst, o, r).ok());
+  CHECK(r.stats.failures == 0);
+  expect_mirrored(src, dst);
+
+  SUBCASE("a new entry") {
+    src.add_file("ro/g", "new", 0444, {3457, 0});
+    src.modify("ro", [](FakeEndpoint::Node& n) { n.entry.mtime = {2350, 0}; });
+  }
+  SUBCASE("only the directory's mtime") {
+    // Setting it needs write access as well (EOS, a non-owner on POSIX).
+    src.modify("ro", [](FakeEndpoint::Node& n) { n.entry.mtime = {2350, 0}; });
+  }
+  SUBCASE("a replaced file in a directory that keeps its mtime") {
+    src.modify("ro/f", [](FakeEndpoint::Node& n) {
+      n.content = "changed";
+      n.entry.size = 7;
+      n.entry.mtime = {3500, 0};
+    });
+  }
+  Report r2;
+  REQUIRE(run_sync(src, dst, o, r2).ok());
+  CHECK(r2.stats.failures == 0);
+  expect_mirrored(src, dst);
+  CHECK(dst.get("ro")->entry.mode == 0555);
+
+  // --delete removes read-only trees.
+  dst.add_dir("ro/extra", 0555);
+  dst.add_dir("ro/extra/inner", 0555);
+  dst.add_file("ro/extra/inner/f", "x", 0444);
+  o.delete_extra = true;
+  Report r3;
+  REQUIRE(run_sync(src, dst, o, r3).ok());
+  CHECK(r3.stats.failures == 0);
+  CHECK(r3.stats.deleted == 3);
+  CHECK_FALSE(dst.get("ro/extra"));
+  expect_mirrored(src, dst);
+}
+
+TEST_CASE("fake: shards restore the modes of read-only directories they did not own") {
+  FakeEndpoint src, dst;
+  dst.caps.can_set_owner = false;
+  dst.entries_need_write = true;
+  const int shards = 3;
+  auto run_shards = [&] {
+    for (int k = 0; k < shards; ++k) {
+      SyncOptions o = fake_options();
+      o.preserve_owner = false;
+      o.shard_index = k;
+      o.shard_count = shards;
+      Report r;
+      REQUIRE(run_sync(src, dst, o, r).ok());
+      CHECK(r.stats.failures == 0);
+    }
+  };
+  for (int i = 0; i < 6; ++i) src.add_dir("p" + std::to_string(i), 0555);
+  run_shards();
+  // Every shard creates new subdirectories, also in directories that other
+  // shards own.
+  for (int i = 0; i < 6; ++i) src.add_dir("p" + std::to_string(i) + "/new", 0755);
+  run_shards();
+  for (int i = 0; i < 6; ++i) {
+    INFO("p", i);
+    CHECK(dst.get("p" + std::to_string(i))->entry.mode == 0555);
+    CHECK(dst.get("p" + std::to_string(i) + "/new"));
+  }
+}
+
+TEST_CASE("fake: an empty source does not empty the target") {
+  FakeEndpoint src, dst;
+  dst.add_file("precious", "x");
+  dst.add_dir("tree");
+  SyncOptions o = fake_options();
+  o.delete_extra = true;
+  Report r;
+  Status s = run_sync(src, dst, o, r);
+  REQUIRE_FALSE(s.ok());
+  CHECK(s.error().kind != ErrorKind::Cancelled);
+  CHECK(s.error().message.find("refusing to delete") != std::string::npos);
+  CHECK(r.stats.deleted == 0);
+  CHECK(dst.get("precious"));
+
+  // Without --delete, or with something in the source, nothing is refused.
+  o.delete_extra = false;
+  Report r2;
+  REQUIRE(run_sync(src, dst, o, r2).ok());
+  CHECK(r2.stats.extras == 2);
+  src.add_file("f", "y");
+  o.delete_extra = true;
+  Report r3;
+  REQUIRE(run_sync(src, dst, o, r3).ok());
+  CHECK(r3.stats.deleted == 2);
+  CHECK(r3.stats.files_copied == 1);
+
+  // A missing source stops the run before anything is done.
+  TempDir tmp;
+  tmp.write_file("dst/keep", "x");
+  PosixEndpoint missing(tmp.sub("src"));
+  PosixEndpoint posix_dst(tmp.sub("dst"));
+  SyncOptions po = test_options();
+  po.delete_extra = true;
+  Report r4;
+  Status gone = run_sync(missing, posix_dst, po, r4);
+  REQUIRE_FALSE(gone.ok());
+  CHECK(gone.error().kind == ErrorKind::NotFound);
+  CHECK(fs::exists(tmp.sub("dst/keep")));
+}
+
+TEST_CASE("fake: a run stops after too many failures in a row") {
+  FakeEndpoint src, dst;
+  for (int i = 0; i < 40; ++i) {
+    std::string name = "f" + std::to_string(10 + i);
+    src.add_file(name, "x");
+    dst.fail("open_write", name, Error{ErrorKind::NoSpace, "full"}, 100);
+  }
+  SyncOptions o = fake_options();
+  o.max_consecutive_failures = 5;
+  Report r;
+  Status s = run_sync(src, dst, o, r);
+  REQUIRE_FALSE(s.ok());
+  CHECK(s.error().kind == ErrorKind::Cancelled);
+  CHECK(s.error().message.find("5 failures in a row") != std::string::npos);
+  CHECK(r.stats.failures >= 5);
+  CHECK(r.stats.failures < 40);
+
+  o.max_consecutive_failures = 0;  // never
+  Report r2;
+  REQUIRE(run_sync(src, dst, o, r2).ok());
+  CHECK(r2.stats.failures == 40);
+
+  // Successes in between start the count anew.
+  FakeEndpoint src2, dst2;
+  for (int i = 0; i < 40; ++i) {
+    std::string name = "f" + std::to_string(10 + i);
+    src2.add_file(name, "x");
+    if (i % 2) dst2.fail("open_write", name, Error{ErrorKind::NoSpace, "full"}, 100);
+  }
+  o.max_consecutive_failures = 2;
+  o.checkers = 1;
+  o.transfers = 1;
+  Report r3;
+  REQUIRE(run_sync(src2, dst2, o, r3).ok());
+  CHECK(r3.stats.failures == 20);
+  CHECK(r3.stats.files_copied == 20);
+}
+
+TEST_CASE("FS to FS: a source is never written to") {
+  TempDir tmp;
+  make_source_tree(tmp);
+  struct stat before{};
+  REQUIRE(stat(tmp.sub("src").c_str(), &before) == 0);
+  PosixEndpoint src(tmp.sub("src"));
+  PosixEndpoint dst(tmp.sub("dst"));
+  Report r;
+  REQUIRE(run_sync(src, dst, test_options(), r).ok());
+  struct stat after{};
+  REQUIRE(stat(tmp.sub("src").c_str(), &after) == 0);
+  // Creating and removing a probe file would change the ctime.
+  CHECK(after.st_ctim.tv_sec == before.st_ctim.tv_sec);
+  CHECK(after.st_ctim.tv_nsec == before.st_ctim.tv_nsec);
+}
+
+TEST_CASE("FS to FS: a journal recognizes a target that did not exist on the first run") {
+  TempDir tmp;
+  tmp.write_file("src/f", "x");
+  fs::create_directories(tmp.sub("real"));
+  REQUIRE(symlink("real", tmp.sub("link").c_str()) == 0);
+  PosixEndpoint src(tmp.sub("src"));
+  std::string journal_file = tmp.sub("j.sqlite");
+  {
+    PosixEndpoint dst(tmp.sub("link/./mirror/"));
+    auto journal = Journal::open(journal_file, src.describe(), dst.describe());
+    REQUIRE(journal.ok());
+    REQUIRE(journal.value()->begin_run(false).ok());
+    Report r;
+    REQUIRE(run_sync(src, dst, test_options(), r, journal.value().get()).ok());
+    REQUIRE(journal.value()->end_run(false).ok());
+  }
+  PosixEndpoint dst(tmp.sub("real/mirror"));
+  CHECK(dst.describe() == fs::canonical(tmp.sub("real/mirror")).string());
+  auto journal = Journal::open(journal_file, src.describe(), dst.describe());
+  CHECK(journal.ok());
+}
+
+// Run as nobody by the unit_unprivileged test, see tests/CMakeLists.txt.
+TEST_CASE("FS to FS as a user other than root: read-only directories" *
+          doctest::test_suite("unprivileged")) {
+  if (is_root()) return;
+  TempDir tmp;
+  tmp.write_file("src/ro/f", "x", 0444);
+  tmp.write_file("src/ro/sub/g", "y", 0444);
+  for (const char* dir : {"src/ro/sub", "src/ro"}) REQUIRE(chmod(tmp.sub(dir).c_str(), 0555) == 0);
+  set_mtime(tmp.sub("src/ro/sub"), 1600000000, 1);
+  set_mtime(tmp.sub("src/ro"), 1600000001, 2);
+  PosixEndpoint src(tmp.sub("src"));
+  PosixEndpoint dst(tmp.sub("dst"));
+  SyncOptions options = test_options();
+  REQUIRE_FALSE(options.preserve_owner);
+  Report r;
+  REQUIRE(run_sync(src, dst, options, r).ok());
+  CHECK(r.stats.failures == 0);
+  compare_trees(src, dst);
+
+  // A new entry in one read-only directory, a new mtime of another, and a
+  // read-only tree to delete in the first.
+  REQUIRE(chmod(tmp.sub("src/ro").c_str(), 0755) == 0);
+  tmp.write_file("src/ro/new", "z", 0444);
+  REQUIRE(chmod(tmp.sub("src/ro").c_str(), 0555) == 0);
+  set_mtime(tmp.sub("src/ro"), 1600000003, 4);
+  set_mtime(tmp.sub("src/ro/sub"), 1600000005, 6);
+  REQUIRE(chmod(tmp.sub("dst/ro").c_str(), 0755) == 0);
+  tmp.write_file("dst/ro/extra/inner/f", "x", 0444);
+  for (const char* dir : {"dst/ro/extra/inner", "dst/ro/extra", "dst/ro"})
+    REQUIRE(chmod(tmp.sub(dir).c_str(), 0555) == 0);
+  options.delete_extra = true;
+  Report r2;
+  REQUIRE(run_sync(src, dst, options, r2).ok());
+  CHECK(r2.stats.failures == 0);
+  CHECK(r2.stats.files_copied == 1);
+  CHECK(r2.stats.deleted == 3);
+  CHECK_FALSE(fs::exists(tmp.sub("dst/ro/extra")));
+  compare_trees(src, dst);
+}

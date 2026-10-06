@@ -25,9 +25,12 @@ client for now. See [docs/design.md](docs/design.md).
 - Symlinks are recreated as symlinks and never followed. Hard links are copied
   as separate files. Special files are skipped and reported.
 - Extra files on the target are only deleted with an explicit option, with a
-  dry run and a cap on the number of deletions.
+  dry run and a cap on the number of deletions, and never because the
+  source is empty.
 - Errors are retried with backoff; what still fails is recorded in the
-  journal and reported, and the exit status says so.
+  journal and reported, and the exit status says so. When everything fails
+  (an endpoint has gone away), the run stops after 1000 failures in a row
+  (`--max-consecutive-failures`).
 
 Extended attributes and ACLs are not replicated.
 
@@ -101,7 +104,9 @@ copied. `--progress SEC` prints plain progress lines instead (for logs) and
 entries with a cap, worker counts, retries, resuming an interrupted run,
 sharding a tree over several hosts (`--shard K/N`) and symlink rewriting.
 The exit status is 0 when everything succeeded, 1 when some entries failed
-after retries, 2 for usage errors, 3 when the run could not start and 130
+after retries, 2 for usage errors, 3 when the run could not start (or found
+the source empty but not the target, with `--delete`), 4 when it stopped
+after too many failures in a row (try again later with `--resume`) and 130
 when interrupted.
 
 ## Building

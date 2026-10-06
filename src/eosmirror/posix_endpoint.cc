@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <mutex>
@@ -217,18 +218,14 @@ class PosixWriter : public FileWriter {
 
 PosixEndpoint::PosixEndpoint(std::string root, PosixOptions options)
     : root_(std::move(root)), options_(options) {
-  while (root_.size() > 1 && root_.back() == '/') root_.pop_back();
   // The canonical path, so that journals recognize the tree however it was
-  // named; a root that does not exist yet is made absolute only.
-  if (char* real = realpath(root_.c_str(), nullptr)) {
-    root_ = real;
-    free(real);
-  } else if (!root_.empty() && root_[0] != '/') {
-    if (char* cwd = getcwd(nullptr, 0)) {
-      root_ = std::string(cwd) + "/" + root_;
-      free(cwd);
-    }
-  }
+  // named. A root that does not exist yet gets the canonical path of its
+  // deepest existing ancestor, which is what it will have once created.
+  std::error_code ec;
+  std::filesystem::path absolute = std::filesystem::absolute(root_, ec);
+  if (!ec) absolute = std::filesystem::weakly_canonical(absolute, ec);
+  if (!ec) root_ = absolute.string();
+  while (root_.size() > 1 && root_.back() == '/') root_.pop_back();
   mode_t mask = umask(0);
   umask(mask);
   options_.default_mode = 0666 & ~static_cast<ModeBits>(mask);
@@ -236,7 +233,7 @@ PosixEndpoint::PosixEndpoint(std::string root, PosixOptions options)
 
 Capabilities PosixEndpoint::capabilities() const {
   Capabilities caps;
-  caps.mtime_resolution = mtime_resolution();
+  caps.mtime_resolution = mtime_resolution_.load();
   caps.can_set_owner = geteuid() == 0;
   caps.can_set_mode = true;
   caps.checksum = ChecksumType::None;
@@ -246,9 +243,8 @@ Capabilities PosixEndpoint::capabilities() const {
 // Finds out how precisely the file system under the root stores mtimes, by
 // writing a temporary file with a known mtime and reading it back. A root
 // that cannot be written is assumed to keep nanoseconds.
-int32_t PosixEndpoint::mtime_resolution() const {
+void PosixEndpoint::probe_target() {
   std::call_once(probe_once_, [&] {
-    probed_resolution_ = 1;
     // Creating the probe changes the root's mtime, which is restored after.
     struct stat root_st{};
     bool have_root = ::stat(root_.c_str(), &root_st) == 0;
@@ -263,7 +259,7 @@ int32_t PosixEndpoint::mtime_resolution() const {
       auto stored = static_cast<int32_t>(st.st_mtim.tv_nsec);
       int32_t resolution = 1;
       while (resolution < 1000000000 && kNsec / resolution * resolution != stored) resolution *= 10;
-      probed_resolution_ = resolution;
+      mtime_resolution_ = resolution;
     }
     close(fd);
     unlink(probe.c_str());
@@ -272,7 +268,6 @@ int32_t PosixEndpoint::mtime_resolution() const {
       utimensat(AT_FDCWD, root_.c_str(), restore, 0);
     }
   });
-  return probed_resolution_;
 }
 
 bool PosixEndpoint::is_temporary(std::string_view name) const {

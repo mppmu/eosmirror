@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <mutex>
 #include <optional>
@@ -35,6 +36,9 @@ class PosixEndpoint : public Endpoint {
   bool is_temporary(std::string_view name) const override;
   // Warns about EOS FUSE mounts.
   std::string target_warning() const override;
+  // Probes the mtime resolution, which capabilities() reports as full
+  // until then.
+  void probe_target() override;
 
   Result<Entry> stat(const RelPath& path) override;
   Result<std::vector<Entry>> list(const RelPath& dir) override;
@@ -49,14 +53,11 @@ class PosixEndpoint : public Endpoint {
   // The absolute path of a relative one.
   std::string absolute(const RelPath& path) const;
 
-  // The mtime resolution of the file system under the root, probed once.
-  int32_t mtime_resolution() const;
-
  private:
   std::string root_;
   PosixOptions options_;
-  mutable std::once_flag probe_once_;
-  mutable int32_t probed_resolution_ = 1;
+  std::once_flag probe_once_;
+  std::atomic<int32_t> mtime_resolution_{1};
 };
 
 // The type of the file system that a path is on, from a mount table in the

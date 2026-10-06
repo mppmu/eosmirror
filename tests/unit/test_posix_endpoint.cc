@@ -230,7 +230,20 @@ TEST_CASE("posix reader streams and reports the current stat") {
   REQUIRE_FALSE(fifo.ok());
   CHECK(fifo.error().kind == ErrorKind::Changed);
 
+  ep.probe_target();
   CHECK(ep.capabilities().mtime_resolution == 1);  // tmpfs and ext4 keep nanoseconds
+}
+
+TEST_CASE("posix roots have their canonical path, also before they exist") {
+  TempDir tmp;
+  fs::create_directories(tmp.sub("real/dir"));
+  REQUIRE(symlink("real", tmp.sub("link").c_str()) == 0);
+  std::string real = fs::canonical(tmp.sub("real")).string();
+  CHECK(PosixEndpoint(tmp.sub("link/dir/")).describe() == real + "/dir");
+  CHECK(PosixEndpoint(tmp.sub("link/./new/../dir")).describe() == real + "/dir");
+  CHECK(PosixEndpoint(tmp.sub("link/./missing/")).describe() == real + "/missing");
+  CHECK(PosixEndpoint(tmp.sub("link/missing/deeper")).describe() == real + "/missing/deeper");
+  CHECK(PosixEndpoint("/").describe() == "/");
 }
 
 TEST_CASE("posix mkdir, symlink, metadata and remove") {

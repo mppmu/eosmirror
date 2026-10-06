@@ -13,19 +13,22 @@
 namespace eosmirror {
 
 // Runs an operation returning a Result or Status, repeating it with backoff
-// while it fails with a transient error. Counts every retry.
+// while it fails with a transient error. Counts every retry. A retry that
+// cancellation prevents ends with a Cancelled error, not with the error that
+// would have been retried.
 template <class Op>
 auto with_retries(const RetryPolicy& policy, const Cancellation& cancel,
                   std::atomic<uint64_t>& retries, Op&& op) -> decltype(op()) {
   for (int attempt = 1;; ++attempt) {
     auto result = op();
-    if (result.ok() || !is_transient(result.error().kind) || attempt >= policy.attempts ||
-        cancel.requested())
+    if (result.ok() || !is_transient(result.error().kind) || attempt >= policy.attempts)
       return result;
+    Error cancelled{ErrorKind::Cancelled, "cancelled: " + result.error().describe()};
+    if (cancel.requested()) return cancelled;
     retries.fetch_add(1, std::memory_order_relaxed);
     log::warn("retry ", attempt, " of ", policy.attempts - 1, " after: ",
               result.error().describe());
-    if (cancel.wait(policy.delay(attempt))) return result;
+    if (cancel.wait(policy.delay(attempt))) return cancelled;
   }
 }
 

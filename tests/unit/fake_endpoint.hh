@@ -54,6 +54,9 @@ class FakeEndpoint : public eosmirror::Endpoint {
   eosmirror::Capabilities caps;
   std::function<void(std::string_view op, const RelPath& path)> hook;
   bool utimes_needs_write = false;  // like EOS: utimes requires write access
+  // Like a user other than root: creating and removing entries requires
+  // the owner's write bit on the directory.
+  bool entries_need_write = false;
 
   // ---- test setup -----------------------------------------------------------
 
@@ -146,7 +149,7 @@ class FakeEndpoint : public eosmirror::Endpoint {
     if (auto err = check("mkdir", path)) return *err;
     std::lock_guard lock(mutex_);
     if (nodes_.count(path)) return Error{ErrorKind::Exists, "mkdir " + path};
-    if (Status s = require_parent(path); !s.ok()) return s;
+    if (Status s = require_parent(path, true); !s.ok()) return s;
     // Like the real endpoints: created with the owner's rwx bits added.
     Entry e = base(path, eosmirror::EntryType::Directory, mode | 0700, tick());
     nodes_[path] = Node{e, {}};
@@ -157,7 +160,7 @@ class FakeEndpoint : public eosmirror::Endpoint {
   Status symlink(const RelPath& path, const std::string& target) override {
     if (auto err = check("symlink", path)) return *err;
     std::lock_guard lock(mutex_);
-    if (Status s = require_parent(path); !s.ok()) return s;
+    if (Status s = require_parent(path, true); !s.ok()) return s;
     auto it = nodes_.find(path);
     if (it != nodes_.end() && it->second.entry.type == eosmirror::EntryType::Directory)
       return Error{ErrorKind::IsADirectory, "symlink " + path};
@@ -185,6 +188,7 @@ class FakeEndpoint : public eosmirror::Endpoint {
     std::lock_guard lock(mutex_);
     auto it = nodes_.find(path);
     if (it == nodes_.end()) return not_found(path);
+    if (Status s = require_parent(path, true); !s.ok()) return s;
     if (type == eosmirror::EntryType::Directory) {
       for (const auto& [p, n] : nodes_)
         if (!p.empty() && parent_of(p) == path) return Error{ErrorKind::NotEmpty, "remove " + path};
@@ -210,7 +214,7 @@ class FakeEndpoint : public eosmirror::Endpoint {
       const RelPath& path, const eosmirror::CommitSpec& spec) override {
     if (auto err = check("open_write", path)) return *err;
     std::lock_guard lock(mutex_);
-    if (Status s = require_parent(path); !s.ok()) return s.error();
+    if (Status s = require_parent(path, true); !s.ok()) return s.error();
     return std::unique_ptr<eosmirror::FileWriter>(new Writer(*this, path, spec));
   }
 
@@ -261,7 +265,7 @@ class FakeEndpoint : public eosmirror::Endpoint {
         return Error{ErrorKind::Unsupported, "no checksum on " + path_};
       }
       std::lock_guard lock(ep_.mutex_);
-      if (Status s = ep_.require_parent(path_); !s.ok()) return s.error();
+      if (Status s = ep_.require_parent(path_, true); !s.ok()) return s.error();
       auto it = ep_.nodes_.find(path_);
       if (it != ep_.nodes_.end() && it->second.entry.type == eosmirror::EntryType::Directory)
         return Error{ErrorKind::IsADirectory, "commit " + path_};
@@ -311,11 +315,13 @@ class FakeEndpoint : public eosmirror::Endpoint {
   }
 
   // Requires mutex_.
-  Status require_parent(const RelPath& path) const {
+  Status require_parent(const RelPath& path, bool writing = false) const {
     auto it = nodes_.find(parent_of(path));
     if (it == nodes_.end()) return not_found(parent_of(path));
     if (it->second.entry.type != eosmirror::EntryType::Directory)
       return Error{ErrorKind::NotADirectory, parent_of(path)};
+    if (writing && entries_need_write && !(it->second.entry.mode & 0200))
+      return Error{ErrorKind::Permission, "no write access to " + parent_of(path)};
     return {};
   }
 

@@ -686,6 +686,10 @@ TEST_CASE("eos endpoint: endpoint URLs") {
   REQUIRE(nobody.ok());
   CHECK(nobody.value()->describe() == url);
   CHECK_FALSE(nobody.value()->capabilities().can_set_owner);
+  // The kind of server is logged once.
+  StderrCapture err;
+  CHECK(make_endpoint(path + "/replica2", settings).ok());
+  CHECK(err.text().find("EOS instance") == std::string::npos);
 }
 
 TEST_CASE("eos endpoint: names that need encoding") {
@@ -791,6 +795,55 @@ TEST_CASE("eos endpoint: symlinks are replaced in place") {
   CHECK(must(ep.stat("d")).uid == before.uid);
   CHECK(must(ep.stat("d")).gid == before.gid);
   CHECK(ep.list("").value().size() == 2);
+}
+
+TEST_CASE("FS to EOS as a user other than root: read-only directories") {
+  if (!base_url()) return;
+  RemoteDir dir("readonly");
+  Entry nobody_owns;
+  nobody_owns.type = EntryType::Directory;
+  nobody_owns.uid = 65534;
+  nobody_owns.gid = 65534;
+  REQUIRE(dir.endpoint->set_metadata("", nobody_owns, MetaFields::Owner).ok());
+  auto nobody = as_nobody(dir.url);
+
+  TempDir tmp;
+  tmp.write_file("src/ro/f", "x", 0444);
+  tmp.write_file("src/ro/sub/g", "y", 0444);
+  for (const char* d : {"src/ro/sub", "src/ro"}) REQUIRE(chmod(tmp.sub(d).c_str(), 0555) == 0);
+  PosixEndpoint src(tmp.sub("src"));
+  SyncOptions options = test_options();
+  options.preserve_owner = false;
+  options.delete_extra = true;
+  auto run = [&] {
+    Cancellation cancel;
+    Report r;
+    Engine engine(src, *nobody, options, r, nullptr, cancel);
+    REQUIRE(engine.run().ok());
+    CHECK(r.stats.failures == 0);
+    return r.stats.files_copied.load();
+  };
+  CHECK(run() == 2);
+  CHECK(must(nobody->stat("ro")).mode == 0555);
+  CHECK(must(nobody->stat("ro/sub")).mode == 0555);
+
+  // EOS sets the mtime of a directory only with write access to it, and a
+  // read-only tree is deleted only after making it writable.
+  struct timespec times[2] = {{0, UTIME_OMIT}, {1600000000, 5}};
+  REQUIRE(utimensat(AT_FDCWD, tmp.sub("src/ro/sub").c_str(), times, 0) == 0);
+  for (const char* d : {"ro/extra", "ro/extra/inner"}) {
+    REQUIRE(dir.endpoint->mkdir(d, 0755).ok());
+    REQUIRE(dir.endpoint->set_metadata(d, nobody_owns, MetaFields::Owner).ok());
+  }
+  Entry read_only = nobody_owns;
+  read_only.mode = 0555;
+  for (const char* d : {"ro/extra/inner", "ro/extra"})
+    REQUIRE(dir.endpoint->set_metadata(d, read_only, MetaFields::Mode).ok());
+  CHECK(run() == 0);
+  CHECK(must(nobody->stat("ro/sub")).mtime == Timespec{1600000000, 5});
+  CHECK(must(nobody->stat("ro/sub")).mode == 0555);
+  CHECK(must(nobody->stat("ro")).mode == 0555);
+  CHECK(nobody->stat("ro/extra").error().kind == ErrorKind::NotFound);
 }
 
 TEST_CASE("FS to EOS: mode bits that EOS does not store") {
