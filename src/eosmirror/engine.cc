@@ -89,7 +89,6 @@ struct Engine::Impl {
     copy_options.preserve_mode = options.preserve_mode;
     copy_options.verify = options.verify || options.require_checksum;
     copy_options.require_verification = options.require_checksum;
-    copy_options.bytes_written = &stats.bytes_written;
   }
 
   Endpoint& source;
@@ -421,7 +420,11 @@ struct Engine::Impl {
     }
     ensure_writable(node);
     node->pending.fetch_add(1);
-    if (!copies.push(CopyJob{node, e})) entry_done(node);
+    stats.queued_copies.fetch_add(1);
+    if (!copies.push(CopyJob{node, e})) {
+      stats.queued_copies.fetch_sub(1);
+      entry_done(node);
+    }
   }
 
   void handle_symlink(const std::shared_ptr<DirNode>& node, const Entry& e,
@@ -526,12 +529,16 @@ struct Engine::Impl {
 
   // ---- transfers -----------------------------------------------------------------
 
-  void transfer_loop() {
+  void transfer_loop(size_t index) {
     std::vector<std::byte> buffer(std::max<size_t>(options.buffer_size, 4096));
-    while (auto job = copies.pop()) run_copy(*job, buffer);
+    TransferSlot& slot = *report.slots[index];
+    while (auto job = copies.pop()) {
+      stats.queued_copies.fetch_sub(1);
+      run_copy(*job, buffer, slot);
+    }
   }
 
-  void run_copy(const CopyJob& job, std::span<std::byte> buffer) {
+  void run_copy(const CopyJob& job, std::span<std::byte> buffer, TransferSlot& slot) {
     RelPath path = join(job.dir->path, job.source.name);
     job.dir->touched = true;
     if (options.dry_run) {
@@ -539,8 +546,21 @@ struct Engine::Impl {
       stats.bytes_copied.fetch_add(job.source.size);
       log::debug("would copy ", path);
     } else if (!cancel.requested()) {
+      {
+        std::lock_guard lock(slot.mutex);
+        slot.path = path;
+        slot.size = job.source.size;
+      }
+      slot.written = 0;
+      slot.active = true;
+      CopyOptions job_options = copy_options;
+      job_options.on_chunk = [&](uint64_t n) {
+        stats.bytes_written.fetch_add(n);
+        slot.written.fetch_add(n);
+      };
       auto result =
-          retry([&] { return copy_file(source, target, path, copy_options, buffer, cancel); });
+          retry([&] { return copy_file(source, target, path, job_options, buffer, cancel); });
+      slot.active = false;
       if (result.ok()) {
         stats.files_copied.fetch_add(1);
         stats.bytes_copied.fetch_add(result.value().bytes);
@@ -630,10 +650,12 @@ struct Engine::Impl {
       std::lock_guard lock(done_mutex);
       roots_pending = roots.size();
     }
+    size_t transfers = static_cast<size_t>(std::max(1, options.transfers));
+    report.init_slots(transfers, options.max_backlog);
     for (int i = 0; i < std::max(1, options.checkers); ++i)
       threads.emplace_back([this] { checker_loop(); });
-    for (int i = 0; i < std::max(1, options.transfers); ++i)
-      threads.emplace_back([this] { transfer_loop(); });
+    for (size_t i = 0; i < transfers; ++i)
+      threads.emplace_back([this, i] { transfer_loop(i); });
     for (auto& root : roots) dirs.push(root);
 
     {

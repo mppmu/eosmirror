@@ -7,6 +7,7 @@
 #include "eosmirror/engine.hh"
 #include "eosmirror/journal.hh"
 #include "eosmirror/log.hh"
+#include "eosmirror/progress_display.hh"
 #include "eosmirror/selftest.hh"
 #include "eosmirror/version.hh"
 
@@ -153,11 +154,21 @@ int sync(const CliOptions& opts) {
     });
   }
 
-  log::info("eosmirror ", EOSMIRROR_VERSION, (opts.sync.dry_run ? " dry run: " : ": "),
-            source.value()->describe(), " -> ", target.value()->describe());
+  std::string title = std::string("eosmirror ") + (opts.sync.dry_run ? "dry run: " : "") +
+                      source.value()->describe() + " -> " + target.value()->describe();
+  log::info(title);
+  // Live bars on a terminal, unless plain progress lines were asked for or
+  // the run is quiet.
+  std::unique_ptr<ProgressDisplay> display;
+  if (opts.progress_seconds == 0 && opts.log_level >= LogLevel::Info &&
+      ProgressDisplay::suitable(STDERR_FILENO)) {
+    display = std::make_unique<ProgressDisplay>(report, title);
+    display->start();
+  }
   Status status = opts.retry_failed ? engine.run(journal->failures()) : engine.run();
   finished = true;
   if (progress.joinable()) progress.join();
+  if (display) display->stop();
 
   if (journal && !opts.sync.dry_run) {
     if (Status s = journal->end_run(status.ok()); !s.ok()) log::error(s.error().describe());

@@ -16,6 +16,12 @@ constexpr size_t kKeptFailures = 1000;
 
 Report::Report() : start_(std::chrono::steady_clock::now()) {}
 
+void Report::init_slots(size_t transfers, size_t backlog) {
+  slots.clear();
+  for (size_t i = 0; i < transfers; ++i) slots.push_back(std::make_unique<TransferSlot>());
+  backlog_capacity = backlog;
+}
+
 void Report::add_failure(Failure failure) {
   stats.failures.fetch_add(1, std::memory_order_relaxed);
   log::warn(to_string(failure.type), " ", failure.path.empty() ? "." : failure.path, ": ",

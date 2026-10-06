@@ -63,7 +63,7 @@ Result<CopyOutcome> copy_file(Endpoint& source, Endpoint& target, const RelPath&
       writer->abort();
       return written.error();
     }
-    if (options.bytes_written) options.bytes_written->fetch_add(chunk.size());
+    if (options.on_chunk) options.on_chunk(chunk.size());
     offset += got.value();
   }
 

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <span>
 
 #include "eosmirror/cancellation.hh"
@@ -20,7 +20,7 @@ struct CopyOptions {
   bool preserve_mtime = true;
   bool verify = true;
   bool require_verification = false;  // fail where the target cannot verify
-  std::atomic<uint64_t>* bytes_written = nullptr;  // counts every chunk written, for progress
+  std::function<void(uint64_t)> on_chunk;  // called with the size of every chunk written
 };
 
 struct CopyOutcome {

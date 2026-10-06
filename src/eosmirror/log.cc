@@ -13,6 +13,8 @@ namespace {
 
 std::atomic<LogLevel> g_level{LogLevel::Info};
 std::mutex g_mutex;
+std::function<void()> g_erase;
+std::function<void()> g_redraw;
 
 const char* prefix(LogLevel level) {
   switch (level) {
@@ -37,8 +39,18 @@ void write(LogLevel level, std::string_view message) {
   char stamp[32];
   std::strftime(stamp, sizeof stamp, "%Y-%m-%d %H:%M:%S", &tm);
   std::lock_guard lock(g_mutex);
+  if (g_erase) g_erase();
   std::fprintf(stderr, "%s %-5s %.*s\n", stamp, prefix(level), static_cast<int>(message.size()),
                message.data());
+  if (g_redraw) g_redraw();
+}
+
+std::unique_lock<std::mutex> lock() { return std::unique_lock<std::mutex>(g_mutex); }
+
+void set_display_hooks(std::function<void()> erase, std::function<void()> redraw) {
+  std::lock_guard lock(g_mutex);
+  g_erase = std::move(erase);
+  g_redraw = std::move(redraw);
 }
 
 }  // namespace eosmirror::log

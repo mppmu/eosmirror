@@ -11,6 +11,7 @@ add_library(eosmirror_core STATIC
   eosmirror/journal.cc
   eosmirror/log.cc
   eosmirror/posix_endpoint.cc
+  eosmirror/progress_display.cc
   eosmirror/report.cc
   eosmirror/selftest.cc
   eosmirror/types.cc

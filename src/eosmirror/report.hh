@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -41,6 +42,16 @@ struct Stats {
   Counter stale_temps{0};
   Counter retries{0};
   Counter failures{0};
+  Counter queued_copies{0};  // copies waiting in the backlog
+};
+
+// What one transfer worker is copying right now, for the display.
+struct TransferSlot {
+  std::mutex mutex;
+  std::string path;  // under the mutex
+  uint64_t size = 0;
+  std::atomic<uint64_t> written{0};
+  std::atomic<bool> active{false};
 };
 
 // Counters plus the failures of a run, and their presentation.
@@ -49,6 +60,11 @@ class Report {
   Report();
 
   Stats stats;
+  std::vector<std::unique_ptr<TransferSlot>> slots;  // one per transfer worker
+  size_t backlog_capacity = 0;
+
+  // Sets up one slot per transfer worker.
+  void init_slots(size_t transfers, size_t backlog);
 
   // Counts a failure, logs it and keeps the first few for the summary.
   void add_failure(Failure failure);

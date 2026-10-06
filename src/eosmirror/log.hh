@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include <functional>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -18,6 +20,13 @@ LogLevel level();
 inline bool enabled(LogLevel l) { return l <= level(); }
 
 void write(LogLevel level, std::string_view message);
+
+// The mutex that serializes output; a terminal display renders under it.
+std::unique_lock<std::mutex> lock();
+
+// A terminal display registers how to step aside before a log line is
+// written and how to redraw afterwards. Both are called under the mutex.
+void set_display_hooks(std::function<void()> erase, std::function<void()> redraw);
 
 template <class... Args>
 void emit(LogLevel l, const Args&... args) {

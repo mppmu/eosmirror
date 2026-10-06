@@ -72,7 +72,8 @@ Options:
       --resume             skip directories the journal records as finalized
       --retry-failed       process only the failures recorded in the journal
       --shard K/N          handle only the directories of shard K of N (K from 0)
-      --progress SEC       print progress every SEC seconds
+      --progress SEC       print a progress line every SEC seconds instead of the
+                           live display (which needs a terminal and is off with -q)
   -v, --verbose            debug output
   -q, --quiet              warnings and errors only
   -h, --help               this help

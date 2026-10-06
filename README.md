@@ -61,6 +61,11 @@ the run refuses to start otherwise unless `--no-owner` is given. Plain
 XRootD servers store no mtimes and have no symlinks, so against them files
 are compared by size only and symlinks are skipped (both are reported).
 
+On a terminal, `sync` shows a live display: counters, the write rate, bars
+for the transfer slots in use and the backlog, and one bar per file being
+copied. `--progress SEC` prints plain progress lines instead (for logs) and
+`-q` turns both off.
+
 `eosmirror sync --help` lists the options: dry runs, deletion of extra
 entries with a cap, worker counts, retries, resuming an interrupted run,
 sharding a tree over several hosts (`--shard K/N`) and symlink rewriting.
