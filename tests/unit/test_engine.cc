@@ -10,8 +10,10 @@
 #include <thread>
 
 #include "doctest/doctest.h"
+#include "eosmirror/copy.hh"
 #include "eosmirror/posix_endpoint.hh"
 #include "fake_endpoint.hh"
+#include "stderr_capture.hh"
 #include "temp_dir.hh"
 
 using namespace eosmirror;
@@ -945,4 +947,67 @@ TEST_CASE("fake: adaptive concurrency starts low, grows and completes the tree")
   CHECK(r.stats.transfer_limit.load() >= 2);
   CHECK(r.stats.transfer_limit.load() <= 6);
   expect_mirrored(src, dst);
+}
+
+TEST_CASE("fake: listed names that cannot be joined into paths are skipped and counted") {
+  FakeEndpoint src, dst;
+  populate(src);
+  // A broken or hostile server listing names like these would otherwise
+  // make the engine write outside the directory or replace the root.
+  const std::vector<std::string> bad = {"", ".", "..", "x/../../escape", std::string("nul\0", 4),
+                                        "line\nbreak", "cr\r"};
+  for (size_t i = 0; i < bad.size(); ++i) {
+    std::string path = "bad" + std::to_string(i);
+    src.add_file(path, "evil");
+    src.modify(path, [&](FakeEndpoint::Node& n) { n.entry.name = bad[i]; });
+  }
+  Report r;
+  REQUIRE(run_sync(src, dst, fake_options(), r).ok());
+  CHECK(r.stats.invalid_names == bad.size());
+  CHECK(r.stats.failures == 0);
+  CHECK(r.stats.files_copied == 3);
+  CHECK(dst.get("")->entry.type == EntryType::Directory);
+  CHECK(dst.paths() == std::vector<RelPath>{"d1", "d1/d2", "d1/d2/f2", "d1/f1", "d1/l", "f0"});
+  CHECK(r.summary(false).find("entries with invalid names skipped: 7") != std::string::npos);
+
+  // On the target, such entries are neither deleted nor descended into.
+  dst.add_file("junk", "x");
+  dst.modify("junk", [](FakeEndpoint::Node& n) { n.entry.name = ".."; });
+  dst.add_dir("extra");
+  dst.add_file("extra/inner", "x");
+  dst.modify("extra/inner", [](FakeEndpoint::Node& n) { n.entry.name = "../../d1"; });
+  SyncOptions o = fake_options();
+  o.delete_extra = true;
+  Report r2;
+  REQUIRE(run_sync(src, dst, o, r2).ok());
+  CHECK(r2.stats.invalid_names == bad.size() + 2);
+  CHECK(r2.stats.deleted == 0);
+  REQUIRE(r2.failures().size() == 1);
+  CHECK(r2.failures()[0].path == "extra");
+  CHECK(r2.failures()[0].error.kind == ErrorKind::NotEmpty);
+  CHECK(dst.get("junk"));
+  CHECK(dst.get("extra/inner"));
+  CHECK(dst.get("d1"));
+}
+
+TEST_CASE("fake: slow source reads are logged") {
+  FakeEndpoint src, dst;
+  src.add_file("f", std::string(10000, 'x'));
+  src.hook = [](std::string_view op, const RelPath&) {
+    if (op == "read") std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  };
+  std::vector<std::byte> buffer(4096);
+  Cancellation cancel;
+  CopyOptions options;
+  {
+    StderrCapture capture;
+    REQUIRE(copy_file(src, dst, "f", options, buffer, cancel).ok());
+    CHECK(capture.text().find("slow source read") == std::string::npos);
+  }
+  options.slow_read = std::chrono::milliseconds(1);
+  StderrCapture capture;
+  REQUIRE(copy_file(src, dst, "f", options, buffer, cancel).ok());
+  std::string out = capture.text();
+  CHECK(out.find("slow source read: f at offset 0, 4096 bytes, ") != std::string::npos);
+  CHECK(out.find("slow source read: f at offset 8192, 1808 bytes, ") != std::string::npos);
 }

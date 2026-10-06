@@ -6,10 +6,15 @@ add_executable(eosmirror_tests
   unit/test_engine.cc
   unit/test_error.cc
   unit/test_journal.cc
+  unit/test_log.cc
   unit/test_posix_endpoint.cc
   unit/test_queue.cc
   unit/test_selftest.cc
+  unit/test_types.cc
 )
+if(EOSMIRROR_WITH_XROOTD)
+  target_sources(eosmirror_tests PRIVATE unit/test_xrootd_eos.cc)
+endif()
 target_include_directories(eosmirror_tests PRIVATE ${PROJECT_SOURCE_DIR}/third_party)
 target_link_libraries(eosmirror_tests PRIVATE eosmirror_core)
 
@@ -42,9 +47,10 @@ if(EOSMIRROR_WITH_XROOTD)
   # Under a sanitizer, XRootD's plugins (the security protocols) are loaded
   # through the sanitizer's dlopen, which ignores the library's own search
   # path, so the tests get it in LD_LIBRARY_PATH. Leaks in XRootD's and
-  # OpenSSL's global state are not ours (lsan.supp).
+  # OpenSSL's global state are not ours (lsan.supp). The unit tests load the
+  # client library too.
   if(EOSMIRROR_SANITIZER AND EOSMIRROR_XROOTD_LIBDIR)
-    set_tests_properties(integration cli_smoke PROPERTIES ENVIRONMENT
+    set_tests_properties(unit integration cli_smoke PROPERTIES ENVIRONMENT
       "LD_LIBRARY_PATH=${EOSMIRROR_XROOTD_LIBDIR};LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/lsan.supp")
   endif()
 endif()

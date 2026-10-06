@@ -6,6 +6,8 @@
 #include <XrdCl/XrdClURL.hh>
 #include <XrdCl/XrdClXRootDResponses.hh>
 
+#include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -22,7 +24,7 @@ constexpr std::string_view kApp = "&eos.app=eosmirror";
 
 // ---- encoding helpers -----------------------------------------------------------
 
-// Percent-encodes everything but unreserved characters, like curl does.
+// Percent-encodes everything but unreserved characters and '/', like EOS does.
 std::string curl_escape(std::string_view s) {
   std::string out;
   out.reserve(s.size() * 3);
@@ -134,59 +136,11 @@ Timespec parse_timespec(std::string_view text) {
   return t;
 }
 
-// One "key=value key=value" line of find --format into an entry. Values are
-// quoted when they may contain spaces (path, target).
-bool parse_find_line(const std::string& line, Entry& e, std::string& abs_path) {
-  size_t pos = 0;
-  bool have_type = false;
-  while (pos < line.size()) {
-    while (pos < line.size() && line[pos] == ' ') ++pos;
-    auto eq = line.find('=', pos);
-    if (eq == std::string::npos) break;
-    std::string key = line.substr(pos, eq - pos);
-    std::string value;
-    pos = eq + 1;
-    if (pos < line.size() && line[pos] == '"') {
-      auto end = line.find('"', pos + 1);
-      if (end == std::string::npos) end = line.size();
-      value = line.substr(pos + 1, end - pos - 1);
-      pos = end + 1;
-    } else {
-      auto end = line.find(' ', pos);
-      if (end == std::string::npos) end = line.size();
-      value = line.substr(pos, end - pos);
-      pos = end;
-    }
-    if (key == "path") {
-      abs_path = value;
-    } else if (key == "type") {
-      have_type = true;
-      if (value == "directory")
-        e.type = EntryType::Directory;
-      else if (value == "symlink")
-        e.type = EntryType::Symlink;
-      else
-        e.type = EntryType::File;
-    } else if (key == "size") {
-      e.size = std::strtoull(value.c_str(), nullptr, 10);
-    } else if (key == "uid") {
-      e.uid = static_cast<uint32_t>(std::strtoul(value.c_str(), nullptr, 10));
-    } else if (key == "gid") {
-      e.gid = static_cast<uint32_t>(std::strtoul(value.c_str(), nullptr, 10));
-    } else if (key == "mode" || key == "flags") {
-      e.mode = static_cast<ModeBits>(std::strtoul(value.c_str(), nullptr, 8)) & 07777;
-    } else if (key == "mtime") {
-      e.mtime = parse_timespec(value);
-    } else if (key == "target") {
-      e.link_target = value;
-    }
-  }
-  if (e.type == EntryType::Symlink) {
-    e.mode = 0777;
-    e.size = 0;
-  }
-  if (e.type == EntryType::Directory) e.size = 0;
-  return have_type && !abs_path.empty();
+template <class T>
+T parse_number(std::string_view text, int base = 10) {
+  T value = 0;
+  std::from_chars(text.data(), text.data() + text.size(), value, base);
+  return value;
 }
 
 std::string name_of(const std::string& path) {
@@ -326,6 +280,130 @@ class EosUploadWriter : public FileWriter {
 
 }  // namespace
 
+// ---- requests and replies -----------------------------------------------------------------
+
+std::string eos_encoded_path(const std::string& abs_path) {
+  return "/#curl#" + curl_escape(abs_path);
+}
+
+std::string eos_request_path(const std::string& abs_path) {
+  return eos_encoded_path(abs_path) + "?eos.encodepath=1";
+}
+
+bool opaque_safe(std::string_view value) {
+  return std::none_of(value.begin(), value.end(), [](char ch) {
+    auto c = static_cast<unsigned char>(ch);
+    return c < 0x20 || c == 0x7f || c == '&' || c == '=' || c == '?' || c == '#' || c == '%';
+  });
+}
+
+EosEndpoint::ProcResult parse_proc_reply(const std::string& reply) {
+  constexpr std::string_view kOut = "mgm.proc.stdout=";
+  constexpr std::string_view kErr = "&mgm.proc.stderr=";
+  constexpr std::string_view kRetc = "&mgm.proc.retc=";
+  EosEndpoint::ProcResult result;
+  auto out_pos = reply.find(kOut);
+  auto retc_pos = reply.rfind(kRetc);
+  if (out_pos == std::string::npos || retc_pos == std::string::npos ||
+      retc_pos < out_pos + kOut.size()) {
+    result.out = reply;
+    return result;
+  }
+  size_t out_begin = out_pos + kOut.size();
+  size_t out_end = retc_pos;
+  auto err_pos = reply.rfind(kErr, retc_pos);
+  if (err_pos != std::string::npos && err_pos >= out_begin) {
+    out_end = err_pos;
+    result.err = reply.substr(err_pos + kErr.size(), retc_pos - err_pos - kErr.size());
+  }
+  result.out = reply.substr(out_begin, out_end - out_begin);
+  result.retc = std::atoi(reply.c_str() + retc_pos + kRetc.size());
+  return result;
+}
+
+Result<std::optional<Entry>> parse_find_line(std::string_view line, std::string_view abs_dir) {
+  constexpr std::string_view kPath = "path=\"";
+  constexpr std::string_view kPathEnd = "\" type=";
+  auto bad = [&](std::string_view problem) {
+    return Error{ErrorKind::Other, std::string(problem) + ": " + std::string(line)};
+  };
+  // The path and the symlink target are printed raw, so a name or target
+  // that contains the end marker of the path leaves two ways to split.
+  auto path_end = line.find(kPathEnd, kPath.size());
+  if (!line.starts_with(kPath) || path_end == std::string_view::npos)
+    return bad("unparsable listing line");
+  if (line.find(kPathEnd, path_end + 1) != std::string_view::npos)
+    return bad("ambiguous listing line");
+  std::string_view path = line.substr(kPath.size(), path_end - kPath.size());
+
+  // "type=... size=N uid=U gid=G mode=M flags=F mtime=S.N target="...""; the
+  // target comes last.
+  Entry e;
+  std::string_view rest = line.substr(path_end + 2);
+  while (!rest.empty()) {
+    if (rest.front() == ' ') {
+      rest.remove_prefix(1);
+      continue;
+    }
+    auto eq = rest.find('=');
+    if (eq == std::string_view::npos) return bad("unparsable listing line");
+    std::string_view key = rest.substr(0, eq);
+    rest.remove_prefix(eq + 1);
+    std::string_view value;
+    if (key == "target") {
+      if (rest.size() < 2 || rest.front() != '"' || rest.back() != '"')
+        return bad("unparsable listing line");
+      value = rest.substr(1, rest.size() - 2);
+      rest = {};
+    } else {
+      value = rest.substr(0, rest.find(' '));
+      rest.remove_prefix(value.size());
+    }
+    if (key == "type") {
+      if (value == "directory")
+        e.type = EntryType::Directory;
+      else if (value == "symlink")
+        e.type = EntryType::Symlink;
+      else if (value == "file")
+        e.type = EntryType::File;
+      else
+        return bad("unknown type in listing line");
+    } else if (key == "size") {
+      e.size = parse_number<uint64_t>(value);
+    } else if (key == "uid") {
+      e.uid = parse_number<uint32_t>(value);
+    } else if (key == "gid") {
+      e.gid = parse_number<uint32_t>(value);
+    } else if (key == "mode" || key == "flags") {
+      e.mode = parse_number<ModeBits>(value, 8) & 07777;
+    } else if (key == "mtime") {
+      e.mtime = parse_timespec(value);
+    } else if (key == "target") {
+      e.link_target = std::string(value);
+    }
+  }
+  if (e.type == EntryType::Symlink) {
+    e.mode = 0777;
+    e.size = 0;
+  }
+  if (e.type == EntryType::Directory) {
+    e.size = 0;
+    if (path.size() > 1 && path.back() == '/') path.remove_suffix(1);
+  }
+
+  if (path == abs_dir) return std::optional<Entry>();
+  std::string prefix = abs_dir == "/" ? "/" : std::string(abs_dir) + "/";
+  if (!path.starts_with(prefix)) return bad("listing line outside the directory");
+  std::string_view name = path.substr(prefix.size());
+  bool control = std::any_of(name.begin(), name.end(), [](char ch) {
+    auto c = static_cast<unsigned char>(ch);
+    return c < 0x20 || c == 0x7f;
+  });
+  if (!valid_entry_name(name) || control) return bad("invalid name in listing line");
+  e.name = std::string(name);
+  return std::optional<Entry>(std::move(e));
+}
+
 // ---- EosEndpoint ------------------------------------------------------------------------
 
 EosEndpoint::EosEndpoint(std::string url, std::string server, std::string root, XrdOptions options)
@@ -343,12 +421,12 @@ Result<std::unique_ptr<EosEndpoint>> EosEndpoint::create(const std::string& url,
                                                          XrdOptions options) {
   XrdCl::URL parsed(url);
   if (!parsed.IsValid() || parsed.GetHostName().empty())
-    return Error{ErrorKind::Other, "invalid EOS URL: " + url};
+    return Error{ErrorKind::Other, "invalid EOS URL: " + display_url(url)};
   std::string server = "root://" + parsed.GetHostId();
   std::string root = parsed.GetPath();
   while (root.size() > 1 && root.back() == '/') root.pop_back();
   if (root.empty() || root[0] != '/')
-    return Error{ErrorKind::Other, "EOS URL needs an absolute path: " + url};
+    return Error{ErrorKind::Other, "EOS URL needs an absolute path: " + display_url(url)};
   std::unique_ptr<EosEndpoint> ep(new EosEndpoint(url, server, root, options));
   Status probed = ep->probe_identity();
   if (!probed.ok()) return probed.error();
@@ -381,7 +459,7 @@ Result<EosEndpoint::ProcResult> EosEndpoint::proc(const std::string& query) {
   std::string url = server_ + "//proc/user/?" + query + std::string(kApp);
   XrdCl::File file;
   XrdCl::XRootDStatus st = file.Open(url, XrdCl::OpenFlags::Read);
-  if (!st.IsOK()) return xrd_error(st, "command on " + server_);
+  if (!st.IsOK()) return xrd_error(st, "command on " + display_url(server_));
   std::string response;
   std::vector<char> buf(1 << 20);
   uint64_t offset = 0;
@@ -391,7 +469,7 @@ Result<EosEndpoint::ProcResult> EosEndpoint::proc(const std::string& query) {
     if (!st.IsOK()) {
       XrdCl::XRootDStatus closed = file.Close();
       (void)closed;
-      return xrd_error(st, "command response from " + server_);
+      return xrd_error(st, "command response from " + display_url(server_));
     }
     if (got == 0) break;
     response.append(buf.data(), got);
@@ -399,31 +477,21 @@ Result<EosEndpoint::ProcResult> EosEndpoint::proc(const std::string& query) {
   }
   st = file.Close();
   (void)st;
-
-  ProcResult result;
-  auto out_pos = response.find("mgm.proc.stdout=");
-  auto err_pos = response.find("&mgm.proc.stderr=");
-  auto retc_pos = response.find("&mgm.proc.retc=");
-  if (out_pos == std::string::npos || retc_pos == std::string::npos) {
-    result.out = response;
-    return result;
-  }
-  size_t out_end = err_pos != std::string::npos ? err_pos : retc_pos;
-  result.out = response.substr(out_pos + 16, out_end - out_pos - 16);
-  if (err_pos != std::string::npos)
-    result.err = response.substr(err_pos + 17, retc_pos - err_pos - 17);
-  result.retc = std::atoi(response.c_str() + retc_pos + 15);
-  return result;
+  return parse_proc_reply(response);
 }
 
 bool EosEndpoint::is_temporary(std::string_view name) const {
   return XrdEndpoint::is_temporary(name) || name.rfind(".sys.a#.", 0) == 0;
 }
 
+Result<std::string> EosEndpoint::request_path(const std::string& abs_path) const {
+  return eos_request_path(abs_path);
+}
+
 Result<Entry> EosEndpoint::stat(const RelPath& path) {
   std::string abs = absolute(path);
   XrdCl::Buffer arg;
-  arg.FromString(curl_escape(abs) + "?mgm.pcmd=stat&eos.encodepath=1" + std::string(kApp));
+  arg.FromString(eos_request_path(abs) + "&mgm.pcmd=stat" + std::string(kApp));
   XrdCl::Buffer* response = nullptr;
   XrdCl::XRootDStatus st = fs_->Query(XrdCl::QueryCode::OpaqueFile, arg, response);
   if (!st.IsOK()) return xrd_error(st, "stat " + url_of(abs));
@@ -455,8 +523,7 @@ Result<Entry> EosEndpoint::stat(const RelPath& path) {
   e.mtime = {static_cast<int64_t>(v[11]), static_cast<int32_t>(v[14])};
   if (e.type == EntryType::Symlink) {
     XrdCl::Buffer link_arg;
-    link_arg.FromString(curl_escape(abs) + "?mgm.pcmd=readlink&eos.encodepath=1" +
-                        std::string(kApp));
+    link_arg.FromString(eos_request_path(abs) + "&mgm.pcmd=readlink" + std::string(kApp));
     XrdCl::Buffer* link_response = nullptr;
     st = fs_->Query(XrdCl::QueryCode::OpaqueFile, link_arg, link_response);
     if (!st.IsOK()) return xrd_error(st, "readlink " + url_of(abs));
@@ -475,6 +542,7 @@ Result<Entry> EosEndpoint::stat(const RelPath& path) {
 
 Result<std::vector<Entry>> EosEndpoint::list(const RelPath& dir) {
   std::string abs = absolute(dir);
+  // The link target comes last: parse_find_line takes it to the end of the line.
   std::string request = find_request(abs, "type,size,uid,gid,mode,flags,mtime,link");
   auto result = proc("mgm.cmd.proto=" + base64(request));
   if (!result.ok()) return result.error();
@@ -482,36 +550,58 @@ Result<std::vector<Entry>> EosEndpoint::list(const RelPath& dir) {
     return errno_error(result.value().retc, "list " + url_of(abs) + ": " + result.value().err);
 
   std::vector<Entry> entries;
+  bool listed_itself = false;
+  size_t skipped = 0;
+  std::string first_problem;
   std::istringstream lines(result.value().out);
   std::string line;
   while (std::getline(lines, line)) {
     if (line.empty()) continue;
-    Entry e;
-    std::string path;
-    if (!parse_find_line(line, e, path)) {
-      log::warn("unparsable listing line from ", url_of(abs), ": ", line);
+    auto parsed = parse_find_line(line, abs);
+    if (!parsed.ok()) {
+      if (skipped++ == 0) first_problem = parsed.error().message;
       continue;
     }
-    while (path.size() > 1 && path.back() == '/') path.pop_back();
-    if (path == abs) continue;  // the directory itself
-    e.name = name_of(path);
-    if (e.name.empty() || e.name == "." || e.name == "..") continue;
-    entries.push_back(std::move(e));
+    if (parsed.value())
+      entries.push_back(std::move(*parsed.value()));
+    else
+      listed_itself = true;
   }
+  // find prints paths below the directory's real path, which differs when
+  // the path leads through a symlink.
+  if (!listed_itself)
+    return Error{ErrorKind::Other, "the listing of " + url_of(abs) + " does not name the " +
+                                       "directory itself (a symlink in the path?)"};
+  // A name listed twice means that a name with line breaks forged a line:
+  // neither entry can be trusted.
+  std::unordered_map<std::string, int> listed;
+  for (const Entry& e : entries) ++listed[e.name];
+  skipped += std::erase_if(entries, [&](const Entry& e) {
+    if (listed[e.name] == 1) return false;
+    if (first_problem.empty()) first_problem = "listed more than once: " + e.name;
+    return true;
+  });
+  if (skipped > 0)
+    log::warn("skipping ", skipped, " entries of ", url_of(abs),
+              " that cannot be listed safely, the first: ", first_problem);
   return entries;
 }
 
 Status EosEndpoint::symlink(const RelPath& path, const std::string& target) {
   std::string abs = absolute(path);
-  if (target.find('&') != std::string::npos)
-    return Error{ErrorKind::Unsupported, "EOS cannot store a symlink target containing '&': " + abs};
+  // The MGM takes the source and target verbatim from the command's opaque
+  // part (mgm/proc/user/File.cc), so they cannot be encoded.
+  if (!opaque_safe(abs) || !opaque_safe(target))
+    return Error{ErrorKind::Unsupported,
+                 "symlink " + url_of(abs) + ": EOS cannot create a symlink whose path or target " +
+                     "contains '&', '=', '?', '#', '%' or control characters"};
   // EOS refuses to replace a symlink, so an existing one is removed first.
   auto existing = stat(path);
   if (existing.ok() && existing.value().type == EntryType::Symlink) {
     Status removed = remove_abs(abs);
     if (!removed.ok() && removed.error().kind != ErrorKind::NotFound) return removed;
   }
-  auto result = proc("mgm.cmd=file&mgm.subcmd=symlink&mgm.path=" + curl_escape(abs) +
+  auto result = proc("mgm.cmd=file&mgm.subcmd=symlink&mgm.path=" + eos_encoded_path(abs) +
                      "&eos.encodepath=1&mgm.file.source=" + abs + "&mgm.file.target=" + target);
   if (!result.ok()) return result.error();
   if (result.value().retc != 0)
@@ -530,9 +620,8 @@ Status EosEndpoint::set_metadata_abs(const std::string& abs, const Entry& md, Me
     char nsec[16];
     std::snprintf(nsec, sizeof nsec, "%09d", md.mtime.nsec);
     XrdCl::Buffer arg;
-    arg.FromString(curl_escape(abs) + "?mgm.pcmd=utimes&tv1_sec=0&tv1_nsec=0&tv2_sec=" +
-                   std::to_string(md.mtime.sec) + "&tv2_nsec=" + nsec + "&eos.encodepath=1" +
-                   std::string(kApp));
+    arg.FromString(eos_request_path(abs) + "&mgm.pcmd=utimes&tv1_sec=0&tv1_nsec=0&tv2_sec=" +
+                   std::to_string(md.mtime.sec) + "&tv2_nsec=" + nsec + std::string(kApp));
     XrdCl::Buffer* response = nullptr;
     XrdCl::XRootDStatus st = fs_->Query(XrdCl::QueryCode::OpaqueFile, arg, response);
     if (!st.IsOK()) return xrd_error(st, "utimes " + url_of(abs));
@@ -545,7 +634,7 @@ Status EosEndpoint::set_metadata_abs(const std::string& abs, const Entry& md, Me
   }
   // Owners and modes of symlinks are not EOS's to set (chown follows the link).
   if (has(fields, MetaFields::Owner) && !is_symlink) {
-    auto result = proc("mgm.cmd=chown&mgm.path=" + curl_escape(abs) + "&eos.encodepath=1" +
+    auto result = proc("mgm.cmd=chown&mgm.path=" + eos_encoded_path(abs) + "&eos.encodepath=1" +
                        "&mgm.chown.owner=" + std::to_string(md.uid) + ":" + std::to_string(md.gid));
     if (!result.ok()) return result.error();
     if (result.value().retc != 0)
@@ -554,7 +643,7 @@ Status EosEndpoint::set_metadata_abs(const std::string& abs, const Entry& md, Me
   if (has(fields, MetaFields::Mode) && !is_symlink) {
     char mode[8];
     std::snprintf(mode, sizeof mode, "%o", md.mode & 07777);
-    auto result = proc("mgm.cmd=chmod&mgm.path=" + curl_escape(abs) + "&eos.encodepath=1" +
+    auto result = proc("mgm.cmd=chmod&mgm.path=" + eos_encoded_path(abs) + "&eos.encodepath=1" +
                        "&mgm.chmod.mode=" + mode);
     if (!result.ok()) return result.error();
     if (result.value().retc != 0)
@@ -570,7 +659,7 @@ Result<ChecksumType> EosEndpoint::directory_checksum(const std::string& abs_dir)
     if (it != directory_checksums_.end()) return it->second;
   }
   auto result = proc("mgm.cmd=attr&mgm.subcmd=get&mgm.attr.key=sys.forced.checksum&mgm.path=" +
-                     curl_escape(abs_dir) + "&eos.encodepath=1");
+                     eos_encoded_path(abs_dir) + "&eos.encodepath=1");
   if (!result.ok()) return result.error();
   ChecksumType type = ChecksumType::Adler32;  // EOS's default
   if (result.value().retc == 0) {
@@ -600,7 +689,7 @@ Result<std::unique_ptr<FileWriter>> EosEndpoint::open_write(const RelPath& path,
   std::string abs = absolute(path);
   auto stored = directory_checksum(parent_of(abs));
   if (!stored.ok()) return stored.error();
-  std::string url = url_of(abs) + "?eos.atomic=1" + std::string(kApp);
+  std::string url = open_url(eos_request_path(abs) + "&eos.atomic=1" + std::string(kApp));
   if (has(spec.fields, MetaFields::Mtime)) url += "&eos.mtime=" + format_timespec(spec.metadata.mtime);
   auto file = new_write_file();
   ModeBits mode = has(spec.fields, MetaFields::Mode) ? spec.metadata.mode : 0644;

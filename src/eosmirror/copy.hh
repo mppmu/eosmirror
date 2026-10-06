@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -21,6 +22,9 @@ struct CopyOptions {
   bool verify = true;
   bool require_verification = false;  // fail where the target cannot verify
   std::function<void(uint64_t)> on_chunk;  // called with the size of every chunk written
+  // Source reads that take longer are logged, to tell source pauses from
+  // target stalls.
+  std::chrono::steady_clock::duration slow_read = std::chrono::seconds(10);
 };
 
 struct CopyOutcome {

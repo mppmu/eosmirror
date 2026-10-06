@@ -11,6 +11,11 @@ namespace eosmirror {
 
 enum class LogLevel : int { Error = 0, Warn = 1, Info = 2, Debug = 3 };
 
+// The text with control characters and invalid UTF-8 replaced by '?', so that
+// names from a tree cannot inject escape sequences or line breaks into the
+// terminal and the logs. Valid UTF-8 multibyte characters are kept.
+std::string printable(std::string_view text);
+
 // Thread-safe logging to stderr. Messages below the configured level are
 // dropped before their arguments are formatted.
 namespace log {

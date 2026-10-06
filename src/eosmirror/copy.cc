@@ -2,6 +2,9 @@
 #include "eosmirror/copy.hh"
 
 #include <algorithm>
+#include <cstdio>
+
+#include "eosmirror/log.hh"
 
 namespace eosmirror {
 
@@ -47,7 +50,15 @@ Result<CopyOutcome> copy_file(Endpoint& source, Endpoint& target, const RelPath&
       return Error{ErrorKind::Cancelled, "copy of " + path + " cancelled"};
     }
     size_t want = static_cast<size_t>(std::min<uint64_t>(buffer.size(), src.size - offset));
+    auto started = std::chrono::steady_clock::now();
     auto got = reader->read(offset, buffer.first(want));
+    auto took = std::chrono::steady_clock::now() - started;
+    if (took > options.slow_read) {
+      char secs[32];
+      std::snprintf(secs, sizeof secs, "%.1f", std::chrono::duration<double>(took).count());
+      log::warn("slow source read: ", path, " at offset ", offset, ", ", want, " bytes, ", secs,
+                " s");
+    }
     if (!got.ok()) {
       writer->abort();
       return got.error();

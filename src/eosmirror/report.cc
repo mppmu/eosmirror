@@ -98,13 +98,15 @@ std::string Report::summary(bool dry_run) const {
     << "deleted: " << stats.deleted.load() << ", stale temporaries: " << stats.stale_temps.load()
     << "\n"
     << "  retries: " << stats.retries.load() << ", failures: " << stats.failures.load() << "\n";
+  if (stats.invalid_names.load() > 0)
+    s << "  entries with invalid names skipped: " << stats.invalid_names.load() << "\n";
   auto failures = this->failures();
   if (!failures.empty()) {
     s << "Failures" << (stats.failures.load() > failures.size() ? " (first " + std::to_string(failures.size()) + ")" : "")
       << ":\n";
     for (const auto& f : failures)
-      s << "  " << to_string(f.type) << " " << (f.path.empty() ? "." : f.path) << ": "
-        << f.error.describe() << "\n";
+      s << "  " << to_string(f.type) << " " << printable(f.path.empty() ? "." : f.path) << ": "
+        << printable(f.error.describe()) << "\n";
   }
   return s.str();
 }

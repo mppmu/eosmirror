@@ -56,6 +56,12 @@ open for reading, open for writing. Paths are relative to the endpoint's root.
 Writers are atomic: `commit()` applies metadata, verifies the size and
 checksum and renames into place; `abort()` removes the temporary file.
 
+Names from listings are checked before they are joined into paths: empty
+names, `.`, `..` and names containing `/`, NUL or a line break are skipped
+with a warning and counted, on both sides and when deleting trees. Log lines,
+the progress display and the summary replace control characters and invalid
+UTF-8 in names with `?`.
+
 Each endpoint describes its capabilities: mtime resolution (POSIX probes
 it on the target), whether owners, modes (and which mode bits) and mtimes
 can be set, whether symlinks exist and have owners, which checksum it
@@ -128,8 +134,8 @@ shard, which is cheap compared to the copies.
 
 Counters for everything that happened (directories, files copied with
 bytes, unchanged, metadata fixed, symlinks, skipped special files, deleted,
-failed by kind, retries) go to a summary at the end and optionally to a
-periodic progress line. Exit status: 0 when everything succeeded, 1 when
+skipped invalid names, failed by kind, retries) go to a summary at the end
+and optionally to a periodic progress line. Exit status: 0 when everything succeeded, 1 when
 something failed after retries, 2 for usage errors, 3 when the run could not
 start (unreadable source, unusable journal, failed preflight), 130 when
 interrupted.
@@ -144,31 +150,50 @@ as capabilities; the engine then compares files by size only, skips symlinks
 four writes in flight per file, the stored checksum is verified by a checksum
 query, and the file is renamed into place.
 
+XRootD has no escaping for paths: the server takes everything after the
+first `?` as opaque parameters, in opens as in all other requests. Paths
+containing `?` are therefore refused with an error instead of being sent.
+
 ## EOS specifics (milestone 3)
 
 XRootD has no symlink, chown or utimes operations and its stat lacks owners,
 modes and link targets. The EOS endpoint uses the MGM's commands, sent the
 way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
 
+- Paths are sent percent-encoded behind `/#curl#` (`/#curl#/eos/a%20b`),
+  with `eos.encodepath=1` among the opaque parameters: in opens, in plain
+  XRootD requests (mkdir, rm, rmdir, checksum queries, which take
+  `<path>?eos.encodepath=1`), in OpaqueFile queries and as `mgm.path` of
+  commands. The MGM decodes only paths with this prefix.
 - Text commands are opened as the file `root://mgm//proc/user/?mgm.cmd=...`
   and read; the reply is `mgm.proc.stdout=...&mgm.proc.stderr=...&mgm.proc.retc=N`
   with N an errno. Protobuf commands are sent the same way as
-  `mgm.cmd.proto=<base64 of a RequestProto>`.
+  `mgm.cmd.proto=<base64 of a RequestProto>`. The output of protobuf
+  commands is not escaped and can contain the markers, so they are searched
+  from the end of the reply.
 - Listing: `find` (RequestProto field 5, FindProto) with `Files`,
   `Directories`, `Maxdepth=1` (a oneof, so it must be sent), `Path` and
-  `Format="type,size,uid,gid,mode,flags,mtime,link,checksum,checksumtype"`,
-  plus `SkipVersionDirs`. Each output line is `path="<abs>" type=... size=N
+  `Format="type,size,uid,gid,mode,flags,mtime,link"`, plus
+  `SkipVersionDirs`. Each output line is `path="<abs>" type=... size=N
   uid=U gid=G mode=<octal, directories> flags=<octal, files>
-  mtime=<sec>.<nsec> target="<link target>" checksum=<hex> checksumtype=adler`.
-  The start directory itself is listed too and skipped.
+  mtime=<sec>.<nsec> target="<link target>"`, the fields in the order of the
+  format and the target only for symlinks.
+  The start directory itself is listed too and skipped; a listing without it
+  is an error (find prints paths below the real path, which differs when the
+  path leads through a symlink). Paths and targets are printed raw: lines
+  with more than one `" type=` (which a name or target can contain), names
+  with control characters, entries outside the directory and names listed
+  twice are skipped with a warning.
 - Single stat: `mgm.pcmd=stat` as an OpaqueFile query on the path; the reply
   `stat: dev ino mode nlink uid gid rdev size blksize blocks atime mtime
   ctime atime_ns mtime_ns ctime_ns` has nanoseconds.
-- Symlink: `mgm.cmd=file&mgm.subcmd=symlink&mgm.path=<escaped>&eos.encodepath=1
-  &mgm.file.source=<path>&mgm.file.target=<target>`.
+- Symlink: `mgm.cmd=file&mgm.subcmd=symlink&mgm.path=<encoded>&eos.encodepath=1
+  &mgm.file.source=<path>&mgm.file.target=<target>`. The MGM takes source
+  and target verbatim (EOS 5.5.2 `mgm/proc/user/File.cc`), so they are sent
+  unencoded.
 - mtime: `eos.mtime=<sec>.<nsec>` on the open URL for new files; otherwise
-  the OpaqueFile query `<escaped path>?mgm.pcmd=utimes&tv1_sec=0&tv1_nsec=0
-  &tv2_sec=S&tv2_nsec=<9 digits>&eos.encodepath=1`, which works for
+  the OpaqueFile query `<encoded path>?eos.encodepath=1&mgm.pcmd=utimes
+  &tv1_sec=0&tv1_nsec=0&tv2_sec=S&tv2_nsec=<9 digits>`, which works for
   directories and symlinks as well.
 - Owner and mode: `mgm.cmd=chown&mgm.path=...&mgm.chown.owner=uid:gid` and
   `mgm.cmd=chmod&mgm.path=...&mgm.chmod.mode=<octal>`; chown needs a root or
@@ -182,8 +207,10 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
   client's identity: the file is briefly visible with the uploader's owner.
 - EOS cannot change the owner of a symlink (chown follows the link) and
   cannot replace one in place, so symlink owners are not synchronized and a
-  changed symlink is removed and recreated. A symlink target containing
-  `&` cannot be sent in an MGM command and is reported as a failure.
+  changed symlink is removed and recreated. Since the symlink command takes
+  its source path and target unencoded, a symlink whose path or target
+  contains `&`, `=`, `?`, `#`, `%` or a control character cannot be created
+  and is reported as a failure.
 - Whether the identity may set owners comes from `whoami` (root or
   `sudo*`).
 - EOS's own hidden entries (atomic temporaries `.sys.a#.`, version
@@ -212,6 +239,10 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
   shard creates a subdirectory in it; the next run fixes it.
 - POSIX mtime resolutions coarser than one second (FAT) are treated as one
   second.
+- EOS's find output prints names raw, one entry per line. A name with line
+  breaks can therefore add lines that look like entries. Lines that cannot be
+  parsed and names listed twice are skipped, but a forged line for a name
+  that is not otherwise in the directory cannot be told from a real one.
 
 ## Not in scope (for now)
 

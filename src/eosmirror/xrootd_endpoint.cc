@@ -16,7 +16,6 @@
 #include <cstdlib>
 #include <mutex>
 #include <optional>
-#include <random>
 #include <sstream>
 #include <vector>
 
@@ -27,14 +26,6 @@ namespace eosmirror {
 namespace {
 
 constexpr std::string_view kTempMarker = ".eosmirror-";
-
-std::string random_suffix() {
-  thread_local std::mt19937_64 rng{std::random_device{}()};
-  char buf[17];
-  std::snprintf(buf, sizeof buf, "%012llx",
-                static_cast<unsigned long long>(rng() & 0xffffffffffffULL));
-  return buf;
-}
 
 std::string parent_of(const std::string& path) {
   auto slash = path.rfind('/');
@@ -265,6 +256,25 @@ class XrdWriter : public FileWriter {
 
 }  // namespace
 
+std::string display_url(std::string_view url) {
+  url = url.substr(0, url.find('?'));
+  auto scheme = url.find("://");
+  size_t host = scheme == std::string_view::npos ? 0 : scheme + 3;
+  auto at = url.find('@', host);
+  if (at != std::string_view::npos && at < url.find('/', host)) {
+    auto colon = url.find(':', host);
+    if (colon < at) return std::string(url.substr(0, colon)) + std::string(url.substr(at));
+  }
+  return std::string(url);
+}
+
+Result<std::string> xrootd_request_path(const std::string& abs_path) {
+  if (abs_path.find('?') != std::string::npos)
+    return Error{ErrorKind::Unsupported,
+                 "XRootD cannot address a path containing '?': " + abs_path};
+  return abs_path;
+}
+
 Error XrdEndpoint::xrd_error(const XrdCl::XRootDStatus& st, const std::string& context) {
   // A server error carries the protocol's kXR_* code in errNo, a local one
   // an errno.
@@ -316,12 +326,12 @@ Result<std::unique_ptr<XrdEndpoint>> XrdEndpoint::create(const std::string& url,
                                                          XrdOptions options) {
   XrdCl::URL parsed(url);
   if (!parsed.IsValid() || parsed.GetProtocol().empty() || parsed.GetHostName().empty())
-    return Error{ErrorKind::Other, "invalid XRootD URL: " + url};
+    return Error{ErrorKind::Other, "invalid XRootD URL: " + display_url(url)};
   std::string server = parsed.GetProtocol() + "://" + parsed.GetHostId();
   std::string root = parsed.GetPath();
   while (root.size() > 1 && root.back() == '/') root.pop_back();
   if (root.empty() || root[0] != '/')
-    return Error{ErrorKind::Other, "XRootD URL needs an absolute path: " + url};
+    return Error{ErrorKind::Other, "XRootD URL needs an absolute path: " + display_url(url)};
   std::unique_ptr<XrdEndpoint> ep(new XrdEndpoint(url, server, root, options));
 
   // The checksum the server computes, if any.
@@ -338,7 +348,7 @@ Result<std::unique_ptr<XrdEndpoint>> XrdEndpoint::create(const std::string& url,
     if (auto type = parse_checksum_type(first); type && *type != ChecksumType::None)
       ep->caps_.checksum = *type;
     else if (first != "chksum")
-      log::debug(url, ": unknown checksum type ", first);
+      log::debug(ep->describe(), ": unknown checksum type ", first);
   }
   delete response;
   return ep;
@@ -346,7 +356,7 @@ Result<std::unique_ptr<XrdEndpoint>> XrdEndpoint::create(const std::string& url,
 
 XrdEndpoint::XrdEndpoint(std::string url, std::string server, std::string root,
                          XrdOptions options)
-    : url_(std::move(url)),
+    : url_(display_url(url)),
       server_(std::move(server)),
       root_(std::move(root)),
       options_(options),
@@ -371,10 +381,16 @@ std::string XrdEndpoint::absolute(const RelPath& path) const {
   return root_ == "/" ? "/" + path : root_ + "/" + path;
 }
 
+Result<std::string> XrdEndpoint::request_path(const std::string& abs_path) const {
+  return xrootd_request_path(abs_path);
+}
+
 Result<Entry> XrdEndpoint::stat(const RelPath& path) {
   std::string abs = absolute(path);
+  auto request = request_path(abs);
+  if (!request.ok()) return request.error();
   XrdCl::StatInfo* info = nullptr;
-  XrdCl::XRootDStatus st = fs_->Stat(abs, info);
+  XrdCl::XRootDStatus st = fs_->Stat(request.value(), info);
   if (!st.IsOK()) return xrd_error(st, "stat " + url_of(abs));
   std::unique_ptr<XrdCl::StatInfo> owned(info);
   return entry_from_stat(path.empty() ? "" : name_of(path), *info);
@@ -382,8 +398,10 @@ Result<Entry> XrdEndpoint::stat(const RelPath& path) {
 
 Result<std::vector<Entry>> XrdEndpoint::list(const RelPath& dir) {
   std::string abs = absolute(dir);
+  auto request = request_path(abs);
+  if (!request.ok()) return request.error();
   XrdCl::DirectoryList* listing = nullptr;
-  XrdCl::XRootDStatus st = fs_->DirList(abs, XrdCl::DirListFlags::Stat, listing);
+  XrdCl::XRootDStatus st = fs_->DirList(request.value(), XrdCl::DirListFlags::Stat, listing);
   if (!st.IsOK()) return xrd_error(st, "list " + url_of(abs));
   std::unique_ptr<XrdCl::DirectoryList> owned(listing);
   std::vector<Entry> entries;
@@ -395,6 +413,10 @@ Result<std::vector<Entry>> XrdEndpoint::list(const RelPath& dir) {
       auto e = stat(join(dir, item->GetName()));
       if (!e.ok()) {
         if (e.error().kind == ErrorKind::NotFound) continue;
+        if (e.error().kind == ErrorKind::Unsupported) {
+          log::warn("skipping ", e.error().describe());
+          continue;
+        }
         return e.error();
       }
       entries.push_back(std::move(e).value());
@@ -407,8 +429,10 @@ Result<std::vector<Entry>> XrdEndpoint::list(const RelPath& dir) {
 
 Status XrdEndpoint::mkdir(const RelPath& path, ModeBits mode) {
   std::string abs = absolute(path);
+  auto request = request_path(abs);
+  if (!request.ok()) return request.error();
   XrdCl::XRootDStatus st =
-      fs_->MkDir(abs, XrdCl::MkDirFlags::None, access_mode(mode | 0700));
+      fs_->MkDir(request.value(), XrdCl::MkDirFlags::None, access_mode(mode | 0700));
   if (!st.IsOK()) return xrd_error(st, "mkdir " + url_of(abs));
   return {};
 }
@@ -424,7 +448,9 @@ Status XrdEndpoint::set_metadata(const RelPath& path, const Entry& md, MetaField
   if (has(fields, MetaFields::Mtime))
     return Error{ErrorKind::Unsupported, "mtimes cannot be set on " + url_of(abs)};
   if (has(fields, MetaFields::Mode) && md.type != EntryType::Symlink) {
-    XrdCl::XRootDStatus st = fs_->ChMod(abs, access_mode(md.mode));
+    auto request = request_path(abs);
+    if (!request.ok()) return request.error();
+    XrdCl::XRootDStatus st = fs_->ChMod(request.value(), access_mode(md.mode));
     if (!st.IsOK()) return xrd_error(st, "chmod " + url_of(abs));
   }
   return {};
@@ -433,7 +459,9 @@ Status XrdEndpoint::set_metadata(const RelPath& path, const Entry& md, MetaField
 Status XrdEndpoint::remove(const RelPath& path, EntryType type) {
   std::string abs = absolute(path);
   if (type == EntryType::Directory) {
-    XrdCl::XRootDStatus st = fs_->RmDir(abs);
+    auto request = request_path(abs);
+    if (!request.ok()) return request.error();
+    XrdCl::XRootDStatus st = fs_->RmDir(request.value());
     if (!st.IsOK()) return xrd_error(st, "rmdir " + url_of(abs));
     return {};
   }
@@ -441,13 +469,19 @@ Status XrdEndpoint::remove(const RelPath& path, EntryType type) {
 }
 
 Status XrdEndpoint::remove_abs(const std::string& abs) {
-  XrdCl::XRootDStatus st = fs_->Rm(abs);
+  auto request = request_path(abs);
+  if (!request.ok()) return request.error();
+  XrdCl::XRootDStatus st = fs_->Rm(request.value());
   if (!st.IsOK()) return xrd_error(st, "remove " + url_of(abs));
   return {};
 }
 
 Status XrdEndpoint::rename_abs(const std::string& from, const std::string& to) {
-  XrdCl::XRootDStatus st = fs_->Mv(from, to);
+  auto request_from = request_path(from);
+  if (!request_from.ok()) return request_from.error();
+  auto request_to = request_path(to);
+  if (!request_to.ok()) return request_to.error();
+  XrdCl::XRootDStatus st = fs_->Mv(request_from.value(), request_to.value());
   if (st.IsOK()) return {};
   Error e = xrd_error(st, "rename " + url_of(from) + " to " + url_of(to));
   if (e.kind != ErrorKind::Exists) return e;
@@ -456,14 +490,16 @@ Status XrdEndpoint::rename_abs(const std::string& from, const std::string& to) {
   // uploads.
   Status removed = remove_abs(to);
   if (!removed.ok()) return removed;
-  st = fs_->Mv(from, to);
+  st = fs_->Mv(request_from.value(), request_to.value());
   if (!st.IsOK()) return xrd_error(st, "rename " + url_of(from) + " to " + url_of(to));
   return {};
 }
 
 Result<Checksum> XrdEndpoint::query_checksum(const std::string& abs) {
+  auto request = request_path(abs);
+  if (!request.ok()) return request.error();
   XrdCl::Buffer arg;
-  arg.FromString(abs);
+  arg.FromString(request.value());
   XrdCl::Buffer* response = nullptr;
   XrdCl::XRootDStatus st = fs_->Query(XrdCl::QueryCode::Checksum, arg, response);
   if (!st.IsOK()) return xrd_error(st, "checksum of " + url_of(abs));
@@ -472,11 +508,13 @@ Result<Checksum> XrdEndpoint::query_checksum(const std::string& abs) {
 }
 
 Result<std::unique_ptr<FileReader>> XrdEndpoint::open_read(const RelPath& path) {
-  std::string url = url_of(absolute(path));
+  std::string abs = absolute(path);
+  auto request = request_path(abs);
+  if (!request.ok()) return request.error();
   auto file = std::make_unique<XrdCl::File>();
-  XrdCl::XRootDStatus st = file->Open(url, XrdCl::OpenFlags::Read);
-  if (!st.IsOK()) return xrd_error(st, "open " + url);
-  return std::unique_ptr<FileReader>(new XrdReader(std::move(file), url));
+  XrdCl::XRootDStatus st = file->Open(open_url(request.value()), XrdCl::OpenFlags::Read);
+  if (!st.IsOK()) return xrd_error(st, "open " + url_of(abs));
+  return std::unique_ptr<FileReader>(new XrdReader(std::move(file), url_of(abs)));
 }
 
 Result<std::unique_ptr<FileWriter>> XrdEndpoint::open_write(const RelPath& path,
@@ -485,9 +523,12 @@ Result<std::unique_ptr<FileWriter>> XrdEndpoint::open_write(const RelPath& path,
   std::string name = name_of(abs);
   if (name.size() > 231) name.resize(231);  // keep the temporary name within NAME_MAX
   std::string temp = parent_of(abs) + "/." + name + std::string(kTempMarker) + random_suffix();
+  auto request = request_path(temp);
+  if (!request.ok()) return request.error();
   auto file = new_write_file();
   ModeBits mode = has(spec.fields, MetaFields::Mode) ? spec.metadata.mode : 0644;
-  XrdCl::XRootDStatus st = file->Open(url_of(temp), XrdCl::OpenFlags::New | XrdCl::OpenFlags::Write,
+  XrdCl::XRootDStatus st = file->Open(open_url(request.value()),
+                                      XrdCl::OpenFlags::New | XrdCl::OpenFlags::Write,
                                       access_mode(mode));
   if (!st.IsOK()) return xrd_error(st, "create " + url_of(temp));
   return std::unique_ptr<FileWriter>(

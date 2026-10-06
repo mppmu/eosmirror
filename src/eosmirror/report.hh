@@ -40,6 +40,7 @@ struct Stats {
   Counter extras{0};
   Counter deleted{0};
   Counter stale_temps{0};
+  Counter invalid_names{0};  // listed names that cannot be joined into paths
   Counter retries{0};
   Counter failures{0};
   Counter queued_copies{0};  // copies waiting in the backlog

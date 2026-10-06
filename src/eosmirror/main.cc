@@ -35,8 +35,8 @@ int list_failures(const std::string& file) {
   std::fprintf(stderr, "failures of %s -> %s\n", opened.value()->source().c_str(),
                opened.value()->target().c_str());
   for (const Failure& f : opened.value()->failures())
-    std::printf("%s\t%s\t%s\n", std::string(to_string(f.type)).c_str(), f.path.c_str(),
-                f.error.describe().c_str());
+    std::printf("%s\t%s\t%s\n", std::string(to_string(f.type)).c_str(), printable(f.path).c_str(),
+                printable(f.error.describe()).c_str());
   return kOk;
 }
 

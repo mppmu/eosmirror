@@ -3,7 +3,6 @@
 
 #include <algorithm>
 #include <cstdio>
-#include <random>
 #include <span>
 
 #include "eosmirror/checksum.hh"
@@ -16,21 +15,13 @@ std::span<const std::byte> bytes(std::string_view s) {
   return {reinterpret_cast<const std::byte*>(s.data()), s.size()};
 }
 
-std::string random_name() {
-  std::mt19937_64 rng{std::random_device{}()};
-  char buf[48];
-  std::snprintf(buf, sizeof buf, ".eosmirror-selftest-%012llx",
-                static_cast<unsigned long long>(rng() & 0xffffffffffffULL));
-  return buf;
-}
-
 class Selftest {
  public:
   Selftest(Endpoint& target, bool with_owner)
       : target_(target), caps_(target.capabilities()), with_owner_(with_owner) {}
 
   SelftestReport run() {
-    dir_ = random_name();
+    dir_ = ".eosmirror-selftest-" + random_suffix();
     if (!check("create a directory", target_.mkdir(dir_, 0750))) return report_;
     write_file();
     list_directory();
@@ -218,6 +209,7 @@ class Selftest {
     auto left = target_.list(dir_);
     if (left.ok()) {
       for (const Entry& e : left.value()) {
+        if (!valid_entry_name(e.name)) continue;
         Status s = target_.remove(join(dir_, e.name), e.type);
         if (!s.ok()) fail("remove leftover " + e.name, s.error().describe());
       }

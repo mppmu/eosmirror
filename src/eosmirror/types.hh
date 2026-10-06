@@ -68,4 +68,11 @@ inline RelPath join(const RelPath& dir, std::string_view name) {
   return result;
 }
 
+// Whether a name from a listing can be joined into a path: not empty, "." or
+// "..", and without '/', NUL or line breaks.
+bool valid_entry_name(std::string_view name);
+
+// 48 random bits as 12 hex digits, for temporary names.
+std::string random_suffix();
+
 }  // namespace eosmirror

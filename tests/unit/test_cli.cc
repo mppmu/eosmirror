@@ -32,7 +32,7 @@ TEST_CASE("sizes are parsed with binary suffixes") {
 TEST_CASE("the sync command line maps onto the options") {
   auto r = parse({"sync", "-n", "--delete", "--max-delete", "5", "--no-owner", "--checkers=3",
                   "--transfers", "4", "--buffer-size", "1M", "--retries", "0",
-                  "--rewrite-links", "/ceph/=/eos/", "--journal", "j.db", "--resume",
+                  "--rewrite-links", "/old/=/new/", "--journal", "j.db", "--resume",
                   "--shard", "1/3", "--progress", "10", "-v", "/src", "/dst"});
   REQUIRE(r.ok());
   const CliOptions& o = r.value();
@@ -49,8 +49,8 @@ TEST_CASE("the sync command line maps onto the options") {
   CHECK(o.sync.buffer_size == 1u << 20);
   CHECK(o.sync.retry.attempts == 1);
   REQUIRE(o.sync.link_rewrites.size() == 1);
-  CHECK(o.sync.link_rewrites[0].first == "/ceph/");
-  CHECK(o.sync.link_rewrites[0].second == "/eos/");
+  CHECK(o.sync.link_rewrites[0].first == "/old/");
+  CHECK(o.sync.link_rewrites[0].second == "/new/");
   CHECK(o.journal == "j.db");
   CHECK(o.sync.resume);
   CHECK(o.sync.shard_index == 1);

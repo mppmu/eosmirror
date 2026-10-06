@@ -7,10 +7,8 @@
 #include <unistd.h>
 
 #include <cerrno>
-#include <cstdio>
 #include <cstdlib>
 #include <mutex>
-#include <random>
 
 namespace eosmirror {
 
@@ -46,13 +44,6 @@ Result<std::string> read_link(int dirfd, const char* name, const std::string& co
     }
     target.resize(target.size() * 2);
   }
-}
-
-std::string random_suffix() {
-  thread_local std::mt19937_64 rng{std::random_device{}()};
-  char buf[17];
-  std::snprintf(buf, sizeof buf, "%012llx", static_cast<unsigned long long>(rng() & 0xffffffffffffULL));
-  return buf;
 }
 
 std::string parent_of(const std::string& path) {

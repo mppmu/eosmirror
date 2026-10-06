@@ -248,6 +248,70 @@ TEST_CASE("eos endpoint: files in a directory without checksums") {
   CHECK(ep.stat("g").error().kind == ErrorKind::NotFound);
 }
 
+TEST_CASE("eos endpoint: names that need encoding") {
+  if (!base_url()) return;
+  RemoteDir dir("names");
+  EosEndpoint& ep = *dir.endpoint;
+  // Unencoded, these would cut the path short and add opaque parameters.
+  for (std::string name : {"a b", "q?eos.atomic=0&x=1", "100%25 #1", "Gr\xc3\xb6\xc3\x9f" "e"}) {
+    INFO("name ", name);
+    REQUIRE(ep.mkdir(name, 0755).ok());
+    std::string file = name + "/" + name;
+    std::string content = "content of " + name;
+    CommitSpec spec;
+    spec.size = content.size();
+    spec.fields = MetaFields::Mode | MetaFields::Mtime;
+    spec.metadata.mode = 0640;
+    spec.metadata.mtime = {1600000000, 5};
+    spec.checksum = adler(content);
+    auto writer = ep.open_write(file, spec);
+    REQUIRE(writer.ok());
+    REQUIRE(writer.value()->write(0, bytes(content)).ok());
+    auto committed = writer.value()->commit(spec);
+    REQUIRE(committed.ok());
+    CHECK(committed.value().verified);
+
+    Entry st = must(ep.stat(file));
+    CHECK(st.size == content.size());
+    CHECK(st.mode == 0640);
+    CHECK(st.mtime == spec.metadata.mtime);
+    auto listed = ep.list(name);
+    REQUIRE(listed.ok());
+    REQUIRE(listed.value().size() == 1);
+    CHECK(listed.value()[0].name == name);
+    auto reader = ep.open_read(file);
+    REQUIRE(reader.ok());
+    std::string back(content.size(), '\0');
+    auto n = reader.value()->read(0, {reinterpret_cast<std::byte*>(back.data()), back.size()});
+    REQUIRE(n.ok());
+    CHECK(back == content);
+
+    Entry dmd;
+    dmd.type = EntryType::Directory;
+    dmd.mode = 0750;
+    dmd.mtime = {1500000000, 7};
+    REQUIRE(ep.set_metadata(name, dmd, MetaFields::Mode | MetaFields::Mtime).ok());
+    Entry d = must(ep.stat(name));
+    CHECK(d.mode == 0750);
+    CHECK(d.mtime == dmd.mtime);
+    REQUIRE(ep.remove(file, EntryType::File).ok());
+    REQUIRE(ep.remove(name, EntryType::Directory).ok());
+  }
+
+  // The symlink command takes path and target unencoded: spaces work, the
+  // characters of the opaque syntax are refused.
+  REQUIRE(ep.symlink("link with spaces", "target with spaces").ok());
+  CHECK(must(ep.stat("link with spaces")).link_target == "target with spaces");
+  REQUIRE(ep.remove("link with spaces", EntryType::Symlink).ok());
+  for (auto [link, target] : {std::pair{"l?x", "t"}, std::pair{"l", "t&mgm.file.target=/x"},
+                              std::pair{"l", "100%"}, std::pair{"l#", "t"}}) {
+    auto refused = ep.symlink(link, target);
+    REQUIRE_FALSE(refused.ok());
+    CHECK(refused.error().kind == ErrorKind::Unsupported);
+  }
+  CHECK(ep.list("").value().empty());
+}
+
 TEST_CASE("FS to EOS and back, replica and erasure coded layouts") {
   if (!base_url()) return;
   for (const char* layout : {"replica2", "raid6"}) {

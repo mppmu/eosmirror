@@ -122,8 +122,8 @@ std::string ProgressDisplay::render_lines() {
   const Stats& s = report_.stats;
   double secs = std::chrono::duration<double>(report_.elapsed()).count();
   std::ostringstream out;
-  out << fit(title_, static_cast<size_t>(width_ - 20)) << "  " << format_duration(report_.elapsed())
-      << "\n";
+  out << printable(fit(title_, static_cast<size_t>(width_ - 20))) << "  "
+      << format_duration(report_.elapsed()) << "\n";
   out << "dirs " << s.dirs_listed.load() << "  files " << s.files_checked.load() << " checked, "
       << s.files_copied.load() << " copied (" << format_bytes(s.bytes_copied.load()) << "), "
       << s.files_unchanged.load() << " unchanged";
@@ -165,7 +165,8 @@ std::string ProgressDisplay::render_lines() {
     char pct[8];
     std::snprintf(pct, sizeof pct, "%3d%%", static_cast<int>(ratio * 100));
     std::string head = bar(ratio, kBarWidth) + " " + pct + " " + format_bytes(size) + "  ";
-    out << head << fit(path, static_cast<size_t>(std::max(10, width_ - kBarWidth - 24))) << "\n";
+    out << head << printable(fit(path, static_cast<size_t>(std::max(10, width_ - kBarWidth - 24))))
+        << "\n";
   }
   if (active > static_cast<size_t>(shown))
     out << "… and " << active - static_cast<size_t>(shown) << " more\n";

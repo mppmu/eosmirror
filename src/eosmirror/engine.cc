@@ -204,6 +204,18 @@ struct Engine::Impl {
     report.add_failure(std::move(f));
   }
 
+  // Drops listed entries whose names cannot be joined into paths.
+  void drop_invalid_names(const Endpoint& endpoint, const RelPath& dir,
+                          std::vector<Entry>& entries) {
+    std::erase_if(entries, [&](const Entry& e) {
+      if (valid_entry_name(e.name)) return false;
+      stats.invalid_names.fetch_add(1);
+      log::warn("skipping an entry with the invalid name \"", e.name, "\" in ", endpoint.describe(),
+                "/", dir);
+      return true;
+    });
+  }
+
   // Drops the journal's record of an earlier failure of the path.
   void succeeded(const RelPath& path) {
     if (journal && !options.dry_run && prior_failures.count(path)) journal->clear_failure(path);
@@ -315,11 +327,13 @@ struct Engine::Impl {
       return;
     }
     std::vector<Entry>& src_entries = listed.value();
+    drop_invalid_names(source, node->path, src_entries);
 
     std::unordered_map<std::string, Entry> dst_entries;
     if (!node->created) {
       auto dst_listed = retry([&] { return target.list(node->path); });
       if (dst_listed.ok()) {
+        drop_invalid_names(target, node->path, dst_listed.value());
         for (Entry& e : dst_listed.value()) {
           std::string name = e.name;
           dst_entries.emplace(std::move(name), std::move(e));
@@ -555,6 +569,7 @@ struct Engine::Impl {
     if (e.type == EntryType::Directory) {
       auto listed = retry([&] { return target.list(path); });
       if (!listed.ok()) return listed.error();
+      drop_invalid_names(target, path, listed.value());
       for (const Entry& child : listed.value()) {
         if (cancel.requested()) return Error{ErrorKind::Cancelled, "cancelled"};
         Status s = delete_tree(join(path, child.name), child);

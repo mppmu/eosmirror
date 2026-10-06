@@ -21,6 +21,14 @@ struct XrdOptions {
   int write_window = 2;
 };
 
+// The URL without what may carry credentials: a password before the host and
+// the opaque parameters (authz tokens and the like).
+std::string display_url(std::string_view url);
+
+// The path of a request to an XRootD server. XRootD has no escaping for
+// paths: a '?' starts the opaque parameters, so paths with one are refused.
+Result<std::string> xrootd_request_path(const std::string& abs_path);
+
 // An endpoint on an XRootD server, given as root://host[:port]//path.
 //
 // Plain XRootD has no symlinks, owners or settable mtimes, so this endpoint
@@ -48,9 +56,16 @@ class XrdEndpoint : public Endpoint {
   Result<std::unique_ptr<FileWriter>> open_write(const RelPath& path,
                                                  const CommitSpec& spec) override;
 
-  // The absolute path on the server, and the full URL, of a relative path.
+  // The absolute path on the server of a relative path, and its URL for
+  // messages.
   std::string absolute(const RelPath& path) const;
-  std::string url_of(const std::string& abs_path) const { return server_ + "/" + abs_path; }
+  std::string url_of(const std::string& abs_path) const {
+    return display_url(server_) + "/" + abs_path;
+  }
+
+  // An absolute path as sent to the server. EOS encodes paths and adds the
+  // opaque parameter that says so.
+  virtual Result<std::string> request_path(const std::string& abs_path) const;
 
   // Operations on absolute server paths, used by the writer.
   Result<Checksum> query_checksum(const std::string& abs_path);
@@ -66,8 +81,13 @@ class XrdEndpoint : public Endpoint {
  protected:
   XrdEndpoint(std::string url, std::string server, std::string root, XrdOptions options);
 
-  std::string url_;     // as given
-  std::string server_;  // root://host:port
+  // The URL for File::Open of a request path.
+  std::string open_url(const std::string& request_path) const {
+    return server_ + "/" + request_path;
+  }
+
+  std::string url_;     // as given, for display (display_url)
+  std::string server_;  // root://[user[:password]@]host:port
   std::string root_;    // the path part, without trailing slash
   XrdOptions options_;
   Capabilities caps_;
