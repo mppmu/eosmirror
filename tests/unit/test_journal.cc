@@ -20,7 +20,7 @@ TEST_CASE("journal keeps failures and finalized directories across openings") {
     j.record_failure({"a/b", EntryType::File, Error{ErrorKind::Timeout, "again"}});
     j.record_done_dir("");
     j.record_done_dir("a");
-    REQUIRE(j.end_run(true).ok());
+    REQUIRE(j.end_run(false).ok());  // interrupted
   }
   {
     auto opened = Journal::open(file, "/src", "root://host//dst");
@@ -40,10 +40,16 @@ TEST_CASE("journal keeps failures and finalized directories across openings") {
 
     REQUIRE(j.begin_run(true).ok());
     CHECK(j.run_id() == 2);
-    CHECK(j.is_done_dir("a"));  // resuming keeps them
+    CHECK(j.is_done_dir("a"));  // resuming an interrupted run keeps them
     j.clear_failure("a/b");
     j.clear_failure("never recorded");
     CHECK(j.failures().size() == 1);
+    REQUIRE(j.end_run(true).ok());
+
+    REQUIRE(j.begin_run(true).ok());
+    CHECK_FALSE(j.is_done_dir("a"));  // nothing to resume after a completed run
+    j.record_done_dir("a");
+    REQUIRE(j.end_run(false).ok());
 
     REQUIRE(j.begin_run(false).ok());
     CHECK_FALSE(j.is_done_dir("a"));  // a fresh run forgets them
@@ -53,6 +59,8 @@ TEST_CASE("journal keeps failures and finalized directories across openings") {
   auto wrong = Journal::open(file, "/other", "root://host//dst");
   REQUIRE_FALSE(wrong.ok());
   CHECK(wrong.error().message.find("belongs to /src -> root://host//dst") != std::string::npos);
+  auto other_shard = Journal::open(file, "/src", "root://host//dst", "1/2");
+  REQUIRE_FALSE(other_shard.ok());
 
   auto unusable = Journal::open(tmp.sub("missing/dir/j.sqlite"), "/src", "/dst");
   CHECK_FALSE(unusable.ok());

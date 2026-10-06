@@ -16,6 +16,7 @@ namespace eosmirror {
 struct CopyOptions {
   bool preserve_owner = true;
   bool preserve_mode = true;
+  bool preserve_mtime = true;
   bool verify = true;
 };
 

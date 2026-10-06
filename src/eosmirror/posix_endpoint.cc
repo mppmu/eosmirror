@@ -8,6 +8,8 @@
 
 #include <cerrno>
 #include <cstdio>
+#include <cstdlib>
+#include <mutex>
 #include <random>
 
 namespace eosmirror {
@@ -63,16 +65,21 @@ std::string name_of(const std::string& path) {
   return slash == std::string::npos ? path : path.substr(slash + 1);
 }
 
+// ".<name>.eosmirror-<random>" next to the final path, with the name cut
+// so that the whole fits into NAME_MAX.
 std::string temp_path(const std::string& final_path) {
-  return parent_of(final_path) + "/." + name_of(final_path) + std::string(kTempMarker) +
-         random_suffix();
+  std::string name = name_of(final_path);
+  constexpr size_t kMaxName = 255 - 1 - 11 - 12;
+  if (name.size() > kMaxName) name.resize(kMaxName);
+  return parent_of(final_path) + "/." + name + std::string(kTempMarker) + random_suffix();
 }
 
-Status apply_metadata_fd(int fd, const std::string& context, const Entry& md, MetaFields fields) {
+Status apply_metadata_fd(int fd, const std::string& context, const Entry& md, MetaFields fields,
+                         ModeBits default_mode) {
   if (has(fields, MetaFields::Owner) && fchown(fd, md.uid, md.gid) != 0)
     return errno_error(errno, "chown " + context);
-  if (has(fields, MetaFields::Mode) && fchmod(fd, md.mode) != 0)
-    return errno_error(errno, "chmod " + context);
+  ModeBits mode = has(fields, MetaFields::Mode) ? md.mode : default_mode;
+  if (fchmod(fd, mode) != 0) return errno_error(errno, "chmod " + context);
   if (has(fields, MetaFields::Mtime)) {
     struct timespec times[2] = {{0, UTIME_OMIT}, {md.mtime.sec, md.mtime.nsec}};
     if (futimens(fd, times) != 0) return errno_error(errno, "utimes " + context);
@@ -160,7 +167,7 @@ class PosixWriter : public FileWriter {
       if (!verified.ok()) return verified;
     }
     if (options_.fsync && fsync(fd_) != 0) return errno_error(errno, "fsync " + temp_);
-    Status md = apply_metadata_fd(fd_, temp_, spec.metadata, spec.fields);
+    Status md = apply_metadata_fd(fd_, temp_, spec.metadata, spec.fields, options_.default_mode);
     if (!md.ok()) return md;
     if (close(fd_) != 0) {
       fd_ = -1;
@@ -209,15 +216,61 @@ class PosixWriter : public FileWriter {
 PosixEndpoint::PosixEndpoint(std::string root, PosixOptions options)
     : root_(std::move(root)), options_(options) {
   while (root_.size() > 1 && root_.back() == '/') root_.pop_back();
+  // The canonical path, so that journals recognize the tree however it was
+  // named; a root that does not exist yet is made absolute only.
+  if (char* real = realpath(root_.c_str(), nullptr)) {
+    root_ = real;
+    free(real);
+  } else if (!root_.empty() && root_[0] != '/') {
+    if (char* cwd = getcwd(nullptr, 0)) {
+      root_ = std::string(cwd) + "/" + root_;
+      free(cwd);
+    }
+  }
+  mode_t mask = umask(0);
+  umask(mask);
+  options_.default_mode = 0666 & ~static_cast<ModeBits>(mask);
 }
 
 Capabilities PosixEndpoint::capabilities() const {
   Capabilities caps;
-  caps.mtime_resolution = 1;
+  caps.mtime_resolution = mtime_resolution();
   caps.can_set_owner = geteuid() == 0;
   caps.can_set_mode = true;
   caps.checksum = ChecksumType::None;
   return caps;
+}
+
+// Finds out how precisely the file system under the root stores mtimes, by
+// writing a temporary file with a known mtime and reading it back. A root
+// that cannot be written is assumed to keep nanoseconds.
+int32_t PosixEndpoint::mtime_resolution() const {
+  std::call_once(probe_once_, [&] {
+    probed_resolution_ = 1;
+    // Creating the probe changes the root's mtime, which is restored after.
+    struct stat root_st{};
+    bool have_root = ::stat(root_.c_str(), &root_st) == 0;
+    std::string probe = temp_path(root_ + "/probe");
+    int fd = open(probe.c_str(), O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (fd < 0) return;
+    constexpr int32_t kNsec = 123456789;
+    struct timespec times[2] = {{0, UTIME_OMIT}, {1500000000, kNsec}};
+    struct stat st{};
+    if (futimens(fd, times) == 0 && fstat(fd, &st) == 0 && st.st_mtim.tv_sec == 1500000000) {
+      // The stored value is the probe truncated to the resolution.
+      auto stored = static_cast<int32_t>(st.st_mtim.tv_nsec);
+      int32_t resolution = 1;
+      while (resolution < 1000000000 && kNsec / resolution * resolution != stored) resolution *= 10;
+      probed_resolution_ = resolution;
+    }
+    close(fd);
+    unlink(probe.c_str());
+    if (have_root) {
+      struct timespec restore[2] = {{0, UTIME_OMIT}, root_st.st_mtim};
+      utimensat(AT_FDCWD, root_.c_str(), restore, 0);
+    }
+  });
+  return probed_resolution_;
 }
 
 bool PosixEndpoint::is_temporary(std::string_view name) const {
@@ -232,7 +285,9 @@ std::string PosixEndpoint::absolute(const RelPath& path) const {
 Result<Entry> PosixEndpoint::stat(const RelPath& path) {
   std::string abs = absolute(path);
   struct stat st{};
-  if (lstat(abs.c_str(), &st) != 0) return errno_error(errno, "stat " + abs);
+  // The root itself may be a symlink to the tree.
+  int rc = path.empty() ? ::stat(abs.c_str(), &st) : lstat(abs.c_str(), &st);
+  if (rc != 0) return errno_error(errno, "stat " + abs);
   Entry e = entry_from_stat(path.empty() ? "" : name_of(path), st);
   if (e.type == EntryType::Symlink) {
     Result<std::string> target = read_link(AT_FDCWD, abs.c_str(), abs);
@@ -332,8 +387,20 @@ Status PosixEndpoint::remove(const RelPath& path, EntryType type) {
 
 Result<std::unique_ptr<FileReader>> PosixEndpoint::open_read(const RelPath& path) {
   std::string abs = absolute(path);
-  int fd = open(abs.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+  // O_NONBLOCK, so that a FIFO that replaced the file cannot block the open.
+  int fd = open(abs.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
   if (fd < 0) return errno_error(errno, "open " + abs);
+  struct stat st{};
+  if (fstat(fd, &st) != 0) {
+    int err = errno;
+    close(fd);
+    return errno_error(err, "stat " + abs);
+  }
+  if (!S_ISREG(st.st_mode)) {
+    close(fd);
+    return Error{ErrorKind::Changed, abs + " is not a regular file"};
+  }
+  fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) & ~O_NONBLOCK);
   return std::unique_ptr<FileReader>(new PosixReader(fd, std::move(abs)));
 }
 

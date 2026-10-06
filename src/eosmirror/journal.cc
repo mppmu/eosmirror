@@ -77,7 +77,8 @@ std::string Journal::target() {
 }
 
 Result<std::unique_ptr<Journal>> Journal::open(const std::string& file, const std::string& source,
-                                               const std::string& target) {
+                                               const std::string& target,
+                                               const std::string& shard) {
   auto opened = open_db(file, /*create=*/true);
   if (!opened.ok()) return opened.error();
   std::unique_ptr<Journal> journal = std::move(opened).value();
@@ -85,13 +86,19 @@ Result<std::unique_ptr<Journal>> Journal::open(const std::string& file, const st
 
   auto existing_source = journal->meta("source");
   auto existing_target = journal->meta("target");
+  auto existing_shard = journal->meta("shard");
   if (!existing_source.ok() || !existing_target.ok()) {
     if (!(s = journal->set_meta("source", source)).ok()) return s.error();
     if (!(s = journal->set_meta("target", target)).ok()) return s.error();
-  } else if (existing_source.value() != source || existing_target.value() != target) {
-    return Error{ErrorKind::Other, "journal " + file + " belongs to " + existing_source.value() +
-                                       " -> " + existing_target.value() + ", not to " + source +
-                                       " -> " + target};
+    if (!(s = journal->set_meta("shard", shard)).ok()) return s.error();
+  } else if (existing_source.value() != source || existing_target.value() != target ||
+             (existing_shard.ok() ? existing_shard.value() : "0/1") != shard) {
+    std::string described = existing_source.value() + " -> " + existing_target.value();
+    if (existing_shard.ok() && existing_shard.value() != "0/1")
+      described += " (shard " + existing_shard.value() + ")";
+    return Error{ErrorKind::Other, "journal " + file + " belongs to " + described + ", not to " +
+                                       source + " -> " + target +
+                                       (shard != "0/1" ? " (shard " + shard + ")" : "")};
   }
   return journal;
 }
@@ -164,7 +171,19 @@ Status Journal::prepare_statements() {
 
 Status Journal::begin_run(bool resume) {
   std::lock_guard lock(mutex_);
-  if (!resume) {
+  // Only an interrupted run leaves something to resume.
+  bool interrupted = false;
+  if (resume) {
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, "SELECT completed FROM runs ORDER BY id DESC LIMIT 1", -1, &stmt,
+                           nullptr) == SQLITE_OK) {
+      if (sqlite3_step(stmt) == SQLITE_ROW)
+        interrupted = sqlite3_column_type(stmt, 0) == SQLITE_NULL || sqlite3_column_int(stmt, 0) == 0;
+      sqlite3_finalize(stmt);
+    }
+    if (!interrupted) log::info("the previous run completed, nothing to resume");
+  }
+  if (!interrupted) {
     Status s = exec("DELETE FROM done_dirs");
     if (!s.ok()) return s;
   }

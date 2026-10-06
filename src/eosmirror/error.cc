@@ -31,7 +31,6 @@ bool is_transient(ErrorKind kind) {
     case ErrorKind::Timeout:
     case ErrorKind::Changed:
     case ErrorKind::Checksum:
-    case ErrorKind::Other:
       return true;
     default:
       return false;

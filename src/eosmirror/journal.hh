@@ -21,10 +21,11 @@ namespace eosmirror {
 // All methods are thread-safe.
 class Journal {
  public:
-  // Opens or creates the journal. A journal belongs to one source/target
-  // pair; opening it for another pair fails.
+  // Opens or creates the journal. A journal belongs to one source, target
+  // and shard; opening it for another combination fails.
   static Result<std::unique_ptr<Journal>> open(const std::string& file, const std::string& source,
-                                               const std::string& target);
+                                               const std::string& target,
+                                               const std::string& shard = "0/1");
 
   // Opens an existing journal for inspection, whatever pair it belongs to.
   static Result<std::unique_ptr<Journal>> open_any(const std::string& file);
@@ -35,8 +36,8 @@ class Journal {
   Journal(const Journal&) = delete;
   Journal& operator=(const Journal&) = delete;
 
-  // Starts a run. Unless resuming, finalized directories of earlier runs
-  // are forgotten.
+  // Starts a run. Finalized directories of earlier runs are forgotten,
+  // unless resuming a run that did not complete.
   Status begin_run(bool resume);
   Status end_run(bool completed);
   int64_t run_id() const { return run_id_; }

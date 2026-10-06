@@ -217,6 +217,14 @@ TEST_CASE("posix reader streams and reports the current stat") {
   REQUIRE(symlink("data", tmp.sub("ln").c_str()) == 0);
   auto through_link = ep.open_read("ln");
   CHECK_FALSE(through_link.ok());  // symlinks are never followed
+
+  // A FIFO in place of a file must not block the open.
+  REQUIRE(mkfifo(tmp.sub("fifo").c_str(), 0600) == 0);
+  auto fifo = ep.open_read("fifo");
+  REQUIRE_FALSE(fifo.ok());
+  CHECK(fifo.error().kind == ErrorKind::Changed);
+
+  CHECK(ep.capabilities().mtime_resolution == 1);  // tmpfs and ext4 keep nanoseconds
 }
 
 TEST_CASE("posix mkdir, symlink, metadata and remove") {

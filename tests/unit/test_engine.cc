@@ -568,7 +568,7 @@ TEST_CASE("fake: journal records failures and finalized directories, resume and 
   REQUIRE(j.begin_run(false).ok());
   Report r;
   REQUIRE(run_sync(src, dst, fake_options(), r, &j).ok());
-  REQUIRE(j.end_run(true).ok());
+  REQUIRE(j.end_run(false).ok());  // as if interrupted
   CHECK(r.stats.failures == 1);  // the listing of d1
   auto failures = j.failures();
   REQUIRE(failures.size() == 1);
@@ -607,7 +607,7 @@ TEST_CASE("fake: journal records failures and finalized directories, resume and 
     expect_mirrored(fresh_src, dst);
   }
 
-  SUBCASE("resuming skips finalized directories") {
+  SUBCASE("resuming an interrupted run skips finalized directories") {
     int lists_before = src.count("list");
     SyncOptions o = fake_options();
     o.resume = true;
@@ -616,14 +616,235 @@ TEST_CASE("fake: journal records failures and finalized directories, resume and 
     REQUIRE(run_sync(src, dst, o, r2, &j).ok());
     CHECK(src.count("list") == lists_before);  // the root was done, nothing listed
     CHECK(r2.stats.dirs_listed == 0);
+    REQUIRE(j.end_run(true).ok());
 
-    // A fresh run forgets the finalized directories.
-    REQUIRE(j.begin_run(false).ok());
-    CHECK_FALSE(j.is_done_dir(""));
+    // After a completed run there is nothing to resume: everything is walked.
+    REQUIRE(j.begin_run(true).ok());
+    Report r3;
+    REQUIRE(run_sync(src, dst, o, r3, &j).ok());
+    CHECK(r3.stats.dirs_listed == 3);
+  }
+
+  SUBCASE("a dry run leaves the journal alone") {
+    SyncOptions o = fake_options();
+    o.dry_run = true;
+    src.fail("open_read", "f0", Error{ErrorKind::Permission, "denied"}, 100);
+    Report r2;
+    Cancellation cancel;
+    Engine engine(src, dst, o, r2, &j, cancel);
+    REQUIRE(engine.run(j.failures()).ok());
+    CHECK(j.failures().size() == 1);
+    CHECK(j.failures()[0].path == "d1");
   }
 
   SUBCASE("a journal refuses another source/target pair") {
     auto other = Journal::open(tmp.sub("journal.sqlite"), "fake", "elsewhere");
     REQUIRE_FALSE(other.ok());
   }
+}
+
+TEST_CASE("fake: journal rows are cleared by deletions, metadata fixes and vanished sources") {
+  TempDir tmp;
+  auto journal = Journal::open(tmp.sub("j.sqlite"), "fake", "fake");
+  REQUIRE(journal.ok());
+  Journal& j = *journal.value();
+  Cancellation cancel;
+
+  FakeEndpoint src, dst;
+  populate(src);
+  dst.add_file("extra", "x");
+  dst.add_file("gone", "y");
+  SyncOptions o = fake_options();
+  o.delete_extra = true;
+  dst.fail("remove", "extra", Error{ErrorKind::Permission, "locked"}, 1);
+  REQUIRE(j.begin_run(false).ok());
+  Report r;
+  REQUIRE(run_sync(src, dst, o, r, &j).ok());
+  REQUIRE(j.end_run(true).ok());
+  CHECK(r.stats.deleted == 1);  // "gone"; the failed removal is not counted
+  CHECK(r.stats.failures == 1);
+  REQUIRE(j.failures().size() == 1);
+  CHECK(j.failures()[0].path == "extra");
+
+  // A metadata-only fix of a copied file: the owner differs after the copy.
+  dst.modify("d1/f1", [](FakeEndpoint::Node& n) { n.entry.uid = 7; });
+  dst.fail("set_metadata", "d1/f1", Error{ErrorKind::Permission, "locked"}, 1);
+  REQUIRE(j.begin_run(false).ok());
+  Report r2;
+  REQUIRE(run_sync(src, dst, o, r2, &j).ok());
+  REQUIRE(j.end_run(true).ok());
+  CHECK(r2.stats.deleted == 1);  // "extra" now
+  CHECK(r2.stats.failures == 1);
+  REQUIRE(j.failures().size() == 1);
+  CHECK(j.failures()[0].path == "d1/f1");
+
+  REQUIRE(j.begin_run(false).ok());
+  Report r3;
+  REQUIRE(run_sync(src, dst, o, r3, &j).ok());
+  REQUIRE(j.end_run(true).ok());
+  CHECK(r3.stats.metadata_fixed == 1);
+  CHECK(j.failures().empty());
+
+  // A failure whose source vanishes is dropped when retried.
+  src.fail("open_read", "f0", Error{ErrorKind::Permission, "denied"}, 1);
+  src.modify("f0", [](FakeEndpoint::Node& n) { n.entry.mtime = {3333, 0}; });
+  REQUIRE(j.begin_run(false).ok());
+  Report r4;
+  REQUIRE(run_sync(src, dst, o, r4, &j).ok());
+  REQUIRE(j.end_run(true).ok());
+  REQUIRE(j.failures().size() == 1);
+  dst.modify("f0", [](FakeEndpoint::Node&) {});
+  FakeEndpoint src2;
+  populate(src2);
+  src2.add_dir("other");
+  REQUIRE(j.begin_run(false).ok());
+  // Remove f0 from the source and from the target.
+  FakeEndpoint src3, dst3;
+  populate(src3);
+  REQUIRE(src3.remove("f0", EntryType::File).ok());
+  for (const RelPath& p : dst.paths()) {
+    auto n = dst.get(p);
+    if (n->entry.type == EntryType::File) dst3.add_file(p, n->content, n->entry.mode, n->entry.mtime);
+  }
+  Report r5;
+  Engine engine(src3, dst, o, r5, &j, cancel);
+  REQUIRE(dst.remove("f0", EntryType::File).ok());
+  REQUIRE(engine.run(j.failures()).ok());
+  CHECK(j.failures().empty());
+}
+
+TEST_CASE("fake: an exhausted deletion cap still reports blocked conflicts") {
+  FakeEndpoint src, dst;
+  src.add_file("conflict", "file");
+  dst.add_dir("conflict");
+  dst.add_file("conflict/inner", "x");
+  dst.add_file("extra1", "x");
+  dst.add_file("extra2", "x");
+  SyncOptions o = fake_options();
+  o.delete_extra = true;
+  o.max_delete = 1;
+  Report r;
+  REQUIRE(run_sync(src, dst, o, r).ok());
+  CHECK(r.stats.deleted == 1);
+  bool conflict_reported = false;
+  for (const Failure& f : r.failures()) conflict_reported |= f.path == "conflict";
+  CHECK(conflict_reported);
+  CHECK(r.stats.failures >= 1);
+}
+
+TEST_CASE("fake: a directory that cannot be created is reported once") {
+  FakeEndpoint src, dst;
+  populate(src);
+  dst.fail("mkdir", "d1", Error{ErrorKind::Permission, "denied"}, 100);
+  Report r;
+  REQUIRE(run_sync(src, dst, fake_options(), r).ok());
+  CHECK(r.stats.failures == 1);
+  CHECK(r.failures()[0].path == "d1");
+  CHECK(r.stats.files_copied == 1);  // f0
+
+  // Also in retry mode, where the group's directory itself is missing.
+  TempDir tmp;
+  auto journal = Journal::open(tmp.sub("j.sqlite"), "fake", "fake");
+  REQUIRE(journal.ok());
+  Cancellation cancel;
+  Report r2;
+  Engine engine(src, dst, fake_options(), r2, journal.value().get(), cancel);
+  REQUIRE(engine.run({Failure{"d1/f1", EntryType::File, Error{}}}).ok());
+  CHECK(r2.stats.failures == 1);
+}
+
+TEST_CASE("fake: retry rows under a failed directory are handled once") {
+  FakeEndpoint src, dst;
+  populate(src);
+  TempDir tmp;
+  auto journal = Journal::open(tmp.sub("j.sqlite"), "fake", "fake");
+  REQUIRE(journal.ok());
+  Cancellation cancel;
+  Report r;
+  Engine engine(src, dst, fake_options(), r, journal.value().get(), cancel);
+  std::vector<Failure> rows = {Failure{"d1", EntryType::Directory, Error{}},
+                               Failure{"d1/d2/f2", EntryType::File, Error{}}};
+  REQUIRE(engine.run(rows).ok());
+  CHECK(r.stats.files_copied == 2);  // d1/f1 and d1/d2/f2, each once
+  CHECK(r.stats.files_checked == 2);
+}
+
+TEST_CASE("fake: targets without mtimes compare sizes, targets without symlinks skip them") {
+  FakeEndpoint src, dst;
+  dst.caps.can_set_mtime = false;
+  dst.caps.has_symlinks = false;
+  populate(src);
+  Report r;
+  REQUIRE(run_sync(src, dst, fake_options(), r).ok());
+  CHECK(r.stats.files_copied == 3);
+  CHECK(r.stats.symlinks_skipped == 1);
+  CHECK(r.stats.symlinks_created == 0);
+  CHECK(r.stats.failures == 0);
+  CHECK_FALSE(dst.get("d1/l"));
+
+  src.modify("f0", [](FakeEndpoint::Node& n) { n.entry.mtime = {9999, 0}; });  // same size
+  Report r2;
+  REQUIRE(run_sync(src, dst, fake_options(), r2).ok());
+  CHECK(r2.stats.files_copied == 0);
+  CHECK(r2.stats.files_unchanged == 3);
+  CHECK(r2.stats.metadata_fixed == 0);
+}
+
+TEST_CASE("fake: an engine runs only once") {
+  FakeEndpoint src, dst;
+  Cancellation cancel;
+  Report r;
+  Engine engine(src, dst, fake_options(), r, nullptr, cancel);
+  REQUIRE(engine.run().ok());
+  CHECK_FALSE(engine.run().ok());
+}
+
+TEST_CASE("FS to FS: long names, symlinked roots and setuid bits") {
+  TempDir tmp;
+  std::string long_name(250, 'n');
+  tmp.write_file("src/" + long_name, "long");
+  tmp.write_file("src/plain", "p");
+  REQUIRE(symlink("src", tmp.sub("srclink").c_str()) == 0);
+  PosixEndpoint src(tmp.sub("srclink"));
+  PosixEndpoint dst(tmp.sub("dst"));
+  SyncOptions options = test_options();
+  Report r;
+  REQUIRE(run_sync(src, dst, options, r).ok());
+  CHECK(r.stats.failures == 0);
+  CHECK(r.stats.files_copied == 2);
+  CHECK(tmp.read_file("dst/" + long_name) == "long");
+  CHECK(src.describe() == tmp.sub("src"));  // canonical
+
+  if (is_root()) {
+    // chown clears setuid bits, so the mode is set after the owner.
+    REQUIRE(lchown(tmp.sub("src/plain").c_str(), 4321, 4321) == 0);
+    REQUIRE(chmod(tmp.sub("src/plain").c_str(), 04755) == 0);
+    Report r2;
+    REQUIRE(run_sync(src, dst, options, r2).ok());
+    auto st = dst.stat("plain").value();
+    CHECK(st.uid == 4321);
+    CHECK(st.mode == 04755);
+    // Changing only the owner must still restore the setuid bit on the target.
+    REQUIRE(lchown(tmp.sub("src/plain").c_str(), 4322, 4322) == 0);
+    REQUIRE(chmod(tmp.sub("src/plain").c_str(), 04755) == 0);
+    Report r3;
+    REQUIRE(run_sync(src, dst, options, r3).ok());
+    st = dst.stat("plain").value();
+    CHECK(st.uid == 4322);
+    CHECK(st.mode == 04755);
+  }
+}
+
+TEST_CASE("FS to FS: --no-mode gives copies the default mode") {
+  TempDir tmp;
+  tmp.write_file("src/f", "x", 0600);
+  PosixEndpoint src(tmp.sub("src"));
+  PosixEndpoint dst(tmp.sub("dst"));
+  SyncOptions options = test_options();
+  options.preserve_mode = false;
+  Report r;
+  REQUIRE(run_sync(src, dst, options, r).ok());
+  mode_t mask = umask(0);
+  umask(mask);
+  CHECK(dst.stat("f").value().mode == (0666 & ~static_cast<ModeBits>(mask)));
 }

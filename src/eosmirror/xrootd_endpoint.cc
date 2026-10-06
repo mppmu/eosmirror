@@ -448,8 +448,9 @@ Result<std::unique_ptr<FileReader>> XrdEndpoint::open_read(const RelPath& path) 
 Result<std::unique_ptr<FileWriter>> XrdEndpoint::open_write(const RelPath& path,
                                                             const CommitSpec& spec) {
   std::string abs = absolute(path);
-  std::string temp = parent_of(abs) + "/." + name_of(abs) + std::string(kTempMarker) +
-                     random_suffix();
+  std::string name = name_of(abs);
+  if (name.size() > 231) name.resize(231);  // keep the temporary name within NAME_MAX
+  std::string temp = parent_of(abs) + "/." + name + std::string(kTempMarker) + random_suffix();
   auto file = std::make_unique<XrdCl::File>();
   ModeBits mode = has(spec.fields, MetaFields::Mode) ? spec.metadata.mode : 0644;
   XrdCl::XRootDStatus st = file->Open(url_of(temp), XrdCl::OpenFlags::New | XrdCl::OpenFlags::Write,

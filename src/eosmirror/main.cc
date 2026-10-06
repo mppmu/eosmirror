@@ -50,17 +50,23 @@ int sync(const CliOptions& opts) {
     return kFatal;
   }
 
+  // A dry run reads the journal (for --retry-failed) but records nothing.
   std::unique_ptr<Journal> journal;
   if (!opts.journal.empty()) {
-    auto opened = Journal::open(opts.journal, source.value()->describe(), target.value()->describe());
+    std::string shard = std::to_string(opts.sync.shard_index) + "/" +
+                        std::to_string(opts.sync.shard_count);
+    auto opened = Journal::open(opts.journal, source.value()->describe(),
+                                target.value()->describe(), shard);
     if (!opened.ok()) {
       log::error(opened.error().describe());
       return kFatal;
     }
     journal = std::move(opened).value();
-    if (Status s = journal->begin_run(opts.sync.resume); !s.ok()) {
-      log::error(s.error().describe());
-      return kFatal;
+    if (!opts.sync.dry_run) {
+      if (Status s = journal->begin_run(opts.sync.resume); !s.ok()) {
+        log::error(s.error().describe());
+        return kFatal;
+      }
     }
   }
 
@@ -92,7 +98,7 @@ int sync(const CliOptions& opts) {
   finished = true;
   if (progress.joinable()) progress.join();
 
-  if (journal) {
+  if (journal && !opts.sync.dry_run) {
     if (Status s = journal->end_run(status.ok()); !s.ok()) log::error(s.error().describe());
   }
 

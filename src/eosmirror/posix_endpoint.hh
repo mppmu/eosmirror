@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include <cstdint>
+#include <mutex>
 #include <string>
 #include <string_view>
 
@@ -19,6 +21,8 @@ struct PosixOptions {
   bool verify_readback = false;
   // fsync files before the rename.
   bool fsync = false;
+  // The mode of copied files when modes are not preserved (0666 & ~umask).
+  ModeBits default_mode = 0644;
 };
 
 class PosixEndpoint : public Endpoint {
@@ -42,9 +46,14 @@ class PosixEndpoint : public Endpoint {
   // The absolute path of a relative one.
   std::string absolute(const RelPath& path) const;
 
+  // The mtime resolution of the file system under the root, probed once.
+  int32_t mtime_resolution() const;
+
  private:
   std::string root_;
   PosixOptions options_;
+  mutable std::once_flag probe_once_;
+  mutable int32_t probed_resolution_ = 1;
 };
 
 }  // namespace eosmirror

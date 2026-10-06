@@ -28,7 +28,8 @@ Result<CopyOutcome> copy_file(Endpoint& source, Endpoint& target, const RelPath&
   CommitSpec spec;
   spec.size = src.size;
   spec.metadata = src;
-  spec.fields = MetaFields::Mtime;
+  spec.fields = MetaFields::None;
+  if (options.preserve_mtime) spec.fields = spec.fields | MetaFields::Mtime;
   if (options.preserve_owner) spec.fields = spec.fields | MetaFields::Owner;
   if (options.preserve_mode) spec.fields = spec.fields | MetaFields::Mode;
   spec.checksum.type = type;

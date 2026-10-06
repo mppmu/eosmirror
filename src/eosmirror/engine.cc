@@ -3,8 +3,8 @@
 
 #include <algorithm>
 #include <atomic>
-#include <limits>
 #include <condition_variable>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -34,8 +34,10 @@ struct DirNode {
   std::optional<std::set<std::string>> only;  // restrict to these entry names
 
   std::atomic<int> pending{1};  // own processing plus unfinished entries
-  std::atomic<bool> touched{false};  // entries were created, replaced or removed
-  std::atomic<bool> failed{false};   // listing or metadata failed
+  std::atomic<bool> touched{false};        // entries were created, replaced or removed
+  std::atomic<bool> failed{false};         // listing, creation or metadata failed
+  std::atomic<bool> made_writable{false};  // the target's mode was relaxed for writing
+  std::mutex writable_mutex;
 };
 
 struct CopyJob {
@@ -62,6 +64,12 @@ std::string name_of(const RelPath& path) {
   return slash == std::string::npos ? path : path.substr(slash + 1);
 }
 
+bool is_under(const RelPath& path, const RelPath& dir) {
+  if (dir.empty()) return !path.empty();
+  return path.size() > dir.size() && path.compare(0, dir.size(), dir) == 0 &&
+         path[dir.size()] == '/';
+}
+
 }  // namespace
 
 struct Engine::Impl {
@@ -76,8 +84,6 @@ struct Engine::Impl {
         cancel(cnl),
         dirs(std::numeric_limits<size_t>::max(), /*lifo=*/true),
         copies(std::max<size_t>(1, options.max_backlog)) {
-    mtime_resolution = std::max(source.capabilities().mtime_resolution,
-                                target.capabilities().mtime_resolution);
     copy_options.preserve_owner = options.preserve_owner;
     copy_options.preserve_mode = options.preserve_mode;
     copy_options.verify = options.verify;
@@ -90,12 +96,18 @@ struct Engine::Impl {
   Stats& stats;
   Journal* journal;
   const Cancellation& cancel;
-  int32_t mtime_resolution;
   CopyOptions copy_options;
+
+  // Settled once the target root exists, since probing it may need that.
+  int32_t mtime_resolution = 1;
+  bool use_mtimes = true;    // the target stores mtimes: compare and set them
+  bool use_symlinks = true;  // the target has symlinks
+  bool relax_modes = false;  // make read-only target directories writable first
 
   WorkQueue<std::shared_ptr<DirNode>> dirs;
   WorkQueue<CopyJob> copies;
   std::vector<std::thread> threads;
+  bool ran = false;
 
   std::mutex done_mutex;
   std::condition_variable done_cv;
@@ -136,6 +148,7 @@ struct Engine::Impl {
     report.add_failure(std::move(f));
   }
 
+  // Drops the journal's record of an earlier failure of the path.
   void succeeded(const RelPath& path) {
     if (journal && !options.dry_run && prior_failures.count(path)) journal->clear_failure(path);
   }
@@ -145,9 +158,13 @@ struct Engine::Impl {
     MetaFields fields = MetaFields::None;
     if (options.preserve_owner && (src.uid != dst.uid || src.gid != dst.gid))
       fields = fields | MetaFields::Owner;
-    if (options.preserve_mode && src.type != EntryType::Symlink && src.mode != dst.mode)
+    bool mode_matters = options.preserve_mode && src.type != EntryType::Symlink;
+    if (mode_matters && src.mode != dst.mode) fields = fields | MetaFields::Mode;
+    // Changing the owner clears setuid and setgid bits, so the mode is
+    // reapplied afterwards.
+    if (mode_matters && has(fields, MetaFields::Owner) && (src.mode & 06000))
       fields = fields | MetaFields::Mode;
-    if (src.type != EntryType::File && !same_mtime(src.mtime, dst.mtime))
+    if (use_mtimes && src.type != EntryType::File && !same_mtime(src.mtime, dst.mtime))
       fields = fields | MetaFields::Mtime;
     return fields;
   }
@@ -164,6 +181,21 @@ struct Engine::Impl {
     return true;
   }
 
+  // Before changing entries of an existing target directory that may not be
+  // writable for us, adds the owner's rwx bits; finalize restores the mode.
+  void ensure_writable(const std::shared_ptr<DirNode>& node) {
+    if (!relax_modes || node->created || options.dry_run || node->made_writable) return;
+    std::lock_guard lock(node->writable_mutex);
+    if (node->made_writable) return;
+    if ((node->target.mode & 0700) != 0700) {
+      Entry relaxed = node->target;
+      relaxed.mode |= 0700;
+      Status s = retry([&] { return target.set_metadata(node->path, relaxed, MetaFields::Mode); });
+      if (!s.ok()) log::warn("cannot make ", node->path, " writable: ", s.error().describe());
+    }
+    node->made_writable = true;
+  }
+
   // ---- directory completion -------------------------------------------------
 
   void entry_done(const std::shared_ptr<DirNode>& node) {
@@ -171,15 +203,16 @@ struct Engine::Impl {
   }
 
   void finalize(const std::shared_ptr<DirNode>& node) {
-    if (!cancel.requested() && node->owned) {
-      MetaFields fields;
+    if (!cancel.requested() && node->owned && !node->failed) {
+      MetaFields fields = MetaFields::None;
       if (node->created) {
-        fields = MetaFields::Mtime;
+        if (use_mtimes) fields = fields | MetaFields::Mtime;
         if (options.preserve_owner) fields = fields | MetaFields::Owner;
         if (options.preserve_mode) fields = fields | MetaFields::Mode;
       } else {
         fields = differences(node->source, node->target);
-        if (node->touched) fields = fields | MetaFields::Mtime;
+        if (node->touched && use_mtimes) fields = fields | MetaFields::Mtime;
+        if (node->made_writable && options.preserve_mode) fields = fields | MetaFields::Mode;
         if (fields != MetaFields::None) stats.metadata_fixed.fetch_add(1);
       }
       if (!apply_metadata(node->path, node->source, fields)) node->failed = true;
@@ -227,18 +260,21 @@ struct Engine::Impl {
     std::unordered_map<std::string, Entry> dst_entries;
     if (!node->created) {
       auto dst_listed = retry([&] { return target.list(node->path); });
-      if (!dst_listed.ok()) {
-        if (dst_listed.error().kind != ErrorKind::NotFound || !create_dir(node)) {
-          node->failed = true;
-          if (dst_listed.error().kind != ErrorKind::NotFound)
-            fail(node->path, EntryType::Directory, dst_listed.error());
-          entry_done(node);
-          return;
-        }
-      } else {
+      if (dst_listed.ok()) {
         for (Entry& e : dst_listed.value()) {
           std::string name = e.name;
           dst_entries.emplace(std::move(name), std::move(e));
+        }
+      } else {
+        // The directory vanished since the parent was listed: recreate it.
+        Status created = dst_listed.error().kind == ErrorKind::NotFound
+                             ? create_dir(node)
+                             : Status(dst_listed.error());
+        if (!created.ok()) {
+          node->failed = true;
+          fail(node->path, EntryType::Directory, created.error());
+          entry_done(node);
+          return;
         }
       }
     }
@@ -267,29 +303,39 @@ struct Engine::Impl {
       if (it != dst_entries.end()) dst_entries.erase(it);
     }
 
-    if (node->owned && !node->only && !cancel.requested()) handle_extras(node, dst_entries);
+    if (node->only) {
+      // Names gone from both sides have nothing left to retry.
+      for (const std::string& name : *node->only) {
+        bool in_source = std::any_of(src_entries.begin(), src_entries.end(),
+                                     [&](const Entry& e) { return e.name == name; });
+        if (!in_source && !dst_entries.count(name)) succeeded(join(node->path, name));
+      }
+    } else if (node->owned && !cancel.requested()) {
+      handle_extras(node, dst_entries);
+    }
     entry_done(node);
   }
 
   // Creates the target directory of a node whose target does not exist.
-  bool create_dir(const std::shared_ptr<DirNode>& node) {
-    node->created = true;
-    if (node->parent) node->parent->touched = true;
-    stats.dirs_created.fetch_add(1);
-    if (options.dry_run) return true;
-    Status s = retry([&] { return target.mkdir(node->path, node->source.mode); });
-    if (s.ok()) return true;
-    if (s.error().kind == ErrorKind::Exists) {
-      // Another shard or a concurrent run got there first.
-      auto st = target.stat(node->path);
-      if (st.ok() && st.value().type == EntryType::Directory) {
-        node->created = false;
+  Status create_dir(const std::shared_ptr<DirNode>& node) {
+    if (node->parent) {
+      ensure_writable(node->parent);
+      node->parent->touched = true;
+    }
+    if (!options.dry_run) {
+      Status s = retry([&] { return target.mkdir(node->path, node->source.mode); });
+      if (!s.ok()) {
+        if (s.error().kind != ErrorKind::Exists) return s;
+        // Another shard or a concurrent run got there first.
+        auto st = target.stat(node->path);
+        if (!st.ok() || st.value().type != EntryType::Directory) return s;
         node->target = st.value();
-        return true;
+        return {};
       }
     }
-    fail(node->path, EntryType::Directory, s.error());
-    return false;
+    stats.dirs_created.fetch_add(1);
+    node->created = true;
+    return {};
   }
 
   // Removes a target entry that is in the way of a source entry of another
@@ -302,8 +348,17 @@ struct Engine::Impl {
                                         ", use --delete to replace it"});
       return false;
     }
+    ensure_writable(node);
     node->touched = true;
-    return delete_entry(path, existing);
+    Status removed = delete_tree(path, existing);
+    if (!removed.ok()) {
+      Error e = removed.error();
+      e.message = "cannot replace the " + std::string(to_string(existing.type)) +
+                  " on the target: " + e.message;
+      fail(path, wanted, e);
+      return false;
+    }
+    return true;
   }
 
   void handle_dir(const std::shared_ptr<DirNode>& node, const Entry& e, const Entry* existing) {
@@ -314,13 +369,22 @@ struct Engine::Impl {
     child->parent = node;
     child->owned = shard_owns(path);
     if (existing && existing->type != EntryType::Directory) {
-      if (!node->owned || !resolve_conflict(node, path, *existing, EntryType::Directory)) return;
+      if (!node->owned) {
+        log::warn("skipping ", path, " in this run: the target entry is a ",
+                  to_string(existing->type), " that another shard replaces");
+        return;
+      }
+      if (!resolve_conflict(node, path, *existing, EntryType::Directory)) return;
       existing = nullptr;
     }
     if (existing) {
       child->target = *existing;
-    } else if (!create_dir(child)) {
-      return;
+    } else {
+      Status created = create_dir(child);
+      if (!created.ok()) {
+        fail(path, EntryType::Directory, created.error());
+        return;
+      }
     }
     node->pending.fetch_add(1);
     if (!dirs.push(child)) entry_done(node);
@@ -333,20 +397,28 @@ struct Engine::Impl {
       if (!resolve_conflict(node, path, *existing, EntryType::File)) return;
       existing = nullptr;
     }
-    if (existing && existing->size == e.size && same_mtime(existing->mtime, e.mtime)) {
+    if (existing && existing->size == e.size &&
+        (!use_mtimes || same_mtime(existing->mtime, e.mtime))) {
       stats.files_unchanged.fetch_add(1);
       MetaFields fields = differences(e, *existing);
-      if (fields != MetaFields::None && apply_metadata(path, e, fields))
-        stats.metadata_fixed.fetch_add(1);
-      if (fields == MetaFields::None) succeeded(path);
+      if (!apply_metadata(path, e, fields)) return;
+      if (fields != MetaFields::None) stats.metadata_fixed.fetch_add(1);
+      succeeded(path);
       return;
     }
+    ensure_writable(node);
     node->pending.fetch_add(1);
     if (!copies.push(CopyJob{node, e})) entry_done(node);
   }
 
-  void handle_symlink(const std::shared_ptr<DirNode>& node, const Entry& e, const Entry* existing) {
+  void handle_symlink(const std::shared_ptr<DirNode>& node, const Entry& e,
+                      const Entry* existing) {
     RelPath path = join(node->path, e.name);
+    if (!use_symlinks) {
+      stats.symlinks_skipped.fetch_add(1);
+      log::debug("skipping symlink ", path, ": no symlinks on ", target.describe());
+      return;
+    }
     std::string link_target = rewrite_link(e.link_target);
     if (existing && existing->type != EntryType::Symlink) {
       if (!resolve_conflict(node, path, *existing, EntryType::Symlink)) return;
@@ -355,11 +427,12 @@ struct Engine::Impl {
     if (existing && existing->link_target == link_target) {
       stats.symlinks_unchanged.fetch_add(1);
       MetaFields fields = differences(e, *existing);
-      if (fields != MetaFields::None && apply_metadata(path, e, fields))
-        stats.metadata_fixed.fetch_add(1);
-      if (fields == MetaFields::None) succeeded(path);
+      if (!apply_metadata(path, e, fields)) return;
+      if (fields != MetaFields::None) stats.metadata_fixed.fetch_add(1);
+      succeeded(path);
       return;
     }
+    ensure_writable(node);
     node->touched = true;
     stats.symlinks_created.fetch_add(1);
     if (options.dry_run) return;
@@ -368,7 +441,8 @@ struct Engine::Impl {
       fail(path, EntryType::Symlink, s.error());
       return;
     }
-    MetaFields fields = MetaFields::Mtime;
+    MetaFields fields = MetaFields::None;
+    if (use_mtimes) fields = fields | MetaFields::Mtime;
     if (options.preserve_owner) fields = fields | MetaFields::Owner;
     if (apply_metadata(path, e, fields)) succeeded(path);
   }
@@ -383,55 +457,58 @@ struct Engine::Impl {
       RelPath path = join(node->path, name);
       if (target.is_temporary(name)) {
         bool stale = e.mtime.sec + options.stale_temp_age.count() < now;
-        if (stale && options.delete_extra) {
-          node->touched = true;
-          delete_entry(path, e);
-        } else if (stale) {
+        if (!stale) continue;
+        if (!options.delete_extra) {
           stats.stale_temps.fetch_add(1);
+          continue;
         }
-        continue;
-      }
-      stats.extras.fetch_add(1);
-      if (options.delete_extra) {
-        node->touched = true;
-        delete_entry(path, e);
       } else {
-        log::debug("extra entry on target: ", path);
+        stats.extras.fetch_add(1);
+        if (!options.delete_extra) {
+          log::debug("extra entry on target: ", path);
+          continue;
+        }
+      }
+      ensure_writable(node);
+      node->touched = true;
+      Status removed = delete_tree(path, e);
+      if (removed.ok()) {
+        succeeded(path);
+      } else if (!removed.error().message.starts_with("deletion cap") ||
+                 !delete_cap_reported.exchange(true)) {
+        fail(path, e.type, removed.error());
       }
     }
   }
 
-  // Deletes a target entry, directories recursively. Counts against the
-  // deletion cap. Returns whether the entry is gone.
-  bool delete_entry(const RelPath& path, const Entry& e) {
+  // Deletes a target entry, directories recursively, within the deletion
+  // cap. Reports nothing; the error of the first entry that could not be
+  // removed is returned.
+  Status delete_tree(const RelPath& path, const Entry& e) {
     if (e.type == EntryType::Directory) {
       auto listed = retry([&] { return target.list(path); });
-      if (!listed.ok()) {
-        fail(path, EntryType::Directory, listed.error());
-        return false;
-      }
+      if (!listed.ok()) return listed.error();
       for (const Entry& child : listed.value()) {
-        if (cancel.requested()) return false;
-        if (!delete_entry(join(path, child.name), child)) return false;
+        if (cancel.requested()) return Error{ErrorKind::Cancelled, "cancelled"};
+        Status s = delete_tree(join(path, child.name), child);
+        if (!s.ok()) return s;
       }
     }
     if (deletions.fetch_add(1) >= options.max_delete) {
       deletions.fetch_sub(1);
-      if (!delete_cap_reported.exchange(true))
-        fail(path, e.type,
-             Error{ErrorKind::Other, "deletion cap of " + std::to_string(options.max_delete) +
-                                         " reached, not deleting further entries"});
-      return false;
+      return Error{ErrorKind::Other, "deletion cap of " + std::to_string(options.max_delete) +
+                                         " reached, not deleting " + path};
+    }
+    log::info(options.dry_run ? "would delete " : "deleting ", to_string(e.type), " ", path);
+    if (!options.dry_run) {
+      Status s = retry([&] { return target.remove(path, e.type); });
+      if (!s.ok() && s.error().kind != ErrorKind::NotFound) {
+        deletions.fetch_sub(1);
+        return s;
+      }
     }
     stats.deleted.fetch_add(1);
-    log::info(options.dry_run ? "would delete " : "deleting ", to_string(e.type), " ", path);
-    if (options.dry_run) return true;
-    Status s = retry([&] { return target.remove(path, e.type); });
-    if (!s.ok() && s.error().kind != ErrorKind::NotFound) {
-      fail(path, e.type, s.error());
-      return false;
-    }
-    return true;
+    return {};
   }
 
   // ---- transfers -----------------------------------------------------------------
@@ -466,6 +543,8 @@ struct Engine::Impl {
   // ---- running ----------------------------------------------------------------------
 
   Status preflight() {
+    if (ran) return Error{ErrorKind::Other, "an engine runs only once"};
+    ran = true;
     if (options.preserve_owner && !target.capabilities().can_set_owner)
       return Error{ErrorKind::Permission,
                    "cannot set owners on " + target.describe() + " (use --no-owner to copy anyway)"};
@@ -475,8 +554,24 @@ struct Engine::Impl {
     return {};
   }
 
+  // Settles what the endpoints can do, once the target root exists.
+  void adapt_to_capabilities() {
+    Capabilities src = source.capabilities();
+    Capabilities dst = target.capabilities();
+    mtime_resolution = std::max(src.mtime_resolution, dst.mtime_resolution);
+    use_mtimes = dst.can_set_mtime;
+    use_symlinks = dst.has_symlinks;
+    relax_modes = !dst.can_set_owner && options.preserve_mode;
+    copy_options.preserve_mtime = use_mtimes;
+    if (!use_mtimes)
+      log::warn(target.describe(), " stores no mtimes: files are compared by size only");
+    if (!use_symlinks) log::warn(target.describe(), " has no symlinks: symlinks are skipped");
+    if (mtime_resolution > 1)
+      log::info("comparing mtimes at a resolution of ", mtime_resolution, " ns");
+  }
+
   // Prepares a node for a source directory: stats both sides and creates the
-  // target directory if needed. Returns nothing when the source is gone.
+  // target directory if needed.
   Result<std::shared_ptr<DirNode>> make_node(const RelPath& path) {
     auto src = retry([&] { return source.stat(path); });
     if (!src.ok()) return src.error();
@@ -492,8 +587,8 @@ struct Engine::Impl {
         return Error{ErrorKind::Exists, target.describe() + "/" + path + " is not a directory"};
       node->target = dst.value();
     } else if (dst.error().kind == ErrorKind::NotFound) {
-      if (!create_dir(node))
-        return Error{ErrorKind::Other, "cannot create " + target.describe() + "/" + path};
+      Status created = create_dir(node);
+      if (!created.ok()) return created.error();
     } else {
       return dst.error();
     }
@@ -501,6 +596,7 @@ struct Engine::Impl {
   }
 
   Status run_nodes(std::vector<std::shared_ptr<DirNode>> roots) {
+    adapt_to_capabilities();
     if (journal) {
       for (const Failure& f : journal->failures()) prior_failures.insert(f.path);
     }
@@ -523,6 +619,9 @@ struct Engine::Impl {
     for (auto& t : threads) t.join();
     threads.clear();
     if (cancel.requested()) return Error{ErrorKind::Cancelled, "run cancelled"};
+    for (auto& root : roots)
+      if (root->failed && !root->only)
+        return Error{ErrorKind::Other, "could not process " + source.describe() + "/" + root->path};
     return {};
   }
 };
@@ -545,11 +644,19 @@ Status Engine::run(const std::vector<Failure>& entries) {
   Status pre = impl_->preflight();
   if (!pre.ok()) return pre;
 
-  // Group the entries by parent directory; each group becomes a node that
+  // Entries below a failed directory are covered by that directory's walk.
+  std::set<RelPath> failed_dirs;
+  for (const Failure& f : entries)
+    if (f.type == EntryType::Directory) failed_dirs.insert(f.path);
+
+  // The rest is grouped by parent directory; each group becomes a node that
   // handles only those names, recursing into directories among them.
   std::map<RelPath, std::set<std::string>> groups;
   bool whole_tree = false;
   for (const Failure& f : entries) {
+    bool covered = std::any_of(failed_dirs.begin(), failed_dirs.end(),
+                               [&](const RelPath& d) { return is_under(f.path, d); });
+    if (covered) continue;
     if (f.path.empty())
       whole_tree = true;
     else
@@ -561,8 +668,9 @@ Status Engine::run(const std::vector<Failure>& entries) {
   for (auto& [dir, names] : groups) {
     auto node = impl_->make_node(dir);
     if (!node.ok()) {
-      if (node.error().kind == ErrorKind::NotFound && impl_->journal) {
-        for (const auto& name : names) impl_->journal->clear_failure(join(dir, name));
+      if (node.error().kind == ErrorKind::NotFound) {
+        if (impl_->journal && !impl_->options.dry_run)
+          for (const auto& name : names) impl_->journal->clear_failure(join(dir, name));
       } else {
         impl_->fail(dir, EntryType::Directory, node.error());
       }
