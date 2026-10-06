@@ -31,6 +31,27 @@ client for now. See [docs/design.md](docs/design.md).
 
 Extended attributes and ACLs are not replicated.
 
+## Compared with xrdcp and eos rclone
+
+`xrdcp -r --parallel N` copies a tree once with N transfers at a time. It
+copies the files that symlinks point to rather than the links, keeps no
+mtimes, owners or modes, and does not compare with an existing target: a
+rerun either fails on existing files or, with `--force`, writes them all
+again. Checksums are verified on request, and it can use third-party copy.
+
+`eos rclone` synchronizes a tree within one EOS instance (or a FUSE path and
+EOS). It lists the whole tree before copying, copies a file when the
+source is newer, keeps symlinks and mtimes, creates directories with a
+fixed mode, and sets no owners and verifies no checksums.
+
+eosmirror works between any two of local file systems, XRootD servers and
+EOS instances, directory by directory with bounded memory, copies a file
+when size or mtime differ, keeps symlinks, owners, modes and mtimes, writes
+atomically with checksums verified end to end where the endpoint computes
+them, retries and journals failures, and adapts its concurrency to the
+target. EOS to EOS copies stream through the client; third-party copy is
+planned.
+
 ## Usage
 
 ```
