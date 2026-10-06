@@ -107,6 +107,7 @@ struct Engine::Impl {
   bool use_symlinks = true;  // the target has symlinks
   bool symlink_owner = true;  // symlinks on the target have settable owners
   ModeBits mode_bits = 07777;  // the mode bits the target stores
+  bool target_verifies = false;  // the target computes checksums of stored files
   bool relax_modes = false;  // make read-only target directories writable first
 
   WorkQueue<std::shared_ptr<DirNode>> dirs;
@@ -291,6 +292,10 @@ struct Engine::Impl {
     for (Entry& e : src_entries) {
       if (cancel.requested()) break;
       if (node->only && !node->only->count(e.name)) continue;
+      if (source.is_temporary(e.name)) {
+        log::debug("skipping the source's temporary ", join(node->path, e.name));
+        continue;
+      }
       auto it = dst_entries.find(e.name);
       const Entry* existing = it == dst_entries.end() ? nullptr : &it->second;
       switch (e.type) {
@@ -542,7 +547,9 @@ struct Engine::Impl {
         log::debug("copied ", path, " (", result.value().bytes, " bytes)");
         if (copy_options.verify && !result.value().verified) {
           stats.files_unverified.fetch_add(1);
-          if (!job.dir->unverified_warned.exchange(true))
+          // Worth a warning where the target normally verifies (an EOS
+          // directory without checksums), not for local targets.
+          if (target_verifies && !job.dir->unverified_warned.exchange(true))
             log::warn("no checksum verification for files copied into ",
                       job.dir->path.empty() ? "." : job.dir->path);
         }
@@ -577,6 +584,7 @@ struct Engine::Impl {
     use_symlinks = dst.has_symlinks;
     symlink_owner = dst.symlink_owner;
     mode_bits = dst.mode_bits;
+    target_verifies = dst.checksum != ChecksumType::None;
     if (options.preserve_mode && mode_bits != 07777)
       log::info(target.describe(), " stores only the permission bits of modes");
     relax_modes = !dst.can_set_owner && options.preserve_mode;

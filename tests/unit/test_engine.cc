@@ -888,3 +888,17 @@ TEST_CASE("FS to FS: --require-checksum reads local copies back") {
   CHECK(r.stats.files_unverified == 0);
   CHECK(tmp.read_file("dst/f") == "verify me");
 }
+
+TEST_CASE("fake: temporaries of the source are not entries of the tree") {
+  FakeEndpoint src, dst;
+  populate(src);
+  src.add_file(".tmp-upload", "half written");
+  src.add_file("d1/.tmp-other", "half written");
+  Report r;
+  REQUIRE(run_sync(src, dst, fake_options(), r).ok());
+  CHECK(r.stats.files_copied == 3);
+  CHECK(r.stats.files_checked == 3);
+  CHECK(r.stats.failures == 0);
+  CHECK_FALSE(dst.get(".tmp-upload"));
+  CHECK_FALSE(dst.get("d1/.tmp-other"));
+}

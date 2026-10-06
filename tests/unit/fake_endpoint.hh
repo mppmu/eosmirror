@@ -118,6 +118,7 @@ class FakeEndpoint : public eosmirror::Endpoint {
 
   std::string describe() const override { return name_; }
   eosmirror::Capabilities capabilities() const override { return caps; }
+  bool is_temporary(std::string_view name) const override { return name.rfind(".tmp-", 0) == 0; }
 
   Result<Entry> stat(const RelPath& path) override {
     if (auto err = check("stat", path)) return *err;
