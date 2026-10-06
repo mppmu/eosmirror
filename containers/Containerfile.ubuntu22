@@ -1,0 +1,7 @@
+# Build and test environment for Ubuntu 22.04 (gcc 11, the oldest supported compiler).
+FROM ubuntu:22.04
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      g++ cmake make ninja-build git ca-certificates libsqlite3-dev \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /build

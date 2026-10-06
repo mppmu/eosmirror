@@ -1,0 +1,7 @@
+# Build and test environment for Ubuntu 24.04.
+FROM ubuntu:24.04
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      g++ cmake make ninja-build git ca-certificates libsqlite3-dev libxrootd-client-dev \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /build

@@ -1,0 +1,8 @@
+# Build and test environment for Enterprise Linux 9 (CERN's EOS platform).
+FROM almalinux:9
+RUN dnf -y install epel-release dnf-plugins-core \
+ && dnf config-manager --set-enabled crb \
+ && dnf -y install gcc-c++ cmake make ninja-build git sqlite-devel libasan libtsan libubsan \
+      xrootd-client-devel \
+ && dnf clean all
+WORKDIR /build
