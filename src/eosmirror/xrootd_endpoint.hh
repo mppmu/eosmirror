@@ -13,9 +13,14 @@ class XRootDStatus;
 
 namespace eosmirror {
 
+// Applies the process-wide XrdCl settings the endpoints rely on.
+void configure_xrdcl();
+
 struct XrdOptions {
-  // Writes of one file kept in flight before write() blocks.
-  int write_window = 4;
+  // Writes of one file kept in flight before write() blocks. Storage nodes
+  // handle the requests of a connection one after another, so a deep
+  // window only queues.
+  int write_window = 2;
 };
 
 // An endpoint on an XRootD server, given as root://host[:port]//path.

@@ -63,7 +63,11 @@ Options:
       --fsync              fsync files on local targets before renaming them
       --rewrite-links A=B  rewrite symlink targets starting with A to start with B
       --checkers N         directory workers (default 8)
-      --transfers N        file copy workers (default 8)
+      --transfers N        file copy workers, the most running at once (default 8)
+      --min-transfers N    copies running at the start (default 4); the limit then
+                           rises while throughput improves and falls on retries
+      --no-adaptive        run all transfers at once from the start
+      --write-window N     writes per file in flight on XRootD targets (default 2)
       --max-backlog N      queued copies before directory workers wait (default 10000)
       --buffer-size SIZE   copy buffer per transfer, e.g. 8M (default)
       --retries N          retries per operation (default 2)
@@ -169,6 +173,9 @@ Result<CliOptions> parse_command_line(int argc, char** argv) {
   });
   integer("--checkers", [&](long long n) { sync.checkers = static_cast<int>(n); });
   integer("--transfers", [&](long long n) { sync.transfers = static_cast<int>(n); });
+  integer("--min-transfers", [&](long long n) { sync.min_transfers = static_cast<int>(n); });
+  flag("--no-adaptive", [&] { sync.adaptive = false; });
+  integer("--write-window", [&](long long n) { opts.endpoints.xrootd.write_window = static_cast<int>(n); });
   integer("--max-backlog", [&](long long n) { sync.max_backlog = static_cast<size_t>(n); });
   value("--buffer-size", [&](const std::string& v) -> Status {
     auto n = parse_size(v);

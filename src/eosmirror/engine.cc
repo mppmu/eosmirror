@@ -46,6 +46,47 @@ struct CopyJob {
   Entry source;
 };
 
+// Limits how many transfers run at once; the limit can change while
+// transfers wait.
+class Gate {
+ public:
+  explicit Gate(size_t limit) : limit_(limit) {}
+
+  bool acquire() {
+    std::unique_lock lock(mutex_);
+    cv_.wait(lock, [&] { return closed_ || active_ < limit_; });
+    if (closed_) return false;
+    ++active_;
+    return true;
+  }
+  void release() {
+    std::lock_guard lock(mutex_);
+    --active_;
+    cv_.notify_all();
+  }
+  void set_limit(size_t limit) {
+    std::lock_guard lock(mutex_);
+    limit_ = limit;
+    cv_.notify_all();
+  }
+  size_t limit() const {
+    std::lock_guard lock(mutex_);
+    return limit_;
+  }
+  void close() {
+    std::lock_guard lock(mutex_);
+    closed_ = true;
+    cv_.notify_all();
+  }
+
+ private:
+  mutable std::mutex mutex_;
+  std::condition_variable cv_;
+  size_t limit_;
+  size_t active_ = 0;
+  bool closed_ = false;
+};
+
 uint64_t fnv1a(std::string_view s) {
   uint64_t h = 14695981039346656037ULL;
   for (unsigned char c : s) {
@@ -84,7 +125,8 @@ struct Engine::Impl {
         journal(jnl),
         cancel(cnl),
         dirs(std::numeric_limits<size_t>::max(), /*lifo=*/true),
-        copies(std::max<size_t>(1, options.max_backlog)) {
+        copies(std::max<size_t>(1, options.max_backlog)),
+        gate(initial_limit()) {
     copy_options.preserve_owner = options.preserve_owner;
     copy_options.preserve_mode = options.preserve_mode;
     copy_options.verify = options.verify || options.require_checksum;
@@ -111,8 +153,17 @@ struct Engine::Impl {
 
   WorkQueue<std::shared_ptr<DirNode>> dirs;
   WorkQueue<CopyJob> copies;
+  Gate gate;
   std::vector<std::thread> threads;
+  std::thread controller;
+  std::atomic<bool> controller_stop{false};
   bool ran = false;
+
+  size_t max_transfers() const { return static_cast<size_t>(std::max(1, options.transfers)); }
+  size_t initial_limit() const {
+    if (!options.adaptive) return max_transfers();
+    return std::min(max_transfers(), static_cast<size_t>(std::max(1, options.min_transfers)));
+  }
 
   std::mutex done_mutex;
   std::condition_variable done_cv;
@@ -534,7 +585,58 @@ struct Engine::Impl {
     TransferSlot& slot = *report.slots[index];
     while (auto job = copies.pop()) {
       stats.queued_copies.fetch_sub(1);
+      if (!gate.acquire()) {
+        entry_done(job->dir);
+        continue;
+      }
       run_copy(*job, buffer, slot);
+      gate.release();
+    }
+  }
+
+  // Adjusts the transfer limit every interval: up while throughput (bytes
+  // or files) improves, down by a quarter when operations were retried,
+  // which is how an overloaded target shows.
+  void controller_loop() {
+    const size_t min_limit = initial_limit();
+    const size_t max_limit = max_transfers();
+    uint64_t last_bytes = stats.bytes_written.load();
+    uint64_t last_files = stats.files_copied.load();
+    uint64_t last_retries = stats.retries.load();
+    double best_bytes = 0, best_files = 0;
+    auto last = std::chrono::steady_clock::now();
+    while (!controller_stop) {
+      if (cancel.wait(options.adapt_interval)) break;
+      if (controller_stop) break;
+      auto now = std::chrono::steady_clock::now();
+      double secs = std::chrono::duration<double>(now - last).count();
+      last = now;
+      uint64_t bytes = stats.bytes_written.load(), files = stats.files_copied.load();
+      uint64_t retries = stats.retries.load();
+      double byte_rate = static_cast<double>(bytes - last_bytes) / secs;
+      double file_rate = static_cast<double>(files - last_files) / secs;
+      bool retried = retries != last_retries;
+      last_bytes = bytes;
+      last_files = files;
+      last_retries = retries;
+
+      size_t limit = gate.limit(), wanted = limit;
+      if (retried) {
+        wanted = std::max(min_limit, limit - std::max<size_t>(1, limit / 4));
+        best_bytes = byte_rate;
+        best_files = file_rate;
+      } else if (byte_rate > best_bytes * 1.05 || file_rate > best_files * 1.05) {
+        best_bytes = std::max(best_bytes, byte_rate);
+        best_files = std::max(best_files, file_rate);
+        wanted = std::min(max_limit, limit + 2);
+      }
+      if (wanted != limit) {
+        log::info("transfer limit ", limit, " -> ", wanted, " (", format_bytes(static_cast<uint64_t>(byte_rate)),
+                  "/s, ", static_cast<uint64_t>(file_rate), " files/s",
+                  retried ? ", retries" : "", ")");
+        gate.set_limit(wanted);
+        stats.transfer_limit.store(wanted);
+      }
     }
   }
 
@@ -650,22 +752,28 @@ struct Engine::Impl {
       std::lock_guard lock(done_mutex);
       roots_pending = roots.size();
     }
-    size_t transfers = static_cast<size_t>(std::max(1, options.transfers));
+    size_t transfers = max_transfers();
     report.init_slots(transfers, options.max_backlog);
+    stats.transfer_limit.store(gate.limit());
     for (int i = 0; i < std::max(1, options.checkers); ++i)
       threads.emplace_back([this] { checker_loop(); });
     for (size_t i = 0; i < transfers; ++i)
       threads.emplace_back([this, i] { transfer_loop(i); });
+    if (options.adaptive && initial_limit() < transfers)
+      controller = std::thread([this] { controller_loop(); });
     for (auto& root : roots) dirs.push(root);
 
     {
       std::unique_lock lock(done_mutex);
       done_cv.wait(lock, [&] { return roots_pending == 0 || cancel.requested(); });
     }
+    controller_stop = true;
     dirs.close(/*drain=*/true);
     copies.close(/*drain=*/true);
+    gate.close();
     for (auto& t : threads) t.join();
     threads.clear();
+    if (controller.joinable()) controller.join();
     if (cancel.requested()) return Error{ErrorKind::Cancelled, "run cancelled"};
     for (auto& root : roots)
       if (root->failed && !root->only)

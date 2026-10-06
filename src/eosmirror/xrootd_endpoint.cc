@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "eosmirror/xrootd_endpoint.hh"
 
+#include <XrdCl/XrdClDefaultEnv.hh>
 #include <XrdCl/XrdClFile.hh>
 #include <XrdCl/XrdClFileSystem.hh>
 #include <XrdCl/XrdClStatus.hh>
@@ -289,8 +290,20 @@ Error XrdEndpoint::xrd_error(const XrdCl::XRootDStatus& st, const std::string& c
   return Error{kind, context + ": " + st.ToStr()};
 }
 
+// Settings of the XrdCl library for the whole process, applied once.
+void configure_xrdcl() {
+  static bool done = false;
+  if (done) return;
+  done = true;
+  // XrdCl's write recovery reopens a file after a dropped connection and
+  // resends only the pending writes, which can never complete an atomic
+  // upload; failing fast and copying the file again is the right recovery.
+  XrdCl::DefaultEnv::GetEnv()->PutInt("RecoverWrites", 0);
+}
+
 Result<std::unique_ptr<XrdEndpoint>> XrdEndpoint::create(const std::string& url,
                                                          XrdOptions options) {
+  configure_xrdcl();
   XrdCl::URL parsed(url);
   if (!parsed.IsValid() || parsed.GetProtocol().empty() || parsed.GetHostName().empty())
     return Error{ErrorKind::Other, "invalid XRootD URL: " + url};

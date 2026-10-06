@@ -23,6 +23,7 @@ SyncOptions test_options() {
   SyncOptions o;
   o.checkers = 2;
   o.transfers = 2;
+  o.adaptive = false;
   o.buffer_size = 64 * 1024;
   o.retry.attempts = 3;
   o.retry.initial_delay = std::chrono::milliseconds(1);
@@ -923,4 +924,25 @@ TEST_CASE("fake: read-only directories get their mtime before their mode") {
   CHECK(r2.stats.failures == 0);
   CHECK(dst.get("ro")->entry.mtime == Timespec{2346, 0});
   CHECK(dst.get("ro")->entry.mode == 0555);
+}
+
+TEST_CASE("fake: adaptive concurrency starts low, grows and completes the tree") {
+  FakeEndpoint src, dst;
+  for (int d = 0; d < 10; ++d) {
+    src.add_dir("d" + std::to_string(d));
+    for (int f = 0; f < 40; ++f) src.add_file("d" + std::to_string(d) + "/f" + std::to_string(f), std::string(5000, 'x'));
+  }
+  SyncOptions o = fake_options();
+  o.adaptive = true;
+  o.transfers = 6;
+  o.min_transfers = 2;
+  o.adapt_interval = std::chrono::seconds(0);  // adjust as fast as the controller can
+  o.retry.initial_delay = std::chrono::milliseconds(0);
+  Report r;
+  REQUIRE(run_sync(src, dst, o, r).ok());
+  CHECK(r.stats.files_copied == 400);
+  CHECK(r.stats.failures == 0);
+  CHECK(r.stats.transfer_limit.load() >= 2);
+  CHECK(r.stats.transfer_limit.load() <= 6);
+  expect_mirrored(src, dst);
 }

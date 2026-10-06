@@ -141,10 +141,11 @@ std::string ProgressDisplay::render_lines() {
   size_t slots = report_.slots.size();
   size_t queued = s.queued_copies.load();
   size_t backlog_max = std::max<size_t>(report_.backlog_capacity, 1);
+  size_t limit = std::min<size_t>(s.transfer_limit.load(), slots);
   out << "written " << format_bytes(s.bytes_written.load()) << " at "
       << rate(s.bytes_written.load(), secs) << "   transfers "
       << bar(slots ? static_cast<double>(active) / static_cast<double>(slots) : 0, kBarWidth / 2)
-      << " " << active << "/" << slots << "   backlog "
+      << " " << active << "/" << limit << " of " << slots << "   backlog "
       << bar(static_cast<double>(queued) / static_cast<double>(backlog_max), kBarWidth / 2) << " "
       << queued << "\n";
 

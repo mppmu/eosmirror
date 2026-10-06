@@ -43,6 +43,7 @@ struct Stats {
   Counter retries{0};
   Counter failures{0};
   Counter queued_copies{0};  // copies waiting in the backlog
+  Counter transfer_limit{0};  // copies allowed to run at once right now
 };
 
 // What one transfer worker is copying right now, for the display.

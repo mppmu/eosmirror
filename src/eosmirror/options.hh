@@ -27,7 +27,13 @@ struct RetryPolicy {
 
 struct SyncOptions {
   int checkers = 8;         // directory workers
-  int transfers = 8;        // file copy workers
+  int transfers = 8;        // file copy workers, the most that run at once
+  // Adaptive concurrency: start with min_transfers running copies, raise the
+  // limit while throughput improves, lower it when operations have to be
+  // retried. Off: all transfers run at once.
+  bool adaptive = true;
+  int min_transfers = 4;
+  std::chrono::seconds adapt_interval{15};
   size_t max_backlog = 10000;  // queued copies before the checkers block
   size_t buffer_size = 8u << 20;
 

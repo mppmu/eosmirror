@@ -330,6 +330,7 @@ EosEndpoint::EosEndpoint(std::string url, std::string server, std::string root, 
 
 Result<std::unique_ptr<EosEndpoint>> EosEndpoint::create(const std::string& url,
                                                          XrdOptions options) {
+  configure_xrdcl();
   XrdCl::URL parsed(url);
   if (!parsed.IsValid() || parsed.GetHostName().empty())
     return Error{ErrorKind::Other, "invalid EOS URL: " + url};
