@@ -213,6 +213,15 @@ class Selftest {
   void cleanup() {
     if (link_exists_) check("remove the symlink", target_.remove(link_, EntryType::Symlink));
     if (file_exists_) check("remove the file", target_.remove(file_, EntryType::File));
+    // Failed steps may have left entries behind (such as a server's own
+    // temporaries); remove whatever is still there.
+    auto left = target_.list(dir_);
+    if (left.ok()) {
+      for (const Entry& e : left.value()) {
+        Status s = target_.remove(join(dir_, e.name), e.type);
+        if (!s.ok()) fail("remove leftover " + e.name, s.error().describe());
+      }
+    }
     check("remove the directory", target_.remove(dir_, EntryType::Directory));
   }
 
