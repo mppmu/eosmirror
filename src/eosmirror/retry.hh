@@ -7,6 +7,7 @@
 
 #include "eosmirror/cancellation.hh"
 #include "eosmirror/error.hh"
+#include "eosmirror/log.hh"
 #include "eosmirror/options.hh"
 
 namespace eosmirror {
@@ -22,6 +23,8 @@ auto with_retries(const RetryPolicy& policy, const Cancellation& cancel,
         cancel.requested())
       return result;
     retries.fetch_add(1, std::memory_order_relaxed);
+    log::warn("retry ", attempt, " of ", policy.attempts - 1, " after: ",
+              result.error().describe());
     if (cancel.wait(policy.delay(attempt))) return result;
   }
 }
