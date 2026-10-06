@@ -12,6 +12,7 @@ add_library(eosmirror_core STATIC
   eosmirror/log.cc
   eosmirror/posix_endpoint.cc
   eosmirror/report.cc
+  eosmirror/selftest.cc
   eosmirror/types.cc
 )
 target_include_directories(eosmirror_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/generated)

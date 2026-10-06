@@ -15,6 +15,7 @@
 #include "eosmirror/engine.hh"
 #include "eosmirror/eos_endpoint.hh"
 #include "eosmirror/posix_endpoint.hh"
+#include "eosmirror/selftest.hh"
 #include "temp_dir.hh"
 
 using namespace eosmirror;
@@ -378,4 +379,19 @@ TEST_CASE("EOS to EOS between directories") {
   CHECK(must(b.endpoint->stat("f")).mtime == Timespec{1600000000, 1});
   CHECK((b.endpoint->query_checksum(b.endpoint->absolute("f")).value() == spec.checksum));
   CHECK(must(b.endpoint->stat("d/l")).link_target == "../f");
+}
+
+TEST_CASE("selftest against EOS") {
+  if (!base_url()) return;
+  for (const char* layout : {"replica2", "raid6", "nochecksum"}) {
+    INFO("layout ", layout);
+    RemoteDir dir("selftest", layout);
+    SelftestReport r = run_selftest(*dir.endpoint, true);
+    for (const SelftestCheck& c : r.checks) {
+      INFO(c.name, ": ", c.message);
+      CHECK(c.ok);
+    }
+    CHECK(r.ok());
+    CHECK(dir.endpoint->list("").value().empty());
+  }
 }

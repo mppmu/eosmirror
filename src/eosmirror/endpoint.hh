@@ -20,8 +20,10 @@ struct Capabilities {
   int32_t mtime_resolution = 1;
   // Whether owner and group can be set to arbitrary ids.
   bool can_set_owner = false;
-  // Whether modes can be set.
+  // Whether modes can be set, and which of the bits (plain XRootD carries
+  // only the permission bits, not setuid, setgid and sticky).
   bool can_set_mode = true;
+  ModeBits mode_bits = 07777;
   // Whether mtimes can be set. Without it, files are compared by size only.
   bool can_set_mtime = true;
   // Whether symlinks exist on the endpoint.

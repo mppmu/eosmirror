@@ -27,6 +27,12 @@ rc=0; "$bin" sync 2>/dev/null || rc=$?
 rc=0; "$bin" sync "$work/src" 2>/dev/null || rc=$?
 [[ $rc == 2 ]] || fail "usage error exit code, got $rc"
 
+# The self-test passes on a local directory and cleans up.
+mkdir "$work/target"
+"$bin" selftest "${owner_opt[@]}" "$work/target" > "$work/selftest.out" || fail "selftest: $(cat "$work/selftest.out")"
+grep -q 'The target is ready' "$work/selftest.out" || fail "selftest output: $(cat "$work/selftest.out")"
+[[ -z $(ls -A "$work/target") ]] || fail "selftest left files behind"
+
 # A dry run creates nothing.
 "$bin" sync -n -q "${owner_opt[@]}" "$work/src" "$work/dst" > "$work/dry.out"
 [[ -e $work/dst ]] && fail "dry run created the target"

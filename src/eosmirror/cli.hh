@@ -11,7 +11,7 @@
 
 namespace eosmirror {
 
-enum class Command { Sync, Failures, Help, Version };
+enum class Command { Sync, Selftest, Failures, Help, Version };
 
 struct CliOptions {
   Command command = Command::Help;

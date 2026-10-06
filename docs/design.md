@@ -57,12 +57,16 @@ Writers are atomic: `commit()` applies metadata, verifies the size and
 checksum and renames into place; `abort()` removes the temporary file.
 
 Each endpoint describes its capabilities: mtime resolution (POSIX probes
-it on the target), whether owners, modes and mtimes can be set, whether
-symlinks exist, which checksum it computes. The engine adapts: comparison
-granularity, size-only comparison without mtimes, skipped symlinks, which
-checksum to compute, what the preflight checks. Without the privilege to
-set owners, the engine makes read-only target directories writable while
-it changes their entries and restores their mode afterwards.
+it on the target), whether owners, modes (and which mode bits) and mtimes
+can be set, whether symlinks exist and have owners, which checksum it
+computes. The engine adapts: comparison granularity, size-only comparison
+without mtimes, skipped symlinks, masked mode comparison, which checksum to
+compute, what the preflight checks. Without the privilege to set owners,
+the engine makes read-only target directories writable while it changes
+their entries and restores their mode afterwards.
+
+`eosmirror selftest TARGET` exercises all of this in a temporary directory
+under a target before a long run and reports what the target cannot do.
 
 Endpoint operations are synchronous; concurrency comes from the worker pools
 below. Remote endpoints may pipeline internally (for instance several writes

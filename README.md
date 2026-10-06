@@ -35,8 +35,14 @@ Extended attributes and ACLs are not replicated.
 
 ```
 eosmirror sync [options] SOURCE TARGET
+eosmirror selftest [--no-owner] TARGET
 eosmirror failures JOURNAL
 ```
+
+`selftest` checks, in a temporary directory under the target, that
+everything a run needs works there (creating files with verified checksums,
+modes, owners, mtimes, symlinks, listings, removal) and says what the target
+cannot do.
 
 Endpoints are local paths or XRootD URLs. An XRootD URL that answers to
 EOS commands is treated as EOS (symlinks, owners, nanosecond mtimes, atomic

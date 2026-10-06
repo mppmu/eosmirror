@@ -41,12 +41,15 @@ Result<uint64_t> parse_size(const std::string& text) {
 
 std::string usage() {
   return R"(Usage: eosmirror sync [options] SOURCE TARGET
+       eosmirror selftest [--no-owner] TARGET
        eosmirror failures JOURNAL
        eosmirror --version
 
-Replicates the tree at SOURCE to TARGET: copies files that are missing or
-differ in size or mtime, recreates symlinks, and sets owners, modes and
-mtimes. Endpoints are local paths; XRootD and EOS URLs follow.
+sync replicates the tree at SOURCE to TARGET: copies files that are missing
+or differ in size or mtime, recreates symlinks, and sets owners, modes and
+mtimes. selftest checks, in a temporary directory under TARGET, that
+everything a run needs works there. Endpoints are local paths or XRootD
+URLs (root://host//path); an EOS instance is recognized, or named with eos://.
 
 Options:
   -n, --dry-run            report what would be done, change nothing
@@ -94,6 +97,23 @@ Result<CliOptions> parse_command_line(int argc, char** argv) {
     if (args.size() != 2) return usage_error("usage: eosmirror failures JOURNAL");
     opts.command = Command::Failures;
     opts.journal = args[1];
+    return opts;
+  }
+  if (command == "selftest") {
+    opts.command = Command::Selftest;
+    for (size_t i = 1; i < args.size(); ++i) {
+      if (args[i] == "--no-owner")
+        opts.sync.preserve_owner = false;
+      else if (args[i] == "-v" || args[i] == "--verbose")
+        opts.log_level = LogLevel::Debug;
+      else if (args[i][0] == '-' && args[i].size() > 1)
+        return usage_error("unknown option for selftest: " + args[i]);
+      else if (opts.target.empty())
+        opts.target = args[i];
+      else
+        return usage_error("selftest takes one TARGET");
+    }
+    if (opts.target.empty()) return usage_error("selftest needs a TARGET");
     return opts;
   }
   if (command != "sync") return usage_error("unknown command: " + command);

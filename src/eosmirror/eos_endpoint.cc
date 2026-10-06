@@ -324,6 +324,7 @@ EosEndpoint::EosEndpoint(std::string url, std::string server, std::string root, 
   caps_.has_symlinks = true;
   caps_.symlink_owner = false;
   caps_.can_set_mode = true;
+  caps_.mode_bits = 07777;
   caps_.checksum = ChecksumType::Adler32;
 }
 

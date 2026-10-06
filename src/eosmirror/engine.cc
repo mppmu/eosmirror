@@ -105,6 +105,7 @@ struct Engine::Impl {
   bool use_mtimes = true;    // the target stores mtimes: compare and set them
   bool use_symlinks = true;  // the target has symlinks
   bool symlink_owner = true;  // symlinks on the target have settable owners
+  ModeBits mode_bits = 07777;  // the mode bits the target stores
   bool relax_modes = false;  // make read-only target directories writable first
 
   WorkQueue<std::shared_ptr<DirNode>> dirs;
@@ -164,7 +165,8 @@ struct Engine::Impl {
     if (owner_matters && (src.uid != dst.uid || src.gid != dst.gid))
       fields = fields | MetaFields::Owner;
     bool mode_matters = options.preserve_mode && src.type != EntryType::Symlink;
-    if (mode_matters && src.mode != dst.mode) fields = fields | MetaFields::Mode;
+    if (mode_matters && (src.mode & mode_bits) != (dst.mode & mode_bits))
+      fields = fields | MetaFields::Mode;
     // Changing the owner clears setuid and setgid bits, so the mode is
     // reapplied afterwards.
     if (mode_matters && has(fields, MetaFields::Owner) && (src.mode & 06000))
@@ -573,6 +575,9 @@ struct Engine::Impl {
     use_mtimes = dst.can_set_mtime;
     use_symlinks = dst.has_symlinks;
     symlink_owner = dst.symlink_owner;
+    mode_bits = dst.mode_bits;
+    if (options.preserve_mode && mode_bits != 07777)
+      log::info(target.describe(), " stores only the permission bits of modes");
     relax_modes = !dst.can_set_owner && options.preserve_mode;
     copy_options.preserve_mtime = use_mtimes;
     if (!use_mtimes)

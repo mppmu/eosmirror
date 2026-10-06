@@ -61,7 +61,9 @@ Entry entry_from_stat(std::string name, const XrdCl::StatInfo& info) {
   if (e.type == EntryType::File) e.size = info.GetSize();
   e.mtime = {static_cast<int64_t>(info.GetModTime()), 0};
   if (info.ExtendedFormat()) {
-    std::string oct = info.GetModeAsOctString();
+    // The raw octal string from the server ("0640"); GetModeAsOctString()
+    // would render it symbolically despite its name.
+    std::string oct = info.GetModeAsString();
     e.mode = static_cast<ModeBits>(std::strtoul(oct.c_str(), nullptr, 8)) & 07777;
   }
   return e;
@@ -329,6 +331,7 @@ XrdEndpoint::XrdEndpoint(std::string url, std::string server, std::string root,
   caps_.mtime_resolution = 1000000000;
   caps_.can_set_owner = false;
   caps_.can_set_mode = true;
+  caps_.mode_bits = 0777;
   caps_.can_set_mtime = false;
   caps_.has_symlinks = false;
   caps_.checksum = ChecksumType::None;

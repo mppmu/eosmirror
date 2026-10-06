@@ -7,6 +7,7 @@
 #include "eosmirror/engine.hh"
 #include "eosmirror/journal.hh"
 #include "eosmirror/log.hh"
+#include "eosmirror/selftest.hh"
 #include "eosmirror/version.hh"
 
 using namespace eosmirror;
@@ -36,6 +37,28 @@ int list_failures(const std::string& file) {
     std::printf("%s\t%s\t%s\n", std::string(to_string(f.type)).c_str(), f.path.c_str(),
                 f.error.describe().c_str());
   return kOk;
+}
+
+int selftest(const CliOptions& opts) {
+  auto target = make_endpoint(opts.target, opts.endpoints);
+  if (!target.ok()) {
+    log::error(target.error().describe());
+    return kFatal;
+  }
+  Capabilities caps = target.value()->capabilities();
+  std::printf("Self-test of %s\n", target.value()->describe().c_str());
+  std::printf("  mtimes: %s, symlinks: %s, owners: %s, checksum: %s\n",
+              caps.can_set_mtime ? "yes" : "no (files are compared by size only)",
+              caps.has_symlinks ? "yes" : "no (skipped)",
+              caps.can_set_owner ? "yes" : "no (needs --no-owner)",
+              std::string(to_string(caps.checksum)).c_str());
+  SelftestReport report = run_selftest(*target.value(), opts.sync.preserve_owner);
+  for (const SelftestCheck& c : report.checks)
+    std::printf("  %-7s %s%s%s\n", c.skipped ? "skip" : c.ok ? "ok" : "FAILED", c.name.c_str(),
+                c.message.empty() ? "" : ": ", c.message.c_str());
+  bool usable = report.ok() && (caps.can_set_owner || !opts.sync.preserve_owner);
+  std::printf("%s\n", usable ? "The target is ready." : "The target is not ready for a run.");
+  return usable ? kOk : kFailures;
 }
 
 int sync(const CliOptions& opts) {
@@ -124,6 +147,7 @@ int main(int argc, char** argv) {
     case Command::Version: std::printf("eosmirror %s\n", EOSMIRROR_VERSION); return kOk;
     case Command::Help: std::fputs(usage().c_str(), stdout); return kOk;
     case Command::Failures: return list_failures(opts.journal);
+    case Command::Selftest: return selftest(opts);
     case Command::Sync: return sync(opts);
   }
   return kUsage;

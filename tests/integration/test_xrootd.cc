@@ -13,6 +13,7 @@
 #include "doctest/doctest.h"
 #include "eosmirror/engine.hh"
 #include "eosmirror/posix_endpoint.hh"
+#include "eosmirror/selftest.hh"
 #include "eosmirror/xrootd_endpoint.hh"
 #include "temp_dir.hh"
 
@@ -208,4 +209,16 @@ TEST_CASE("FS to xrootd and back") {
   CHECK(tmp.read_file("back/a.txt") == "hello world");
   CHECK(tmp.read_file("back/big.bin") == tmp.read_file("src/big.bin"));
   CHECK(tmp.read_file("back/sub/nested/file") == pattern(1000));
+}
+
+TEST_CASE("selftest against xrootd") {
+  if (!base_url()) return;
+  RemoteDir dir("selftest");
+  SelftestReport r = run_selftest(*dir.endpoint, false);
+  for (const SelftestCheck& c : r.checks) {
+    INFO(c.name, ": ", c.message);
+    CHECK(c.ok);
+  }
+  CHECK(r.ok());
+  CHECK(dir.endpoint->list("").value().empty());
 }
