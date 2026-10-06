@@ -6,6 +6,7 @@
 #include <XrdCl/XrdClURL.hh>
 #include <XrdCl/XrdClXRootDResponses.hh>
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -280,9 +281,18 @@ class EosUploadWriter : public FileWriter {
     if (offset != written_) return Error{ErrorKind::Other, "non-sequential write to " + url_};
     XrdCl::XRootDStatus st =
         file_->Write(offset, static_cast<uint32_t>(data.size()), data.data());
-    if (!st.IsOK()) return XrdEndpoint::xrd_error(st, "write " + url_);
+    if (!st.IsOK()) return stalled(XrdEndpoint::xrd_error(st, "write " + url_));
+    last_ack_ = std::chrono::steady_clock::now();
     written_ += data.size();
     return {};
+  }
+
+  Error stalled(Error e) const {
+    auto secs = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::steady_clock::now() - last_ack_)
+                    .count();
+    e.message += " (last write acknowledged " + std::to_string(secs) + " s earlier)";
+    return e;
   }
 
   Result<CommitInfo> commit(const CommitSpec& spec) override {
@@ -294,7 +304,7 @@ class EosUploadWriter : public FileWriter {
     }
     XrdCl::XRootDStatus st = file_->Close();
     file_.reset();
-    if (!st.IsOK()) return XrdEndpoint::xrd_error(st, "close " + url_);
+    if (!st.IsOK()) return stalled(XrdEndpoint::xrd_error(st, "close " + url_));
     return CommitInfo{};
   }
 
@@ -311,6 +321,7 @@ class EosUploadWriter : public FileWriter {
   std::string url_;
   int window_;
   uint64_t written_ = 0;
+  std::chrono::steady_clock::time_point last_ack_ = std::chrono::steady_clock::now();
 };
 
 }  // namespace
@@ -330,7 +341,6 @@ EosEndpoint::EosEndpoint(std::string url, std::string server, std::string root, 
 
 Result<std::unique_ptr<EosEndpoint>> EosEndpoint::create(const std::string& url,
                                                          XrdOptions options) {
-  configure_xrdcl();
   XrdCl::URL parsed(url);
   if (!parsed.IsValid() || parsed.GetHostName().empty())
     return Error{ErrorKind::Other, "invalid EOS URL: " + url};
@@ -592,7 +602,7 @@ Result<std::unique_ptr<FileWriter>> EosEndpoint::open_write(const RelPath& path,
   if (!stored.ok()) return stored.error();
   std::string url = url_of(abs) + "?eos.atomic=1" + std::string(kApp);
   if (has(spec.fields, MetaFields::Mtime)) url += "&eos.mtime=" + format_timespec(spec.metadata.mtime);
-  auto file = std::make_unique<XrdCl::File>();
+  auto file = new_write_file();
   ModeBits mode = has(spec.fields, MetaFields::Mode) ? spec.metadata.mode : 0644;
   XrdCl::XRootDStatus st = file->Open(url, XrdCl::OpenFlags::Delete | XrdCl::OpenFlags::Write,
                                       static_cast<XrdCl::Access::Mode>(mode & 0777));

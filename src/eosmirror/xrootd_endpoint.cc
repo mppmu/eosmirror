@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "eosmirror/xrootd_endpoint.hh"
 
-#include <XrdCl/XrdClDefaultEnv.hh>
 #include <XrdCl/XrdClFile.hh>
 #include <XrdCl/XrdClFileSystem.hh>
 #include <XrdCl/XrdClStatus.hh>
@@ -11,6 +10,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -196,10 +196,21 @@ class XrdWriter : public FileWriter {
 
   void completed(size_t index, const XrdCl::XRootDStatus& st) {
     std::lock_guard lock(mutex_);
-    if (!st.IsOK() && !error_) error_ = XrdEndpoint::xrd_error(st, "write " + temp_);
+    if (!st.IsOK() && !error_) error_ = stalled(XrdEndpoint::xrd_error(st, "write " + temp_));
+    if (st.IsOK()) last_ack_ = std::chrono::steady_clock::now();
     free_.push_back(index);
     --in_flight_;
     cv_.notify_all();
+  }
+
+  // Adds how long ago the server last acknowledged a write, which tells a
+  // stalled connection from an immediate refusal.
+  Error stalled(Error e) const {
+    auto secs = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::steady_clock::now() - last_ack_)
+                    .count();
+    e.message += " (last write acknowledged " + std::to_string(secs) + " s earlier)";
+    return e;
   }
 
   void drain() {
@@ -218,7 +229,7 @@ class XrdWriter : public FileWriter {
                                            ", expected " + std::to_string(spec.size)};
     XrdCl::XRootDStatus st = file_->Close();
     file_.reset();
-    if (!st.IsOK()) return XrdEndpoint::xrd_error(st, "close " + temp_);
+    if (!st.IsOK()) return stalled(XrdEndpoint::xrd_error(st, "close " + temp_));
     if (spec.checksum.type != ChecksumType::None &&
         spec.checksum.type == ep_.capabilities().checksum) {
       auto stored = ep_.query_checksum(temp_);
@@ -249,6 +260,7 @@ class XrdWriter : public FileWriter {
   uint64_t written_ = 0;
   bool temp_exists_ = true;
   bool verified_ = false;
+  std::chrono::steady_clock::time_point last_ack_ = std::chrono::steady_clock::now();
 };
 
 }  // namespace
@@ -290,20 +302,18 @@ Error XrdEndpoint::xrd_error(const XrdCl::XRootDStatus& st, const std::string& c
   return Error{kind, context + ": " + st.ToStr()};
 }
 
-// Settings of the XrdCl library for the whole process, applied once.
-void configure_xrdcl() {
-  static bool done = false;
-  if (done) return;
-  done = true;
-  // XrdCl's write recovery reopens a file after a dropped connection and
-  // resends only the pending writes, which can never complete an atomic
-  // upload; failing fast and copying the file again is the right recovery.
-  XrdCl::DefaultEnv::GetEnv()->PutInt("RecoverWrites", 0);
+// A file for writing, with XrdCl's write recovery off: after a dropped
+// connection, recovery reopens the file and resends only the pending
+// writes, which can never complete an upload that the server verifies;
+// failing fast and copying the file again is the right recovery.
+std::unique_ptr<XrdCl::File> XrdEndpoint::new_write_file() {
+  auto file = std::make_unique<XrdCl::File>();
+  file->SetProperty("WriteRecovery", "false");
+  return file;
 }
 
 Result<std::unique_ptr<XrdEndpoint>> XrdEndpoint::create(const std::string& url,
                                                          XrdOptions options) {
-  configure_xrdcl();
   XrdCl::URL parsed(url);
   if (!parsed.IsValid() || parsed.GetProtocol().empty() || parsed.GetHostName().empty())
     return Error{ErrorKind::Other, "invalid XRootD URL: " + url};
@@ -475,7 +485,7 @@ Result<std::unique_ptr<FileWriter>> XrdEndpoint::open_write(const RelPath& path,
   std::string name = name_of(abs);
   if (name.size() > 231) name.resize(231);  // keep the temporary name within NAME_MAX
   std::string temp = parent_of(abs) + "/." + name + std::string(kTempMarker) + random_suffix();
-  auto file = std::make_unique<XrdCl::File>();
+  auto file = new_write_file();
   ModeBits mode = has(spec.fields, MetaFields::Mode) ? spec.metadata.mode : 0644;
   XrdCl::XRootDStatus st = file->Open(url_of(temp), XrdCl::OpenFlags::New | XrdCl::OpenFlags::Write,
                                       access_mode(mode));

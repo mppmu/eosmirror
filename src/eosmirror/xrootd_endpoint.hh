@@ -7,14 +7,12 @@
 #include "eosmirror/endpoint.hh"
 
 namespace XrdCl {
+class File;
 class FileSystem;
 class XRootDStatus;
 }  // namespace XrdCl
 
 namespace eosmirror {
-
-// Applies the process-wide XrdCl settings the endpoints rely on.
-void configure_xrdcl();
 
 struct XrdOptions {
   // Writes of one file kept in flight before write() blocks. Storage nodes
@@ -61,6 +59,9 @@ class XrdEndpoint : public Endpoint {
 
   // Converts an XrdCl status into an error with the given context.
   static Error xrd_error(const XrdCl::XRootDStatus& status, const std::string& context);
+
+  // A file object for an upload, with write recovery turned off.
+  static std::unique_ptr<XrdCl::File> new_write_file();
 
  protected:
   XrdEndpoint(std::string url, std::string server, std::string root, XrdOptions options);
