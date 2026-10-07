@@ -63,10 +63,13 @@ class Gate {
     ++active_;
     return true;
   }
+  // One freed slot lets one waiter in. Waking all of them for each release
+  // cost much system time with many small files and a limit below the
+  // number of transfer threads.
   void release() {
     std::lock_guard lock(mutex_);
     --active_;
-    cv_.notify_all();
+    cv_.notify_one();
   }
   void set_limit(size_t limit) {
     std::lock_guard lock(mutex_);
