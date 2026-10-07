@@ -348,7 +348,7 @@ std::string eos_encoded_path(const std::string& abs_path) {
 }
 
 std::string eos_request_path(const std::string& abs_path) {
-  return eos_encoded_path(abs_path) + "?eos.encodepath=1";
+  return eos_encoded_path(abs_path) + "?eos.encodepath=1" + std::string(kApp);
 }
 
 std::string symlink_request(const std::string& abs_path, const std::string& target) {
@@ -633,7 +633,7 @@ Result<Entry> EosEndpoint::stat(const RelPath& path) {
 Result<Entry> EosEndpoint::stat_abs(const std::string& abs) {
   std::string request = request_path(abs).value();
   XrdCl::Buffer arg;
-  arg.FromString(request + "&mgm.pcmd=stat" + std::string(kApp));
+  arg.FromString(request + "&mgm.pcmd=stat");
   XrdCl::Buffer* response = nullptr;
   XrdCl::XRootDStatus st = fs_->Query(XrdCl::QueryCode::OpaqueFile, arg, response);
   if (!st.IsOK()) return xrd_error(st, "stat " + url_of(abs));
@@ -665,7 +665,7 @@ Result<Entry> EosEndpoint::stat_abs(const std::string& abs) {
   e.mtime = {static_cast<int64_t>(v[11]), static_cast<int32_t>(v[14])};
   if (e.type == EntryType::Symlink) {
     XrdCl::Buffer link_arg;
-    link_arg.FromString(request + "&mgm.pcmd=readlink" + std::string(kApp));
+    link_arg.FromString(request + "&mgm.pcmd=readlink");
     XrdCl::Buffer* link_response = nullptr;
     st = fs_->Query(XrdCl::QueryCode::OpaqueFile, link_arg, link_response);
     if (!st.IsOK()) return xrd_error(st, "readlink " + url_of(abs));
@@ -887,7 +887,7 @@ Status EosEndpoint::set_metadata_abs(const std::string& abs, const Entry& md, Me
 Status EosEndpoint::fsctl(const std::string& abs, const std::string& command,
                           const std::string& args) {
   XrdCl::Buffer arg;
-  arg.FromString(request_path(abs).value() + "&mgm.pcmd=" + command + args + std::string(kApp));
+  arg.FromString(request_path(abs).value() + "&mgm.pcmd=" + command + args);
   XrdCl::Buffer* response = nullptr;
   XrdCl::XRootDStatus st = fs_->Query(XrdCl::QueryCode::OpaqueFile, arg, response);
   if (!st.IsOK()) return xrd_error(st, command + " " + url_of(abs));
@@ -914,7 +914,7 @@ Result<std::unique_ptr<FileReader>> EosEndpoint::open_read(const RelPath& path) 
 Result<std::unique_ptr<FileWriter>> EosEndpoint::open_write(const RelPath& path,
                                                             const CommitSpec& spec) {
   std::string abs = absolute(path);
-  std::string request = request_path(abs).value() + "&eos.atomic=1" + std::string(kApp);
+  std::string request = request_path(abs).value() + "&eos.atomic=1";
   if (has(spec.fields, MetaFields::Mtime))
     request += "&eos.mtime=" + format_timespec(spec.metadata.mtime);
   std::string url = open_url(request);

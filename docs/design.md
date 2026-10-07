@@ -257,6 +257,8 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
   XRootD requests (mkdir, rm, rmdir, checksum queries, which take
   `<path>?eos.encodepath=1`), in OpaqueFile queries and as `mgm.path` of
   commands. The MGM decodes only paths with this prefix.
+- Every request carries `eos.app=eosmirror`, under which EOS's IO statistics
+  (`eos io stat -x`) account eosmirror's traffic.
 - Text commands are opened as the file `root://mgm//proc/user/?mgm.cmd=...`
   and read; the reply is `mgm.proc.stdout=...&mgm.proc.stderr=...&mgm.proc.retc=N`
   with N an errno. Protobuf commands are sent the same way as

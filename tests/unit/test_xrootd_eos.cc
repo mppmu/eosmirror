@@ -48,9 +48,9 @@ TEST_CASE("EOS request paths are encoded so that names cannot add parameters") {
         "/#curl#/eos/a%20b/x%3Feos.ruid%3D0%26eos.atomic%3D0%23%25");
   CHECK(eos_encoded_path("/eos/Gr\xc3\xb6\xc3\x9f" "e\n") == "/#curl#/eos/Gr%C3%B6%C3%9Fe%0A");
   std::string request = eos_request_path("/eos/d/x?eos.ruid=0&eos.rgid=0");
-  CHECK(request == "/#curl#/eos/d/x%3Feos.ruid%3D0%26eos.rgid%3D0?eos.encodepath=1");
+  CHECK(request == "/#curl#/eos/d/x%3Feos.ruid%3D0%26eos.rgid%3D0?eos.encodepath=1&eos.app=eosmirror");
   CHECK(request.find('?') == request.rfind('?'));
-  CHECK(request.find('&') == std::string::npos);
+  CHECK(request.substr(0, request.find('?')).find('&') == std::string::npos);
 }
 
 TEST_CASE("endpoint URLs keep their protocol and opaque parameters") {
@@ -73,7 +73,7 @@ TEST_CASE("endpoint URLs keep their protocol and opaque parameters") {
   CHECK(with_cgi("/data/f", cgi) == "/data/f?authz=token&xrd.wantprot=krb5");
   CHECK(with_cgi("/data/f", "") == "/data/f");
   CHECK(with_cgi(eos_request_path("/eos/a b"), cgi) ==
-        "/#curl#/eos/a%20b?eos.encodepath=1&authz=token&xrd.wantprot=krb5");
+        "/#curl#/eos/a%20b?eos.encodepath=1&eos.app=eosmirror&authz=token&xrd.wantprot=krb5");
   CHECK(with_cgi("root://mgm//proc/user/?mgm.cmd=whoami", cgi) ==
         "root://mgm//proc/user/?mgm.cmd=whoami&authz=token&xrd.wantprot=krb5");
 }
