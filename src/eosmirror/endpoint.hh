@@ -55,7 +55,17 @@ class FileReader {
   // caller that takes them in order.
   virtual Result<Chunk> read_chunk(uint64_t offset, uint64_t end, BufferPool& pool);
 
-  // The file's current size and mtime, to detect changes during the copy.
+  // The file as its copy starts, given its entry from the listing: the size
+  // to read and the metadata for the target. The default stats the file.
+  // Readers that can tell more cheaply that the file still has its listed
+  // size take the listed entry (EOS, whose stat goes to the namespace).
+  virtual Result<Entry> state(const Entry& listed);
+
+  // Whether the file, once read, is still as state() found it. The default
+  // stats it again and compares size and mtime.
+  virtual Result<bool> unchanged(const Entry& state);
+
+  // The file's current size and mtime.
   virtual Result<Entry> stat() = 0;
 };
 
@@ -161,6 +171,14 @@ inline Result<Chunk> FileReader::read_chunk(uint64_t offset, uint64_t end, Buffe
   if (!got.ok()) return got.error();
   chunk.size = got.value();
   return chunk;
+}
+
+inline Result<Entry> FileReader::state(const Entry& /*listed*/) { return stat(); }
+
+inline Result<bool> FileReader::unchanged(const Entry& state) {
+  auto now = stat();
+  if (!now.ok()) return now.error();
+  return now.value().size == state.size && now.value().mtime == state.mtime;
 }
 
 }  // namespace eosmirror

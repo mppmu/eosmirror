@@ -178,24 +178,47 @@ std::string format_timespec(const Timespec& t) {
   return buf;
 }
 
-// Reads through XRootD, but stats through the MGM: an open file's stat
-// comes from the storage node, whose replica has only seconds of mtime.
-class EosReader : public FileReader {
+// Reads from a storage node. The listing has the file's exact metadata
+// (nanosecond mtime, owners), so a copy takes it from there while the open
+// replica has the listed size. The storage node's stat of the replica, which
+// comes with the open, has the file's size (the logical size of
+// erasure-coded files) but the replica's own mtime, in seconds
+// (fst/XrdFstOfsFile.cc stat): a change during the copy shows in its stat
+// after the read. A file whose size differs from the listing has changed
+// since; it is stated through the MGM before and after reading.
+class EosReader : public XrdReader {
  public:
-  EosReader(EosEndpoint& ep, std::unique_ptr<FileReader> inner, RelPath path)
-      : ep_(ep), inner_(std::move(inner)), path_(std::move(path)) {}
-  Result<size_t> read(uint64_t offset, std::span<std::byte> buf) override {
-    return inner_->read(offset, buf);
+  EosReader(EosEndpoint& ep, std::unique_ptr<XrdCl::File> file, std::string url, int window,
+            RelPath path)
+      : XrdReader(std::move(file), std::move(url), window), ep_(ep), path_(std::move(path)) {}
+
+  Result<Entry> state(const Entry& listed) override {
+    auto opened = file_stat(false);
+    if (!opened.ok()) return opened.error();
+    if (opened.value().size == listed.size) {
+      replica_ = opened.value();
+      return listed;
+    }
+    log::debug(path_, " has another size than listed, stating it");
+    return stat();
   }
-  Result<Chunk> read_chunk(uint64_t offset, uint64_t end, BufferPool& pool) override {
-    return inner_->read_chunk(offset, end, pool);
+
+  Result<bool> unchanged(const Entry& state) override {
+    if (!replica_) return FileReader::unchanged(state);
+    // Nothing was read. The MGM serves empty files itself, with a stat of
+    // zeros (mgm/ofs/XrdMgmOfsFile.cc).
+    if (replica_->size == 0) return true;
+    auto now = file_stat(true);
+    if (!now.ok()) return now.error();
+    return now.value().size == replica_->size && now.value().mtime == replica_->mtime;
   }
+
   Result<Entry> stat() override { return ep_.stat(path_); }
 
  private:
   EosEndpoint& ep_;
-  std::unique_ptr<FileReader> inner_;
   RelPath path_;
+  std::optional<Entry> replica_;  // the replica at the open, when the listing was taken
 };
 
 // Writes through EOS's atomic upload: the file is created under its final
@@ -906,9 +929,11 @@ Result<Checksum> EosEndpoint::stored_checksum(const RelPath& path, const Entry& 
 }
 
 Result<std::unique_ptr<FileReader>> EosEndpoint::open_read(const RelPath& path) {
-  auto inner = XrdEndpoint::open_read(path);
-  if (!inner.ok()) return inner.error();
-  return std::unique_ptr<FileReader>(new EosReader(*this, std::move(inner).value(), path));
+  std::string abs = absolute(path);
+  auto file = open_file(abs);
+  if (!file.ok()) return file.error();
+  return std::unique_ptr<FileReader>(
+      new EosReader(*this, std::move(file).value(), url_of(abs), options_.read_window, path));
 }
 
 Result<std::unique_ptr<FileWriter>> EosEndpoint::open_write(const RelPath& path,

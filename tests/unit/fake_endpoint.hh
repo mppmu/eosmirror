@@ -54,6 +54,10 @@ class FakeEndpoint : public eosmirror::Endpoint {
   eosmirror::Capabilities caps;
   std::function<void(std::string_view op, const RelPath& path)> hook;
   bool utimes_needs_write = false;  // like EOS: utimes requires write access
+  // Like EOS: readers take the listed entry as the file's state while the
+  // file has the listed size at the open, and tell changes during the read
+  // by the size and mtime it had at the open, without a stat.
+  bool readers_take_listing = false;
   // Like a user other than root: creating and removing entries requires
   // the owner's write bit on the directory.
   bool entries_need_write = false;
@@ -101,6 +105,14 @@ class FakeEndpoint : public eosmirror::Endpoint {
     auto it = nodes_.find(path);
     if (it == nodes_.end()) return std::nullopt;
     return it->second;
+  }
+
+  // Removes an entry and everything below it, e.g. from a hook.
+  void erase(const RelPath& path) {
+    std::lock_guard lock(mutex_);
+    std::erase_if(nodes_, [&](const auto& n) {
+      return n.first == path || n.first.starts_with(path + "/");
+    });
   }
 
   // Changes an entry in place, e.g. from a hook.
@@ -207,7 +219,7 @@ class FakeEndpoint : public eosmirror::Endpoint {
       return Error{ErrorKind::IsADirectory, "open " + path};
     if (it->second.entry.type != eosmirror::EntryType::File)
       return Error{ErrorKind::Other, "open " + path + ": not a regular file"};
-    return std::unique_ptr<eosmirror::FileReader>(new Reader(*this, path));
+    return std::unique_ptr<eosmirror::FileReader>(new Reader(*this, path, it->second.entry));
   }
 
   Result<std::unique_ptr<eosmirror::FileWriter>> open_write(
@@ -221,7 +233,8 @@ class FakeEndpoint : public eosmirror::Endpoint {
  private:
   class Reader : public eosmirror::FileReader {
    public:
-    Reader(FakeEndpoint& ep, RelPath path) : ep_(ep), path_(std::move(path)) {}
+    Reader(FakeEndpoint& ep, RelPath path, Entry at_open)
+        : ep_(ep), path_(std::move(path)), at_open_(std::move(at_open)) {}
     Result<size_t> read(uint64_t offset, std::span<std::byte> buf) override {
       if (auto err = ep_.check("read", path_)) return *err;
       std::lock_guard lock(ep_.mutex_);
@@ -235,9 +248,25 @@ class FakeEndpoint : public eosmirror::Endpoint {
     }
     Result<Entry> stat() override { return ep_.stat(path_); }
 
+    Result<Entry> state(const Entry& listed) override {
+      took_listing_ = ep_.readers_take_listing && at_open_.size == listed.size;
+      if (took_listing_) return listed;
+      return FileReader::state(listed);
+    }
+
+    Result<bool> unchanged(const Entry& state) override {
+      if (!took_listing_) return FileReader::unchanged(state);
+      std::lock_guard lock(ep_.mutex_);
+      auto it = ep_.nodes_.find(path_);
+      if (it == ep_.nodes_.end()) return ep_.not_found(path_);
+      return it->second.entry.size == at_open_.size && it->second.entry.mtime == at_open_.mtime;
+    }
+
    private:
     FakeEndpoint& ep_;
     RelPath path_;
+    Entry at_open_;
+    bool took_listing_ = false;
   };
 
   class Writer : public eosmirror::FileWriter {

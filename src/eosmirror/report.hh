@@ -37,6 +37,7 @@ struct Stats {
   Counter symlinks_skipped{0};  // the target has no symlinks
   Counter metadata_fixed{0};
   Counter specials_skipped{0};
+  Counter vanished{0};  // listed on the source, but gone when handled
   Counter extras{0};
   Counter deleted{0};
   Counter stale_temps{0};

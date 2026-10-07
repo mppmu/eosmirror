@@ -94,6 +94,7 @@ std::string Report::summary(bool dry_run) const {
     << " skipped\n"
     << "  metadata " << would << "fixed: " << stats.metadata_fixed.load() << "\n"
     << "  special files skipped: " << stats.specials_skipped.load() << "\n"
+    << "  vanished from the source: " << stats.vanished.load() << "\n"
     << "  extra entries on target: " << stats.extras.load() << ", " << would
     << "deleted: " << stats.deleted.load() << ", stale temporaries: " << stats.stale_temps.load()
     << "\n"

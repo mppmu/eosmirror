@@ -22,15 +22,21 @@ A run walks the source tree directory by directory and makes the target match:
   unmounted file system or a broken server than a tree to delete: such a run
   stops without deleting anything. A missing source stops a run before it
   starts.
+- Files and directories that vanish from the source between the listing of
+  their directory and their copy or walk are counted as such, and are no
+  failures: the source changed, and the next run finds them gone. They do
+  count towards `--max-consecutive-failures`, so that a source that goes
+  away as a whole stops the run.
 
 Every copy writes to a temporary name (or uses EOS's atomic upload) and
 renames into place, so an interrupted run never leaves a partial file under
 the real name. Owner, mode and mtime are applied to the temporary file before
 the rename, so a file never appears with wrong metadata either. The target
-mtime is always the source mtime as observed *before* reading the file. If
-the source changed while it was read (size or mtime differ afterwards), the
-copy is reported as "changed" and retried; whatever was renamed into place
-carries the old mtime, so a later run copies it again.
+mtime is always the source mtime as observed *before* reading the file (by a
+stat, or for EOS sources from the listing, see below). If the source changed
+while it was read (size or mtime differ afterwards), the copy is reported as
+"changed" and retried; whatever was renamed into place carries the old mtime,
+so a later run copies it again.
 
 Checksums (adler32, through zlib) are computed while streaming and compared
 with what an endpoint stores: an EOS or XRootD target with the checksum it
@@ -131,16 +137,30 @@ root is finalized and the queues are drained.
 
 Separate pools matter because a tree of tiny files is bound by metadata
 latency and a tree of huge files by bandwidth. The number of transfers
-running at once adapts: it starts at `--min-transfers` and every 10 s rises
-by half (at least 2) while the throughput in bytes or files beats the one
-measured at the previous limit by more than 5 %, up to `--transfers`. It
-falls by a quarter, down to the start value, when copies had to be retried
-for errors of the target (opening, writing or committing a file), which is
-how an overloaded target shows; retries for a changing or failing source do
-not count. The interval after a decrease only measures the lower limit. The
-throughput to beat decays by 0.5 % per interval, so that a record from a
-faster part of the tree blocks growth only for a while, and a flat
-throughput tries a higher limit about every 100 s.
+running at once adapts: it starts at `--min-transfers` (4) and every 10 s
+rises by half (at least 2) while the throughput in bytes or files beats the
+one measured at the previous limit by more than 5 %, up to `--max-transfers`
+(64). A rise after which the throughput falls more than 10 % short of that
+one, in bytes and in files, did not pay: the limit goes back to where it was
+and does not rise for a minute (6 intervals), which keeps it from going back
+and forth. The limit falls by a quarter, down to the start value, when copies had
+to be retried for errors of the target (opening, writing or committing a
+file), which is how an overloaded target shows; retries for a changing or
+failing source do not count. The interval after a decrease only measures the
+lower limit. The throughput to beat decays by 0.5 % per interval, so that a
+record from a faster part of the tree blocks growth only for a while, and a
+flat throughput tries a higher limit about every 100 s. A throughput that
+neither improves nor drops by more than 10 % after such a try keeps the
+higher limit. `--transfers N` runs exactly N copies at once.
+
+The memory of the transfers is mostly their buffers. A copy holds up to
+`--read-window` plus `--write-window` plus one buffers of `--buffer-size`
+(one side's window plus one where the other side is local), and each
+transfer keeps the buffers it allocated for its next copies. At the defaults, 64
+transfers hold up to 64 × (4 + 4 + 1) × 8 MiB = 4.5 GiB between two remote
+endpoints and 64 × 5 × 8 MiB = 2.5 GiB between EOS and a local file system,
+reached only with files of several chunks; small files touch only the start
+of their buffer.
 
 ### Retries and the journal
 
@@ -153,16 +173,17 @@ last error, and the run goes on. Finalized directories are recorded too.
 
 An endpoint that becomes unusable during a run (a target outage, an
 unmounted source) would make every remaining entry fail and fill the
-journal. After `--max-consecutive-failures` failures (default 1000) without
-a success in between, the run therefore stops with exit status 4, and the
+journal (or vanish one by one). After `--max-consecutive-failures`
+failures or vanished entries (default 1000) without a success in between,
+the run therefore stops with exit status 4, and the
 journal marks it as interrupted, so that `--resume` continues it later.
 
 Modes:
 
 - A plain run with a journal walks everything. Paths that succeed (copied,
-  metadata fixed, deleted, or gone from both sides, also with the directory
-  above them) drop out of the failure table, paths that fail replace their
-  row.
+  metadata fixed, deleted, vanished from the source, or gone from both sides,
+  also with the directory above them) drop out of the failure table, paths
+  that fail replace their row.
 - `--resume` skips directories finalized by the previous run if that run
   was interrupted; after a completed run there is nothing to resume and
   everything is walked. Recorded failures are not retried by resuming.
@@ -186,8 +207,9 @@ shard, which is cheap compared to the copies.
 ### Reporting
 
 Counters for everything that happened (directories, files copied with
-bytes, unchanged, metadata fixed, symlinks, skipped special files, deleted,
-skipped invalid names, failed by kind, retries) go to a summary at the end
+bytes, unchanged, metadata fixed, symlinks, skipped special files, entries
+vanished from the source, deleted, skipped invalid names, failed by kind,
+retries) go to a summary at the end
 and optionally to a periodic progress line. Exit status: 0 when everything succeeded, 1 when
 something failed after retries (also the metadata of the top directory), 2
 for usage errors, 3 when the run could not start (unreadable source,
@@ -350,8 +372,30 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
   nothing) and the chown, plus the chmod in the cases above; per created
   directory the mkdir and, when it is finalized, utimes, chown and chmod;
   per listed directory one find (an open, two reads and a close). An EOS
-  source adds an open and two stats per file, before and after reading;
-  its checksum comes with the listing.
+  source adds only the open per file, which redirects to a storage node
+  (empty files the MGM serves itself), see below.
+- A file is read from an EOS source with the metadata of the listing, which
+  is exact (nanosecond mtime, owners, mode) and has the checksum. The open
+  brings the storage node's stat of the file (XrdCl asks every open for it,
+  `kXR_retstat`, `XrdClFileStateHandler.cc`), which has the replica's size
+  (the logical size of erasure-coded files) but the replica's own mtime in
+  seconds, not the namespace's (`fst/XrdFstOfsFile.cc`, `stat`). While that
+  size is the listed one, the copy takes the listed entry, and after the
+  read the storage node is asked for the replica's stat again (a request on
+  the open file, which XrdCl sends to the storage node): another size or
+  mtime means that the file changed while it was read, and the copy is
+  retried. That stat is of the replica opened: a file replaced during the
+  read is not seen there, its copy gets the old, listed mtime, and the next
+  run copies it again. A file with another size than listed has changed
+  since the listing: it is stated through the MGM before and after reading,
+  so that it is still copied in this run, with its current metadata. A file
+  rewritten with its size after the listing shows in a checksum that differs
+  from the listed one; a stat through the MGM then tells a change (the copy
+  fails as changed, after its retries, and the next run copies it) from
+  corrupt data (the MGM still has the listed size and mtime). Where the
+  listing has no checksum (a directory without `sys.forced.checksum`), such
+  a file is copied with the listed, older mtime, and the next run copies it
+  again.
 - EOS's own hidden entries (atomic temporaries `.sys.a#.`, version
   directories `.sys.v#.`) are never treated as entries of the tree.
 - Files are written through XRootD with up to `--write-window` writes in

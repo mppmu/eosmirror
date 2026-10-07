@@ -100,73 +100,6 @@ class Callback : public XrdCl::ResponseHandler {
   Function f_;
 };
 
-// Reads with up to `window` chunk reads in flight (ReadAhead). XrdCl may
-// call a read's handler after the file is closed, so the reads in flight are
-// waited for first.
-class XrdReader : public FileReader {
- public:
-  XrdReader(std::unique_ptr<XrdCl::File> file, std::string url, int window)
-      : file_(std::move(file)),
-        url_(std::move(url)),
-        ahead_(static_cast<size_t>(std::max(window, 1)),
-               [this](uint64_t offset, std::span<std::byte> buf, ReadAhead::Done done) {
-                 return submit(offset, buf, std::move(done));
-               }) {}
-
-  ~XrdReader() override {
-    ahead_.stop();
-    XrdCl::XRootDStatus st = file_->Close();
-    (void)st;
-  }
-
-  Result<size_t> read(uint64_t offset, std::span<std::byte> buf) override {
-    size_t done = 0;
-    while (done < buf.size()) {
-      uint32_t got = 0;
-      XrdCl::XRootDStatus st = file_->Read(
-          offset + done, static_cast<uint32_t>(buf.size() - done), buf.data() + done, got);
-      if (!st.IsOK()) return XrdEndpoint::xrd_error(st, "read " + url_);
-      if (got == 0) break;
-      done += got;
-    }
-    return done;
-  }
-
-  Result<Chunk> read_chunk(uint64_t offset, uint64_t end, BufferPool& pool) override {
-    return ahead_.next(offset, end, pool);
-  }
-
-  Result<Entry> stat() override {
-    XrdCl::StatInfo* info = nullptr;
-    XrdCl::XRootDStatus st = file_->Stat(/*force=*/true, info);
-    if (!st.IsOK()) return XrdEndpoint::xrd_error(st, "stat " + url_);
-    std::unique_ptr<XrdCl::StatInfo> owned(info);
-    return entry_from_stat(name_of(url_), *info);
-  }
-
- private:
-  Status submit(uint64_t offset, std::span<std::byte> buf, ReadAhead::Done done) {
-    auto* handler = new Callback([this, done = std::move(done)](const XrdCl::XRootDStatus& st,
-                                                                XrdCl::AnyObject* response) {
-      if (!st.IsOK()) return done(XrdEndpoint::xrd_error(st, "read " + url_));
-      XrdCl::ChunkInfo* info = nullptr;
-      if (response) response->Get(info);
-      done(info ? size_t{info->GetLength()} : size_t{0});
-    });
-    XrdCl::XRootDStatus st =
-        file_->Read(offset, static_cast<uint32_t>(buf.size()), buf.data(), handler);
-    if (!st.IsOK()) {
-      delete handler;  // XrdCl calls it only for reads it accepted
-      return XrdEndpoint::xrd_error(st, "read " + url_);
-    }
-    return {};
-  }
-
-  std::unique_ptr<XrdCl::File> file_;
-  std::string url_;
-  ReadAhead ahead_;
-};
-
 // Writes to a temporary name; commit() waits for the writes, closes,
 // verifies the stored checksum and renames the file into place.
 class XrdWriter : public XrdFileWriter {
@@ -387,6 +320,63 @@ void XrdFileWriter::close_quietly() {
   file_.reset();
 }
 
+// ---- XrdReader -----------------------------------------------------------------------
+
+XrdReader::XrdReader(std::unique_ptr<XrdCl::File> file, std::string url, int window)
+    : file_(std::move(file)),
+      url_(std::move(url)),
+      ahead_(static_cast<size_t>(std::max(window, 1)),
+             [this](uint64_t offset, std::span<std::byte> buf, ReadAhead::Done done) {
+               return submit(offset, buf, std::move(done));
+             }) {}
+
+XrdReader::~XrdReader() {
+  ahead_.stop();
+  XrdCl::XRootDStatus st = file_->Close();
+  (void)st;
+}
+
+Result<size_t> XrdReader::read(uint64_t offset, std::span<std::byte> buf) {
+  size_t done = 0;
+  while (done < buf.size()) {
+    uint32_t got = 0;
+    XrdCl::XRootDStatus st = file_->Read(offset + done, static_cast<uint32_t>(buf.size() - done),
+                                         buf.data() + done, got);
+    if (!st.IsOK()) return XrdEndpoint::xrd_error(st, "read " + url_);
+    if (got == 0) break;
+    done += got;
+  }
+  return done;
+}
+
+Result<Chunk> XrdReader::read_chunk(uint64_t offset, uint64_t end, BufferPool& pool) {
+  return ahead_.next(offset, end, pool);
+}
+
+Result<Entry> XrdReader::file_stat(bool fresh) {
+  XrdCl::StatInfo* info = nullptr;
+  XrdCl::XRootDStatus st = file_->Stat(fresh, info);
+  if (!st.IsOK()) return XrdEndpoint::xrd_error(st, "stat " + url_);
+  std::unique_ptr<XrdCl::StatInfo> owned(info);
+  return entry_from_stat(name_of(url_), *info);
+}
+
+Status XrdReader::submit(uint64_t offset, std::span<std::byte> buf, ReadAhead::Done done) {
+  auto* handler = new Callback([this, done = std::move(done)](const XrdCl::XRootDStatus& st,
+                                                              XrdCl::AnyObject* response) {
+    if (!st.IsOK()) return done(XrdEndpoint::xrd_error(st, "read " + url_));
+    XrdCl::ChunkInfo* info = nullptr;
+    if (response) response->Get(info);
+    done(info ? size_t{info->GetLength()} : size_t{0});
+  });
+  XrdCl::XRootDStatus st = file_->Read(offset, static_cast<uint32_t>(buf.size()), buf.data(), handler);
+  if (!st.IsOK()) {
+    delete handler;  // XrdCl calls it only for reads it accepted
+    return XrdEndpoint::xrd_error(st, "read " + url_);
+  }
+  return {};
+}
+
 // ---- XrdEndpoint ---------------------------------------------------------------------
 
 Result<std::unique_ptr<XrdEndpoint>> XrdEndpoint::create(const std::string& url,
@@ -591,15 +581,21 @@ Result<Checksum> XrdEndpoint::stored_checksum(const RelPath& path, const Entry&)
   return query_checksum(absolute(path));
 }
 
-Result<std::unique_ptr<FileReader>> XrdEndpoint::open_read(const RelPath& path) {
-  std::string abs = absolute(path);
+Result<std::unique_ptr<XrdCl::File>> XrdEndpoint::open_file(const std::string& abs) {
   auto request = request_path(abs);
   if (!request.ok()) return request.error();
   auto file = std::make_unique<XrdCl::File>();
   XrdCl::XRootDStatus st = file->Open(open_url(request.value()), XrdCl::OpenFlags::Read);
   if (!st.IsOK()) return xrd_error(st, "open " + url_of(abs));
+  return file;
+}
+
+Result<std::unique_ptr<FileReader>> XrdEndpoint::open_read(const RelPath& path) {
+  std::string abs = absolute(path);
+  auto file = open_file(abs);
+  if (!file.ok()) return file.error();
   return std::unique_ptr<FileReader>(
-      new XrdReader(std::move(file), url_of(abs), options_.read_window));
+      new XrdReader(std::move(file).value(), url_of(abs), options_.read_window));
 }
 
 Result<std::unique_ptr<FileWriter>> XrdEndpoint::open_write(const RelPath& path,

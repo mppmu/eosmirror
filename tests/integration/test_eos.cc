@@ -9,10 +9,15 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <XrdCl/XrdClFile.hh>
+#include <XrdCl/XrdClURL.hh>
+#include <XrdCl/XrdClXRootDResponses.hh>
+
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <utility>
 
 #include "doctest/doctest.h"
 #include "eosmirror/copy.hh"
@@ -21,6 +26,7 @@
 #include "eosmirror/eos_endpoint.hh"
 #include "eosmirror/posix_endpoint.hh"
 #include "eosmirror/selftest.hh"
+#include "request_log.hh"
 #include "stderr_capture.hh"
 #include "temp_dir.hh"
 
@@ -65,7 +71,7 @@ struct RemoteDir {
 SyncOptions test_options() {
   SyncOptions o;
   o.checkers = 2;
-  o.transfers = 3;
+  o.min_transfers = o.max_transfers = 3;
   o.buffer_size = 64 * 1024;
   o.retry.attempts = 2;
   o.retry.initial_delay = std::chrono::milliseconds(10);
@@ -527,6 +533,161 @@ TEST_CASE("EOS to FS: downloads are verified, and a read that fails midway leave
   CHECK(tmp.read_file("dst/a") == big);
   CHECK(tmp.read_file("dst/b") == "small");
   CHECK(dst.list("crc").value().empty());
+}
+
+TEST_CASE("EOS to FS: files are read with the listing's metadata, without MGM stats") {
+  if (!base_url()) return;
+  std::string mgm = XrdCl::URL(base_url()).GetHostName();
+  for (const char* layout : {"replica2", "raid6"}) {
+    INFO("layout ", layout);
+    constexpr int kFiles = 20;
+    TempDir tmp;
+    for (int i = 0; i < kFiles; ++i) {
+      std::string name = "src/d/f" + std::to_string(i);
+      tmp.write_file(name, pattern(1000 + static_cast<size_t>(i)));
+      struct timespec times[2] = {{1600000000 + i, 123456789}, {1600000000 + i, 123456789}};
+      REQUIRE(utimensat(AT_FDCWD, tmp.sub(name).c_str(), times, 0) == 0);
+    }
+    tmp.write_file("src/empty", "");
+    PosixEndpoint src(tmp.sub("src"));
+    RemoteDir dir("listed", layout);
+    EosEndpoint& ep = *dir.endpoint;
+    SyncOptions options = test_options();
+    options.preserve_owner = false;
+    Cancellation cancel;
+    Report up;
+    Engine upload(src, ep, options, up, nullptr, cancel);
+    REQUIRE(upload.run().ok());
+    REQUIRE(up.stats.files_copied == kFiles + 1);
+
+    PosixEndpoint dst(tmp.sub("dst"));
+    Report r;
+    RequestLog::start();
+    {
+      Engine download(ep, dst, options, r, nullptr, cancel);
+      REQUIRE(download.run().ok());
+    }
+    auto sent = RequestLog::stop();
+    CHECK(r.stats.files_copied == kFiles + 1);
+    CHECK(r.stats.files_unverified == 0);
+    CHECK(r.stats.failures == 0);
+    CHECK(must(dst.stat("d/f7")).mtime == Timespec{1600000007, 123456789});
+    CHECK(tmp.read_file("dst/d/f7") == pattern(1007));
+    // Per file, the MGM sees the open, which redirects to the storage node
+    // (or, for the empty file of the replica layout, serves it), and the
+    // storage node a stat after the read; the only stat on the MGM is the
+    // one of the top directory, the other opens are the two listings.
+    INFO("requests: ", sent.size());
+    CHECK(RequestLog::count(sent, mgm, "kXR_query") == 1);
+    CHECK(RequestLog::count(sent, mgm, "kXR_stat") == 0);
+    CHECK(RequestLog::count(sent, mgm, "kXR_open") == kFiles + 1 + 2);
+    CHECK(RequestLog::count(sent, mgm, "kXR_stat", false) == kFiles);
+  }
+}
+
+namespace {
+
+// Appends to a file on EOS through an open for update.
+void append(const std::string& url, std::string_view data) {
+  XrdCl::File file;
+  REQUIRE(file.Open(url, XrdCl::OpenFlags::Update).IsOK());
+  XrdCl::StatInfo* info = nullptr;
+  REQUIRE(file.Stat(true, info).IsOK());
+  uint64_t size = info->GetSize();
+  delete info;
+  REQUIRE(file.Write(size, static_cast<uint32_t>(data.size()), data.data()).IsOK());
+  REQUIRE(file.Close().IsOK());
+}
+
+}  // namespace
+
+TEST_CASE("EOS to FS: files that changed since the listing or while they are read") {
+  if (!base_url()) return;
+  RemoteDir dir("changing");
+  EosEndpoint& ep = *dir.endpoint;
+  TempDir tmp;
+  PosixEndpoint dst(tmp.sub("dst"));
+  REQUIRE(dst.mkdir("", 0755).ok());
+  CopyOptions options;
+  options.preserve_owner = false;
+  BufferPool pool(64 * 1024);
+  Cancellation cancel;
+  auto listed = [&](EosEndpoint& from, const RelPath& name) {
+    auto entries = from.list("");
+    REQUIRE(entries.ok());
+    const Entry* e = find(entries.value(), name);
+    REQUIRE(e);
+    return *e;
+  };
+
+  // Replaced with another size: copied as it is now, stated through the MGM.
+  put(ep, "f", "listed content", {1600000000, 1});
+  Entry old = listed(ep, "f");
+  put(ep, "f", "replaced with a longer content", {1600000500, 2});
+  auto copied = copy_file(ep, dst, "f", old, options, pool, cancel);
+  REQUIRE(copied.ok());
+  CHECK(tmp.read_file("dst/f") == "replaced with a longer content");
+  CHECK(must(dst.stat("f")).mtime == Timespec{1600000500, 2});
+
+  // Rewritten with its size: the data does not match the listed checksum,
+  // and the MGM has another mtime for it.
+  old = listed(ep, "f");
+  put(ep, "f", "REPLACED WITH A LONGER CONTENT", {1600000600, 3});
+  auto rewritten = copy_file(ep, dst, "f", old, options, pool, cancel);
+  REQUIRE_FALSE(rewritten.ok());
+  INFO("error: ", rewritten.error().describe());
+  CHECK(rewritten.error().kind == ErrorKind::Changed);
+  CHECK(tmp.read_file("dst/f") == "replaced with a longer content");
+
+  // Appended to while it is read: changed, and copied as it is now when the
+  // copy is retried with the same listed entry.
+  std::string content = pattern(300000);
+  put(ep, "g", content);
+  old = listed(ep, "g");
+  CopyOptions appending = options;
+  bool appended = false;
+  appending.on_chunk = [&](uint64_t) {
+    if (!std::exchange(appended, true)) append(dir.url + "/g", "more");
+  };
+  auto grown = copy_file(ep, dst, "g", old, appending, pool, cancel);
+  REQUIRE(appended);
+  REQUIRE_FALSE(grown.ok());
+  INFO("error: ", grown.error().describe());
+  CHECK(grown.error().kind == ErrorKind::Changed);
+  CHECK_FALSE(dst.stat("g").ok());
+  auto retried = copy_file(ep, dst, "g", old, options, pool, cancel);
+  REQUIRE(retried.ok());
+  CHECK(tmp.read_file("dst/g") == content + "more");
+  CHECK(must(dst.stat("g")).mtime == must(ep.stat("g")).mtime);
+
+  // Gone: not found, which a run counts as vanished from the source.
+  old = listed(ep, "g");
+  REQUIRE(ep.remove("g", EntryType::File).ok());
+  auto gone = copy_file(ep, dst, "g", old, options, pool, cancel);
+  REQUIRE_FALSE(gone.ok());
+  CHECK(gone.error().kind == ErrorKind::NotFound);
+  CHECK(pool.available() == pool.allocated());
+
+  // Without checksums in the listing, a file rewritten with its size gets
+  // the listed mtime, which differs from the source's: the next run copies
+  // it again.
+  RemoteDir plain("changing", "nochecksum");
+  put(*plain.endpoint, "f", "aaaa", {1600000000, 1});
+  old = listed(*plain.endpoint, "f");
+  CHECK(old.checksum.type == ChecksumType::None);
+  put(*plain.endpoint, "f", "bbbb", {1600000700, 0});
+  PosixEndpoint dst2(tmp.sub("dst2"));
+  REQUIRE(dst2.mkdir("", 0755).ok());
+  REQUIRE(copy_file(*plain.endpoint, dst2, "f", old, options, pool, cancel).ok());
+  CHECK(tmp.read_file("dst2/f") == "bbbb");
+  CHECK(must(dst2.stat("f")).mtime == Timespec{1600000000, 1});
+  SyncOptions sync = test_options();
+  sync.preserve_owner = false;
+  Report r;
+  Engine engine(*plain.endpoint, dst2, sync, r, nullptr, cancel);
+  REQUIRE(engine.run().ok());
+  CHECK(r.stats.files_copied == 1);
+  CHECK(must(dst2.stat("f")).mtime == Timespec{1600000700, 0});
 }
 
 TEST_CASE("eos endpoint: roots reached through symlinks") {

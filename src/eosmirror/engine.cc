@@ -14,6 +14,7 @@
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 #include "eosmirror/copy.hh"
 #include "eosmirror/log.hh"
@@ -126,22 +127,35 @@ TransferController::TransferController(size_t min_limit, size_t max_limit)
     : min_limit_(min_limit), max_limit_(std::max(min_limit, max_limit)), limit_(min_limit) {}
 
 size_t TransferController::update(double byte_rate, double file_rate, bool target_retries) {
-  constexpr double kDecay = 0.995, kMargin = 1.05;
+  constexpr double kDecay = 0.995, kBetter = 1.05, kWorse = 0.9;
+  constexpr int kHold = 6;
   byte_record_ *= kDecay;
   file_record_ *= kDecay;
+  size_t raised_from = std::exchange(raised_from_, 0);
+  bool holding = hold_ > 0;
+  if (holding) --hold_;
   if (target_retries) {
     limit_ = next_transfer_limit(limit_, min_limit_, max_limit_, true, false);
     measuring_ = true;
     return limit_;
   }
-  bool improved = byte_rate > byte_record_ * kMargin || file_rate > file_record_ * kMargin;
+  if (raised_from && byte_rate < byte_record_ * kWorse && file_rate < file_record_ * kWorse) {
+    // The record is the throughput at the limit before.
+    limit_ = raised_from;
+    hold_ = kHold;
+    return limit_;
+  }
+  bool improved = byte_rate > byte_record_ * kBetter || file_rate > file_record_ * kBetter;
   if (measuring_ || improved) {
     // The throughput at this limit is the one that a higher limit must beat.
     byte_record_ = byte_rate;
     file_record_ = file_rate;
   }
-  if (improved && !measuring_)
-    limit_ = next_transfer_limit(limit_, min_limit_, max_limit_, false, true);
+  if (improved && !measuring_ && !holding) {
+    size_t raised = next_transfer_limit(limit_, min_limit_, max_limit_, false, true);
+    if (raised > limit_) raised_from_ = limit_;
+    limit_ = raised;
+  }
   measuring_ = false;
   return limit_;
 }
@@ -197,9 +211,8 @@ struct Engine::Impl {
   std::atomic<bool> controller_stop{false};
   bool ran = false;
 
-  size_t max_transfers() const { return static_cast<size_t>(std::max(1, options.transfers)); }
+  size_t max_transfers() const { return static_cast<size_t>(std::max(1, options.max_transfers)); }
   size_t initial_limit() const {
-    if (!options.adaptive) return max_transfers();
     return std::min(max_transfers(), static_cast<size_t>(std::max(1, options.min_transfers)));
   }
 
@@ -255,17 +268,21 @@ struct Engine::Impl {
     Failure f{path, type, error};
     if (journal && !options.dry_run) journal->record_failure(f);
     report.add_failure(std::move(f));
-    // An endpoint that has become unusable would fail everything that is
-    // left, and fill the journal with it.
-    if (failures_in_a_row.fetch_add(1) + 1 == options.max_consecutive_failures) {
-      std::string message = "stopped after " + std::to_string(options.max_consecutive_failures) +
-                            " failures in a row (--max-consecutive-failures), the last: " +
-                            std::string(to_string(type)) + " " + (path.empty() ? "." : path) +
-                            ": " + error.describe();
-      log::error(message);
-      end_run(Error{ErrorKind::Cancelled, message});
-      cancel.request();
-    }
+    in_a_row(path, type, error.describe());
+  }
+
+  // An endpoint that has become unusable would fail everything that is
+  // left, and fill the journal with it; a source that has gone away (an
+  // unmounted file system) makes everything that is left vanish.
+  void in_a_row(const RelPath& path, EntryType type, const std::string& what) {
+    if (failures_in_a_row.fetch_add(1) + 1 != options.max_consecutive_failures) return;
+    std::string message = "stopped after " + std::to_string(options.max_consecutive_failures) +
+                          " failures in a row (--max-consecutive-failures), the last: " +
+                          std::string(to_string(type)) + " " + (path.empty() ? "." : path) +
+                          ": " + what;
+    log::error(message);
+    end_run(Error{ErrorKind::Cancelled, message});
+    cancel.request();
   }
 
   // Something worked: failures are no longer in a row.
@@ -289,10 +306,24 @@ struct Engine::Impl {
   // Drops the journal's record of an earlier failure of the path.
   void succeeded(const RelPath& path) {
     healthy();
+    forget_failure(path);
+  }
+
+  void forget_failure(const RelPath& path) {
     if (!journal || options.dry_run) return;
     auto rows = prior_failures.find(parent_path(path));
     if (rows != prior_failures.end() && rows->second.count(name_of(path)))
       journal->clear_failure(path);
+  }
+
+  // An entry that was listed on the source but is gone when it is handled:
+  // the source changed, which is no failure, and the next run sees it gone.
+  // Many in a row, though, mean that the source itself went away.
+  void vanished(const RelPath& path, EntryType type) {
+    stats.vanished.fetch_add(1);
+    log::info(to_string(type), " ", path, " vanished from the source");
+    forget_failure(path);
+    in_a_row(path, type, "vanished from the source");
   }
 
   // Drops the journal's records of earlier failures of entries in a
@@ -436,6 +467,11 @@ struct Engine::Impl {
 
     auto listed = retry([&] { return source.list(node->path); });
     if (!listed.ok()) {
+      if (listed.error().kind == ErrorKind::NotFound && node->parent) {
+        vanished(node->path, EntryType::Directory);
+        entry_done(node);
+        return;
+      }
       dir_failed(node, listed.error());
       return;
     }
@@ -825,11 +861,14 @@ struct Engine::Impl {
         stats.bytes_written.fetch_add(n);
         slot.written.fetch_add(n);
       };
+      bool target_failed = false;
       job_options.on_target_error = [&](const Error& e) {
+        target_failed = true;
         if (is_transient(e.kind)) target_errors.fetch_add(1);
       };
       auto result = retry([&] {
         slot.written = 0;
+        target_failed = false;
         return copy_file(source, target, path, job.source, job_options, pool, cancel);
       });
       slot.active = false;
@@ -846,6 +885,8 @@ struct Engine::Impl {
                       job.dir->path.empty() ? "." : job.dir->path);
         }
         succeeded(path);
+      } else if (result.error().kind == ErrorKind::NotFound && !target_failed) {
+        vanished(path, EntryType::File);
       } else {
         fail(path, EntryType::File, result.error());
       }
@@ -953,8 +994,7 @@ struct Engine::Impl {
       threads.emplace_back([this] { checker_loop(); });
     for (size_t i = 0; i < transfers; ++i)
       threads.emplace_back([this, i] { transfer_loop(i); });
-    if (options.adaptive && initial_limit() < transfers)
-      controller = std::thread([this] { controller_loop(); });
+    if (initial_limit() < transfers) controller = std::thread([this] { controller_loop(); });
     for (auto& root : roots) dirs.push(root);
 
     {

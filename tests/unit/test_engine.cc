@@ -25,8 +25,7 @@ namespace {
 SyncOptions test_options() {
   SyncOptions o;
   o.checkers = 2;
-  o.transfers = 2;
-  o.adaptive = false;
+  o.min_transfers = o.max_transfers = 2;
   o.buffer_size = 64 * 1024;
   o.retry.attempts = 3;
   o.retry.initial_delay = std::chrono::milliseconds(1);
@@ -261,9 +260,8 @@ TEST_CASE("FS to FS: the adaptive controller does not delay the end of a run") {
   PosixEndpoint src(tmp.sub("src"));
   PosixEndpoint dst(tmp.sub("dst"));
   SyncOptions options = test_options();
-  options.adaptive = true;
   options.min_transfers = 1;
-  options.transfers = 2;
+  options.max_transfers = 2;
   options.adapt_interval = std::chrono::seconds(60);
   Report r;
   auto start = std::chrono::steady_clock::now();
@@ -480,7 +478,7 @@ TEST_CASE("fake: the backlog stays bounded and the walk completes with many entr
   SyncOptions o = fake_options();
   o.max_backlog = 3;
   o.checkers = 4;
-  o.transfers = 3;
+  o.min_transfers = o.max_transfers = 3;
   Report r;
   REQUIRE(run_sync(src, dst, o, r).ok());
   CHECK(r.stats.files_copied == 20 * 51);
@@ -566,7 +564,7 @@ TEST_CASE("fake: cancellation stops the run and leaves nothing partial") {
   };
   Report r;
   SyncOptions o = fake_options();
-  o.transfers = 1;
+  o.min_transfers = o.max_transfers = 1;
   Engine engine(src, dst, o, r, nullptr, cancel);
   Status s = engine.run();
   REQUIRE_FALSE(s.ok());
@@ -1019,9 +1017,8 @@ TEST_CASE("fake: adaptive concurrency starts low, grows and completes the tree")
     for (int f = 0; f < 40; ++f) src.add_file("d" + std::to_string(d) + "/f" + std::to_string(f), std::string(5000, 'x'));
   }
   SyncOptions o = fake_options();
-  o.adaptive = true;
-  o.transfers = 6;
   o.min_transfers = 2;
+  o.max_transfers = 6;
   o.adapt_interval = std::chrono::seconds(0);  // adjust as fast as the controller can
   o.retry.initial_delay = std::chrono::milliseconds(0);
   Report r;
@@ -1233,6 +1230,153 @@ TEST_CASE("fake: targets without checksums are verified against the source's") {
   }
 }
 
+TEST_CASE("fake: a source whose readers take the listing is copied without stats") {
+  // Like EOS, the source lists the checksums it stores.
+  auto store_checksum = [](FakeEndpoint::Node& n) {
+    if (n.entry.type != EntryType::File) return;
+    Hasher h(ChecksumType::Adler32);
+    h.update({reinterpret_cast<const std::byte*>(n.content.data()), n.content.size()});
+    n.entry.checksum = h.finish();
+  };
+  FakeEndpoint src;
+  src.readers_take_listing = true;
+  populate(src);
+  for (const RelPath& p : src.paths()) src.modify(p, store_checksum);
+  auto replace = [&](const RelPath& path, std::string content, Timespec mtime) {
+    src.modify(path, [&](FakeEndpoint::Node& n) {
+      n.entry.size = content.size();
+      n.content = std::move(content);
+      n.entry.mtime = mtime;
+      store_checksum(n);
+    });
+  };
+  FakeEndpoint dst;
+  Report r;
+  REQUIRE(run_sync(src, dst, fake_options(), r).ok());
+  CHECK(r.stats.files_copied == 3);
+  CHECK(r.stats.files_unverified == 0);
+  CHECK(src.count("stat") == 1);  // the top directory
+  expect_mirrored(src, dst);
+
+  SUBCASE("a file of another size than listed is copied as it is now") {
+    src.hook = [&](std::string_view op, const RelPath& path) {
+      if (op == "open_read" && path == "f0") replace("f0", "rewritten now", {3500, 0});
+    };
+    FakeEndpoint dst2;
+    Report r2;
+    REQUIRE(run_sync(src, dst2, fake_options(), r2).ok());
+    CHECK(r2.stats.failures == 0);
+    CHECK(r2.stats.retries == 0);
+    CHECK(dst2.get("f0")->content == "rewritten now");
+    CHECK(dst2.get("f0")->entry.mtime == Timespec{3500, 0});
+    CHECK(src.count("stat") == 1 + 1 + 2);  // and before and after reading f0
+  }
+
+  SUBCASE("a file that grows while it is read is copied again") {
+    int reads = 0;
+    src.hook = [&](std::string_view op, const RelPath& path) {
+      if (op == "read" && path == "d1/f1" && reads++ == 0)
+        replace("d1/f1", std::string(200001, 'y'), {3600, 0});
+    };
+    FakeEndpoint dst2;
+    Report r2;
+    REQUIRE(run_sync(src, dst2, fake_options(), r2).ok());
+    CHECK(r2.stats.failures == 0);
+    CHECK(r2.stats.retries == 1);
+    CHECK(dst2.get("d1/f1")->content == std::string(200001, 'y'));
+    CHECK(dst2.get("d1/f1")->entry.mtime == Timespec{3600, 0});
+  }
+
+  SUBCASE("a file rewritten with its size since the listing is a change, not corruption") {
+    src.hook = [&](std::string_view op, const RelPath& path) {
+      if (op == "open_read" && path == "f0") replace("f0", "ROOT FILE", {3700, 0});
+    };
+    FakeEndpoint dst2;
+    Report r2;
+    REQUIRE(run_sync(src, dst2, fake_options(), r2).ok());
+    REQUIRE(r2.stats.failures == 1);
+    CHECK(r2.failures()[0].path == "f0");
+    CHECK(r2.failures()[0].error.kind == ErrorKind::Changed);
+    CHECK(r2.failures()[0].error.message.find("since it was listed") != std::string::npos);
+    CHECK_FALSE(dst2.get("f0"));
+
+    // The next run lists it anew.
+    src.hook = nullptr;
+    Report r3;
+    REQUIRE(run_sync(src, dst2, fake_options(), r3).ok());
+    CHECK(r3.stats.failures == 0);
+    CHECK(dst2.get("f0")->content == "ROOT FILE");
+  }
+
+  SUBCASE("data that does not match the listed checksum of an unchanged file is corrupt") {
+    src.modify("f0", [](FakeEndpoint::Node& n) { n.content[0] = 'R'; });
+    FakeEndpoint dst2;
+    Report r2;
+    REQUIRE(run_sync(src, dst2, fake_options(), r2).ok());
+    REQUIRE(r2.stats.failures == 1);
+    CHECK(r2.failures()[0].error.kind == ErrorKind::Checksum);
+    CHECK_FALSE(dst2.get("f0"));
+  }
+}
+
+TEST_CASE("fake: entries that vanish from the source before they are handled are no failures") {
+  TempDir tmp;
+  auto journal = Journal::open(tmp.sub("j.sqlite"), "fake", "fake");
+  REQUIRE(journal.ok());
+  Journal& j = *journal.value();
+  REQUIRE(j.begin_run(false).ok());
+  j.record_failure({"f0", EntryType::File, Error{ErrorKind::IO, "earlier"}});
+  j.record_failure({"d1/d2", EntryType::Directory, Error{ErrorKind::IO, "earlier"}});
+  REQUIRE(j.end_run(true).ok());
+
+  FakeEndpoint src, dst;
+  populate(src);
+  // Each after the listing of its directory.
+  src.hook = [&](std::string_view op, const RelPath& path) {
+    if (op == "open_read" && path == "f0") src.erase("f0");
+    if (op == "list" && path == "d1/d2") src.erase("d1/d2");
+  };
+  REQUIRE(j.begin_run(false).ok());
+  Report r;
+  REQUIRE(run_sync(src, dst, fake_options(), r, &j).ok());
+  REQUIRE(j.end_run(true).ok());
+  CHECK(r.stats.vanished == 2);
+  CHECK(r.stats.failures == 0);
+  CHECK(r.stats.retries == 0);
+  CHECK(r.stats.files_copied == 1);
+  CHECK(j.failures().empty());
+  CHECK_FALSE(dst.get("f0"));
+  CHECK(r.summary(false).find("vanished from the source: 2\n") != std::string::npos);
+
+  SUBCASE("a source that goes away as a whole stops the run") {
+    FakeEndpoint src2, dst2;
+    for (int i = 0; i < 40; ++i) src2.add_file("f" + std::to_string(10 + i), "x");
+    src2.hook = [&](std::string_view op, const RelPath& path) {
+      if (op == "open_read") src2.erase(path);
+    };
+    SyncOptions o = fake_options();
+    o.max_consecutive_failures = 5;
+    Report r2;
+    Status s = run_sync(src2, dst2, o, r2);
+    REQUIRE_FALSE(s.ok());
+    CHECK(s.error().kind == ErrorKind::Cancelled);
+    CHECK(s.error().message.find("vanished from the source") != std::string::npos);
+    CHECK(r2.stats.vanished >= 5);
+    CHECK(r2.stats.vanished < 40);
+    CHECK(r2.stats.failures == 0);
+  }
+
+  SUBCASE("a target that has lost a file's directory is no source that vanished") {
+    FakeEndpoint src2, dst2;
+    src2.add_file("f", "x");
+    dst2.fail("open_write", "f", Error{ErrorKind::NotFound, "no directory"});
+    Report r2;
+    REQUIRE(run_sync(src2, dst2, fake_options(), r2).ok());
+    CHECK(r2.stats.vanished == 0);
+    CHECK(r2.stats.failures == 1);
+  }
+}
+
 TEST_CASE("the transfer limit grows by half while throughput improves") {
   CHECK(next_transfer_limit(4, 4, 32, false, true) == 6);
   CHECK(next_transfer_limit(6, 4, 32, false, true) == 9);
@@ -1290,16 +1434,46 @@ TEST_CASE("the transfer controller tries higher limits only now and then at a fl
 
   // A record from a faster part of the tree blocks growth only for a while.
   TransferController d(4, 1000);
-  d.update(1000, 100, false);
-  size_t after_fast = d.limit();
+  CHECK(d.update(1000, 100, false) == 6);
+  CHECK(d.update(500, 50, false) == 4);  // as if the rise had not paid
   int intervals = 0;
-  while (d.limit() == after_fast && intervals < 1000) {
+  while (d.limit() == 4 && intervals < 1000) {
     d.update(500, 50, false);
     ++intervals;
   }
-  CHECK(d.limit() > after_fast);
+  CHECK(d.limit() > 4);
   CHECK(intervals > 50);
   CHECK(intervals < 300);
+}
+
+TEST_CASE("the transfer controller takes back a rise that did not pay") {
+  TransferController c(4, 64);
+  CHECK(c.update(100, 10, false) == 6);
+  CHECK(c.update(150, 15, false) == 9);
+  // More than 10 % below the throughput at 6, in bytes and files: back to 6,
+  // and no rise for six intervals, however the throughput goes.
+  CHECK(c.update(130, 13, false) == 6);
+  for (int i = 0; i < 6; ++i) CHECK(c.update(200 + i, 20, false) == 6);
+  // Then it is tried again where throughput improves.
+  CHECK(c.update(250, 25, false) == 9);
+  // At a plateau, the higher limit stays.
+  for (int i = 0; i < 5; ++i) CHECK(c.update(240, 24, false) == 9);
+  // Errors of the target take a quarter away.
+  CHECK(c.update(240, 24, true) == 7);
+
+  // Only a drop in bytes and files takes a rise back, and only right after it.
+  TransferController d(4, 64);
+  CHECK(d.update(100, 10, false) == 6);
+  CHECK(d.update(50, 10, false) == 6);   // files held up
+  CHECK(d.update(200, 20, false) == 9);
+  CHECK(d.update(205, 20, false) == 9);  // the rise neither paid nor hurt
+  CHECK(d.update(100, 10, false) == 9);  // and a later drop is no reason
+
+  // At the maximum, there is no rise to take back.
+  TransferController e(4, 6);
+  CHECK(e.update(100, 10, false) == 6);
+  CHECK(e.update(200, 20, false) == 6);
+  CHECK(e.update(50, 5, false) == 6);
 }
 
 TEST_CASE("copies report errors of the target, not of the source") {
@@ -1336,7 +1510,7 @@ TEST_CASE("fake: the transfer slots exist before the run starts") {
   Cancellation cancel;
   Report r;
   SyncOptions o = fake_options();
-  o.transfers = 5;
+  o.max_transfers = 5;
   Engine engine(src, dst, o, r, nullptr, cancel);
   CHECK(r.slots.size() == 5);
   CHECK(r.backlog_capacity == o.max_backlog);
@@ -1349,8 +1523,7 @@ TEST_CASE("fake: a directory's metadata is set without holding a transfer slot")
   src.add_dir("b");
   src.add_file("b/g", "y");
   SyncOptions o = fake_options();
-  o.transfers = 2;
-  o.adaptive = true;
+  o.max_transfers = 2;
   o.min_transfers = 1;  // one copy at a time
   o.adapt_interval = std::chrono::seconds(60);
   // Finalizing a directory waits for the other copy, which needs the slot.
@@ -1698,7 +1871,7 @@ TEST_CASE("fake: a run stops after too many failures in a row") {
   }
   o.max_consecutive_failures = 2;
   o.checkers = 1;
-  o.transfers = 1;
+  o.min_transfers = o.max_transfers = 1;
   Report r3;
   REQUIRE(run_sync(src2, dst2, o, r3).ok());
   CHECK(r3.stats.failures == 20);

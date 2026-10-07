@@ -7,6 +7,7 @@
 #include <cstdlib>
 
 #include "doctest/doctest.h"
+#include "request_log.hh"
 
 int main(int argc, char** argv) {
   const char* xrootd = std::getenv("EOSMIRROR_XROOTD_URL");
@@ -17,6 +18,7 @@ int main(int argc, char** argv) {
                  "integration tests\n");
     return 77;
   }
+  RequestLog::install();
   doctest::Context context(argc, argv);
   return context.run();
 }

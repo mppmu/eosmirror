@@ -65,7 +65,7 @@ struct RemoteDir {
 SyncOptions test_options() {
   SyncOptions o;
   o.checkers = 2;
-  o.transfers = 3;
+  o.min_transfers = o.max_transfers = 3;
   o.buffer_size = 64 * 1024;
   o.retry.attempts = 2;
   o.retry.initial_delay = std::chrono::milliseconds(10);

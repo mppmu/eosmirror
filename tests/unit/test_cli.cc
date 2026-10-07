@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "eosmirror/cli.hh"
 
+#include <utility>
 #include <vector>
 
 #include "doctest/doctest.h"
@@ -46,7 +47,8 @@ TEST_CASE("the sync command line maps onto the options") {
   CHECK_FALSE(o.sync.preserve_owner);
   CHECK(o.sync.preserve_mode);
   CHECK(o.sync.checkers == 3);
-  CHECK(o.sync.transfers == 4);
+  CHECK(o.sync.min_transfers == 4);
+  CHECK(o.sync.max_transfers == 4);
   CHECK(o.sync.buffer_size == 1u << 20);
   CHECK(o.endpoints.xrootd.write_window == 1);
   CHECK(o.endpoints.xrootd.read_window == 6);
@@ -71,6 +73,8 @@ TEST_CASE("the sync command line maps onto the options") {
   CHECK(defaults.value().endpoints.xrootd.write_window == 4);
   CHECK(defaults.value().endpoints.xrootd.read_window == 4);
   CHECK_FALSE(defaults.value().endpoints.xrootd.connection_per_thread);
+  CHECK(defaults.value().sync.min_transfers == 4);
+  CHECK(defaults.value().sync.max_transfers == 64);
 
   CHECK(defaults.value().sync.max_consecutive_failures == 1000);
   CHECK(parse({"sync", "--max-delete", "unlimited", "a", "b"}).value().sync.max_delete == UINT64_MAX);
@@ -81,6 +85,32 @@ TEST_CASE("the sync command line maps onto the options") {
             .value()
             .sync.max_consecutive_failures == 0);
   CHECK(parse({"sync", "--", "-weird", "b"}).value().source == "-weird");
+}
+
+TEST_CASE("transfers are a range to adapt within, or a fixed number") {
+  auto transfers = [](std::vector<std::string> args) {
+    args.insert(args.begin(), "sync");
+    args.push_back("a");
+    args.push_back("b");
+    auto r = parse(args);
+    REQUIRE(r.ok());
+    return std::pair{r.value().sync.min_transfers, r.value().sync.max_transfers};
+  };
+  CHECK(transfers({"--min-transfers", "2", "--max-transfers", "16"}) == std::pair{2, 16});
+  CHECK(transfers({"--min-transfers=8"}) == std::pair{8, 64});
+  CHECK(transfers({"--max-transfers", "32"}) == std::pair{4, 32});
+  CHECK(transfers({"--transfers", "12"}) == std::pair{12, 12});
+  CHECK(transfers({"--min-transfers", "5", "--max-transfers", "5"}) == std::pair{5, 5});
+  // The other bound's default gives way to one given alone.
+  CHECK(transfers({"--max-transfers", "2"}) == std::pair{2, 2});
+  CHECK(transfers({"--min-transfers", "100"}) == std::pair{100, 100});
+
+  CHECK_FALSE(parse({"sync", "--min-transfers", "8", "--max-transfers", "4", "a", "b"}).ok());
+  CHECK_FALSE(parse({"sync", "--transfers", "8", "--max-transfers", "16", "a", "b"}).ok());
+  CHECK_FALSE(parse({"sync", "--min-transfers", "2", "--transfers", "8", "a", "b"}).ok());
+  CHECK_FALSE(parse({"sync", "--transfers", "0", "a", "b"}).ok());
+  CHECK_FALSE(parse({"sync", "--max-transfers", "0", "a", "b"}).ok());
+  CHECK_FALSE(parse({"sync", "--no-adaptive", "a", "b"}).ok());
 }
 
 TEST_CASE("usage errors are rejected") {

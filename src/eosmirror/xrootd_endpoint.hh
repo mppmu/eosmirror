@@ -110,6 +110,9 @@ class XrdEndpoint : public Endpoint {
   // own connection where asked for.
   std::string open_url(const std::string& request_path) const;
 
+  // Opens a file for reading.
+  Result<std::unique_ptr<XrdCl::File>> open_file(const std::string& abs_path);
+
   std::string url_;     // as given, for display (display_url)
   std::string server_;  // root://[user[:password]@]host:port
   std::string root_;    // the path part, without trailing slash
@@ -117,6 +120,34 @@ class XrdEndpoint : public Endpoint {
   XrdOptions options_;
   Capabilities caps_;
   std::unique_ptr<XrdCl::FileSystem> fs_;
+};
+
+// A file read through one XrdCl::File with up to `window` chunk reads in
+// flight (ReadAhead); the base of the XRootD and EOS readers. XrdCl may call
+// a read's handler after the file is closed, so the reads in flight are
+// waited for first.
+class XrdReader : public FileReader {
+ public:
+  // url: the file, for messages.
+  XrdReader(std::unique_ptr<XrdCl::File> file, std::string url, int window);
+  ~XrdReader() override;
+
+  Result<size_t> read(uint64_t offset, std::span<std::byte> buf) override;
+  Result<Chunk> read_chunk(uint64_t offset, uint64_t end, BufferPool& pool) override;
+  Result<Entry> stat() override { return file_stat(true); }
+
+ protected:
+  // The server's stat of the open file: a fresh one, or else the last one
+  // XrdCl got, which until a fresh one is the one that came with the open
+  // (XrdCl asks every open for it, kXR_retstat).
+  Result<Entry> file_stat(bool fresh);
+
+ private:
+  Status submit(uint64_t offset, std::span<std::byte> buf, ReadAhead::Done done);
+
+  std::unique_ptr<XrdCl::File> file_;
+  std::string url_;
+  ReadAhead ahead_;
 };
 
 // A file written through one XrdCl::File with up to `window` writes in

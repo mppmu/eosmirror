@@ -40,14 +40,17 @@ struct CopyOutcome {
 // Copies one file from source to target under the same relative path, in
 // chunks of the pool's buffer size.
 //
-// The target gets the metadata and mtime the source had before reading. If
-// the source's size or mtime changed by the end, nothing is committed and the
-// error is Changed. Nothing is created on the target before the first chunk
-// was read. Checksums are computed while streaming: the target's own type if
-// it computes one, else the source's, else adler32. The checksum the source
-// stores is compared too where the target computes none, or where the
-// source lists it anyway: `listed` is the source's entry from its listing,
-// whose checksum counts while its size and mtime are those of the file read.
+// The target gets the metadata and mtime the source had before reading
+// (FileReader::state: a stat, or the listed entry where the reader can tell
+// that the file still has its listed size). If the source changed by the
+// end, nothing is committed and the error is Changed. Nothing is created on
+// the target before the first chunk was read. Checksums are computed while
+// streaming: the target's own type if it computes one, else the source's,
+// else adler32. The checksum the source stores is compared too where the
+// target computes none, or where the source lists it anyway: `listed` is the
+// source's entry from its listing, whose checksum counts while its size and
+// mtime are those of the file read. A mismatch with the listed checksum is
+// Changed if the file no longer has its listed size and mtime.
 Result<CopyOutcome> copy_file(Endpoint& source, Endpoint& target, const RelPath& path,
                               const Entry& listed, const CopyOptions& options, BufferPool& pool,
                               const Cancellation& cancel);

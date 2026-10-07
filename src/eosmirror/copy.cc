@@ -16,7 +16,7 @@ Result<CopyOutcome> copy_file(Endpoint& source, Endpoint& target, const RelPath&
   if (!opened.ok()) return opened.error();
   std::unique_ptr<FileReader> reader = std::move(opened).value();
 
-  auto before = reader->stat();
+  auto before = reader->state(listed);
   if (!before.ok()) return before.error();
   const Entry& src = before.value();
   if (src.type != EntryType::File)
@@ -106,13 +106,10 @@ Result<CopyOutcome> copy_file(Endpoint& source, Endpoint& target, const RelPath&
     offset += size;
   }
 
-  auto after = reader->stat();
-  if (!after.ok()) {
+  auto unchanged = reader->unchanged(src);
+  if (!unchanged.ok() || !unchanged.value()) {
     writer->abort();
-    return after.error();
-  }
-  if (after.value().size != src.size || after.value().mtime != src.mtime) {
-    writer->abort();
+    if (!unchanged.ok()) return unchanged.error();
     return Error{ErrorKind::Changed, path + " changed during copy"};
   }
   spec.checksum = hasher.finish();
@@ -134,6 +131,15 @@ Result<CopyOutcome> copy_file(Endpoint& source, Endpoint& target, const RelPath&
     if (stored.value().type == type) {
       if (stored.value() != spec.checksum) {
         writer->abort();
+        if (stored.value() == known.checksum) {
+          // The listing's checksum: unless the data is corrupt, the file was
+          // rewritten with the same size since it was listed, which a reader
+          // that takes the listed entry as the file's state cannot tell.
+          auto now = source.stat(path);
+          if (!now.ok() && now.error().kind == ErrorKind::NotFound) return now.error();
+          if (now.ok() && (now.value().size != listed.size || now.value().mtime != listed.mtime))
+            return Error{ErrorKind::Changed, path + " changed since it was listed"};
+        }
         return Error{ErrorKind::Checksum, path + " has checksum " + stored.value().hex +
                                               " on the source, but " + spec.checksum.hex +
                                               " was read"};

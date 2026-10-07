@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "eosmirror/cli.hh"
 
+#include <algorithm>
 #include <cstdlib>
 #include <functional>
 #include <map>
+#include <optional>
 
 namespace eosmirror {
 
@@ -66,10 +68,14 @@ Options:
       --fsync              fsync files on local targets before renaming them
       --rewrite-links A=B  rewrite symlink targets starting with A to start with B
       --checkers N         directory workers (default 8)
-      --transfers N        file copy workers, the most running at once (default 8)
-      --min-transfers N    copies running at the start (default 4); the limit then
-                           rises while throughput improves and falls on retries
-      --no-adaptive        run all transfers at once from the start
+      --min-transfers N    copies running at once at the start, and at least
+                           (default 4); the limit rises while throughput improves,
+                           and falls back when a rise did not pay or the target
+                           fails operations
+      --max-transfers N    copies running at once at most (default 64); with the
+                           default windows and buffer size, 64 copies hold up to
+                           64 x 9 x 8 MiB = 4.5 GiB of buffers
+      --transfers N        exactly N copies running at once
       --write-window N     writes per file in flight to XRootD and EOS (default 4),
                            in order; safe for erasure-coded EOS files only while
                            the FSTs keep EOS's default "xrootd.async off";
@@ -201,9 +207,12 @@ Result<CliOptions> parse_command_line(int argc, char** argv) {
     return Status();
   });
   integer("--checkers", [&](long long n) { sync.checkers = static_cast<int>(n); });
-  integer("--transfers", [&](long long n) { sync.transfers = static_cast<int>(n); });
-  integer("--min-transfers", [&](long long n) { sync.min_transfers = static_cast<int>(n); });
-  flag("--no-adaptive", [&] { sync.adaptive = false; });
+  // Given on the command line: --transfers N, or --min-transfers and
+  // --max-transfers.
+  std::optional<int> transfers, min_transfers, max_transfers;
+  integer("--transfers", [&](long long n) { transfers = static_cast<int>(n); });
+  integer("--min-transfers", [&](long long n) { min_transfers = static_cast<int>(n); });
+  integer("--max-transfers", [&](long long n) { max_transfers = static_cast<int>(n); });
   integer("--write-window",
           [&](long long n) { opts.endpoints.xrootd.write_window = static_cast<int>(n); });
   integer("--read-window",
@@ -291,7 +300,20 @@ Result<CliOptions> parse_command_line(int argc, char** argv) {
   opts.target = positional[1];
   if (retries < 0) return usage_error("--retries must not be negative");
   sync.retry.attempts = retries + 1;
-  if (sync.checkers < 1 || sync.transfers < 1) return usage_error("--checkers and --transfers must be at least 1");
+  if (sync.checkers < 1) return usage_error("--checkers must be at least 1");
+  if (transfers && (min_transfers || max_transfers))
+    return usage_error("--transfers excludes --min-transfers and --max-transfers");
+  if (transfers) min_transfers = max_transfers = transfers;
+  for (const auto& n : {min_transfers, max_transfers})
+    if (n && *n < 1)
+      return usage_error("--transfers, --min-transfers and --max-transfers must be at least 1");
+  if (min_transfers && max_transfers && *min_transfers > *max_transfers)
+    return usage_error("--min-transfers must not exceed --max-transfers");
+  // One of them given alone moves the other's default where needed.
+  if (min_transfers) sync.min_transfers = *min_transfers;
+  if (max_transfers) sync.max_transfers = *max_transfers;
+  if (!min_transfers) sync.min_transfers = std::min(sync.min_transfers, sync.max_transfers);
+  if (!max_transfers) sync.max_transfers = std::max(sync.max_transfers, sync.min_transfers);
   if (sync.buffer_size > (1u << 30)) return usage_error("--buffer-size must be at most 1G");
   if (opts.endpoints.xrootd.write_window < 1 || opts.endpoints.xrootd.read_window < 1)
     return usage_error("--write-window and --read-window must be at least 1");
