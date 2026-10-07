@@ -24,13 +24,15 @@ client for now. See [docs/design.md](docs/design.md).
   endpoint supports it.
 - Symlinks are recreated as symlinks and never followed. Hard links are copied
   as separate files. Special files are skipped and reported.
-- Extra files on the target are only deleted with an explicit option, with a
-  dry run and a cap on the number of deletions, and never because the
-  source is empty.
+- Extra files on the target are only deleted with an explicit option
+  (`--delete`), with a dry run and a cap on the number of deletions, and
+  never because the source is empty.
+- Files and directories that disappear from the source during a run are
+  counted as vanished, not as failures; the next run finds them gone.
 - Errors are retried with backoff; what still fails is recorded in the
   journal and reported, and the exit status says so. When everything fails
-  (an endpoint has gone away), the run stops after 1000 failures in a row
-  (`--max-consecutive-failures`).
+  (an endpoint has gone away), the run stops after 1000 failures or vanished
+  entries in a row (`--max-consecutive-failures`).
 
 Extended attributes and ACLs are not replicated.
 
@@ -94,6 +96,17 @@ ended. This is safe for erasure-coded EOS files only while the storage
 nodes (FSTs) keep EOS's default `xrootd.async off`; `--write-window 1` opts
 out. Files read from EOS or from an XRootD server that computes checksums
 are verified against the stored checksum when the target computes none.
+Files read from EOS take their metadata and checksum from the directory
+listing, so the MGM sees one open per file, as with xrdcp; a file that
+changed since the listing is stated before and after reading.
+
+Up to 64 copies run at once (`--max-transfers`). A run starts with 4
+(`--min-transfers`) and raises the number every 10 s while the throughput
+improves, takes a raise back when the throughput drops after it, and
+lowers the number when the target fails operations; `--transfers N` runs
+exactly N. A copy holds up to both windows plus one buffer, so 64 copies
+hold up to 4.5 GiB of buffers at the defaults (2.5 GiB between EOS and a
+local file system).
 
 On a terminal, `sync` shows a live display: counters, the write rate, bars
 for the transfer slots in use and the backlog, and one bar per file being
@@ -101,7 +114,8 @@ copied. `--progress SEC` prints plain progress lines instead (for logs) and
 `-q` turns both off.
 
 `eosmirror sync --help` lists the options: dry runs, deletion of extra
-entries with a cap, worker counts, retries, resuming an interrupted run,
+entries with a cap, parallelism (`--min-transfers`, `--max-transfers`,
+`--transfers`), retries, resuming an interrupted run,
 sharding a tree over several hosts (`--shard K/N`) and symlink rewriting.
 The exit status is 0 when everything succeeded, 1 when some entries failed
 after retries, 2 for usage errors, 3 when the run could not start (or found
