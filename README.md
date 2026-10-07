@@ -112,8 +112,8 @@ when interrupted.
 ## Building
 
 Requires a C++20 compiler (gcc 11 or newer), CMake 3.20 or newer, SQLite 3
-and zlib. The XRootD client library (XrdCl) is needed for XRootD and EOS
-endpoints.
+and zlib. The XRootD client library (XrdCl, XRootD 5.6 or newer) is needed
+for XRootD and EOS endpoints.
 
 ```
 cmake -S . -B build
@@ -132,9 +132,19 @@ CERN's public EOS image.
 
 `packaging/eosmirror.spec` builds an RPM (`rpmbuild -ta eosmirror-VERSION.tar.gz`)
 and `debian/` a Debian package (`dpkg-buildpackage -us -uc -b`).
-`scripts/build-packages.sh [--output=DIR] [PLATFORM...]` builds both from
-the working tree in the build containers, an RPM for EL9 and .debs for
-Ubuntu 22.04 and 24.04.
+`scripts/build-packages.sh [--output=DIR] [--image=IMAGE...] [PLATFORM...]`
+builds both from the working tree: in the build containers, an RPM for EL9
+and .debs for Ubuntu 22.04 and 24.04, and with `--image` in fresh containers
+from stock Debian, Ubuntu, EL, Fedora or openSUSE images, against the
+distribution's XRootD (EPEL's on EL). It installs each of the latter in a
+second fresh container and runs the self-test there:
+
+```
+scripts/build-packages.sh --image=docker.io/library/debian:13 \
+  --image=docker.io/library/almalinux:9 --image=registry.fedoraproject.org/fedora:44
+```
+
+Debian 12, Ubuntu 22.04 and openSUSE Leap 16.0 ship no XRootD 5.6 or newer.
 
 The XRootD client library comes from CERN's eos-xrootd (under
 `/opt/eos/xrootd`, the XRootD that EOS is built against) or from the

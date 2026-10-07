@@ -65,7 +65,17 @@ if(EOSMIRROR_WITH_XROOTD)
       IMPORTED_LOCATION ${XRDCL_LIBRARY}
       INTERFACE_INCLUDE_DIRECTORIES ${XROOTD_INCLUDE_DIR})
     get_filename_component(EOSMIRROR_XROOTD_LIBDIR ${XRDCL_LIBRARY} DIRECTORY)
-    message(STATUS "XRootD client: ${XRDCL_LIBRARY}, headers in ${XROOTD_INCLUDE_DIR}")
+    # XrdVNUMBER is xyyzz for version x.yy.zz.
+    file(STRINGS ${XROOTD_INCLUDE_DIR}/XrdVersion.hh vnumber REGEX "^#define XrdVNUMBER")
+    string(REGEX MATCH "[0-9]+" vnumber "${vnumber}")
+    math(EXPR major "${vnumber} / 10000")
+    math(EXPR minor "${vnumber} / 100 % 100")
+    math(EXPR patch "${vnumber} % 100")
+    set(XRootD_VERSION ${major}.${minor}.${patch})
+    message(STATUS "XRootD ${XRootD_VERSION} client: ${XRDCL_LIBRARY}, headers in ${XROOTD_INCLUDE_DIR}")
+  endif()
+  if(XRootD_VERSION VERSION_LESS 5.6)
+    message(FATAL_ERROR "XRootD ${XRootD_VERSION} is too old, eosmirror needs 5.6 or newer (set EOSMIRROR_WITH_XROOTD=OFF to build without)")
   endif()
   # An installed binary must still find eos-xrootd under /opt. The system's
   # library directories need no RPATH (and packaging checks reject them).

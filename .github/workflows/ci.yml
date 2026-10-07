@@ -73,3 +73,29 @@ jobs:
         with:
           name: packages-${{ matrix.platform }}
           path: ${{ runner.temp }}/packages/${{ matrix.platform }}
+
+  distribution-packages:
+    name: Packages ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # Stock images, with the distributions' XRootD.
+        include:
+          - { name: debian13, image: docker.io/library/debian:13 }
+          - { name: ubuntu24-stock, image: docker.io/library/ubuntu:24.04 }
+          - { name: almalinux9, image: docker.io/library/almalinux:9 }
+          - { name: almalinux10, image: docker.io/library/almalinux:10 }
+          - { name: fedora44, image: registry.fedoraproject.org/fedora:44 }
+          - { name: tumbleweed, image: registry.opensuse.org/opensuse/tumbleweed }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and install packages
+        run: scripts/build-packages.sh --output=${{ runner.temp }}/packages --image=${{ matrix.image }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: packages-${{ matrix.name }}
+          path: |
+            ${{ runner.temp }}/packages
+            !${{ runner.temp }}/packages/*.tar.gz
