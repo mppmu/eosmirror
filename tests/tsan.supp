@@ -2,3 +2,8 @@
 # call XrdSysTimer::TimeZone() at once, whose mktime() sets up the time zone
 # under a lock inside glibc that TSan does not see.
 race:XrdSysTimer::TimeZone
+# XrdCl shares a file's state handler between the File and its requests in
+# flight through shared_ptr, whose reference counts live in the
+# uninstrumented library: TSan takes the handler's destruction by the last
+# owner, an XrdCl thread, for a race with the File's earlier calls.
+race:XrdCl::FileStateHandler
