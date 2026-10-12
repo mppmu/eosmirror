@@ -34,10 +34,6 @@ struct XrdOptions {
   bool shared_connection = false;
 };
 
-// The URL without what may carry credentials: a password before the host and
-// the opaque parameters (authz tokens and the like).
-std::string display_url(std::string_view url);
-
 // The parts of an endpoint URL, proto://[user@]host[:port]//path[?cgi].
 struct EndpointUrl {
   std::string server;  // proto://[user@]host:port
@@ -165,7 +161,7 @@ class XrdReader : public FileReader {
 
   Result<size_t> read(uint64_t offset, std::span<std::byte> buf) override;
   Result<Chunk> read_chunk(uint64_t offset, uint64_t end, BufferPool& pool) override;
-  Result<Entry> stat() override { return file_stat(true); }
+  Result<Entry> stat() override;
 
  protected:
   // The server's stat of the open file: a fresh one, or else the last one

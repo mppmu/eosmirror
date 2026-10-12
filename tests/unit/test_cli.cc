@@ -141,6 +141,26 @@ TEST_CASE("usage errors are rejected") {
   CHECK(parse({"failures", "j.db"}).value().journal == "j.db");
 }
 
+TEST_CASE("displayed URLs carry no credentials") {
+  CHECK(display_url("root://host:1094//eos/dir?authz=secret&x=1") == "root://host:1094//eos/dir");
+  CHECK(display_url("root://user:secret@host//eos?xrd.wantprot=krb5") == "root://user@host//eos");
+  CHECK(display_url("root://user@host:1094//eos") == "root://user@host:1094//eos");
+  CHECK(display_url("root://host//data/a@b:c") == "root://host//data/a@b:c");
+  CHECK(display_url("root://host:1094") == "root://host:1094");
+
+  // Nor do the errors about endpoints that cannot be made.
+  std::vector<std::string> specs = {"unknown://user:secret@host//x?authz=secret", "/eos/x?authz=secret"};
+#ifndef EOSMIRROR_HAVE_XROOTD
+  specs.push_back("root://user:secret@host//x?authz=secret");
+#endif
+  for (const std::string& spec : specs) {
+    INFO("endpoint ", spec);
+    auto made = make_endpoint(spec, EndpointSettings{});
+    REQUIRE_FALSE(made.ok());
+    CHECK(made.error().describe().find("secret") == std::string::npos);
+  }
+}
+
 TEST_CASE("paths below /eos name the EOS instance of the MGM") {
   CHECK(parse({"sync", "--mgm", "root://mgm.example.org", "/eos/a", "/local"}).value().endpoints.mgm ==
         "root://mgm.example.org");

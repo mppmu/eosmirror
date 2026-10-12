@@ -28,14 +28,6 @@ bool refused(std::string_view line, std::string_view dir = "/eos/d") {
 
 }  // namespace
 
-TEST_CASE("displayed URLs carry no credentials") {
-  CHECK(display_url("root://host:1094//eos/dir?authz=secret&x=1") == "root://host:1094//eos/dir");
-  CHECK(display_url("root://user:secret@host//eos?xrd.wantprot=krb5") == "root://user@host//eos");
-  CHECK(display_url("root://user@host:1094//eos") == "root://user@host:1094//eos");
-  CHECK(display_url("root://host//data/a@b:c") == "root://host//data/a@b:c");
-  CHECK(display_url("root://host:1094") == "root://host:1094");
-}
-
 TEST_CASE("XRootD request paths cannot contain '?'") {
   CHECK(xrootd_request_path("/data/a b#c%d&e=f").value() == "/data/a b#c%d&e=f");
   auto refused_path = xrootd_request_path("/data/x?eos.ruid=0");

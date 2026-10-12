@@ -186,18 +186,6 @@ class XrdWriter : public XrdFileWriter {
 
 }  // namespace
 
-std::string display_url(std::string_view url) {
-  url = url.substr(0, url.find('?'));
-  auto scheme = url.find("://");
-  size_t host = scheme == std::string_view::npos ? 0 : scheme + 3;
-  auto at = url.find('@', host);
-  if (at != std::string_view::npos && at < url.find('/', host)) {
-    auto colon = url.find(':', host);
-    if (colon < at) return std::string(url.substr(0, colon)) + std::string(url.substr(at));
-  }
-  return std::string(url);
-}
-
 Result<EndpointUrl> parse_endpoint_url(const std::string& url) {
   XrdCl::URL parsed(url);
   if (!parsed.IsValid() || parsed.GetProtocol().empty() || parsed.GetHostName().empty())
@@ -409,6 +397,8 @@ Result<size_t> XrdReader::read(uint64_t offset, std::span<std::byte> buf) {
 Result<Chunk> XrdReader::read_chunk(uint64_t offset, uint64_t end, BufferPool& pool) {
   return ahead_.next(offset, end, pool);
 }
+
+Result<Entry> XrdReader::stat() { return file_stat(true); }
 
 Result<Entry> XrdReader::file_stat(bool fresh) {
   XrdCl::StatInfo* info = nullptr;

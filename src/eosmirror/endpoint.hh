@@ -7,6 +7,7 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "eosmirror/buffer.hh"
@@ -63,6 +64,10 @@ std::string to_string(const Location& location);
 // Whether the tree at inner is the one at outer or inside it, comparing
 // whole path components.
 bool contains(const Location& outer, const Location& inner);
+
+// The URL without what may carry credentials: a password before the host and
+// the opaque parameters (authz tokens and the like).
+std::string display_url(std::string_view url);
 
 // Sequential reader of one file.
 class FileReader {

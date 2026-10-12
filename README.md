@@ -84,6 +84,8 @@ are on the instance of `--mgm` or `EOS_MGM_URL`, as for the `eos` client.
 A run logs both endpoints as resolved (server, real path, and where the MGM
 came from). Authentication is the
 XRootD client's (`XrdSecPROTOCOL`, `XrdSecSSSKT`, Kerberos tickets).
+eosmirror shows URLs without passwords and opaque parameters, but XrdCl's
+own log (`XRD_LOGLEVEL`) shows passwords given in URLs: give none there.
 
 For example, a first run with a journal, then a rerun of what failed:
 

@@ -76,6 +76,18 @@ std::string to_string(const Location& location) {
   return location.server.empty() ? location.path : location.path + " on " + location.server;
 }
 
+std::string display_url(std::string_view url) {
+  url = url.substr(0, url.find('?'));
+  auto scheme = url.find("://");
+  size_t host = scheme == std::string_view::npos ? 0 : scheme + 3;
+  auto at = url.find('@', host);
+  if (at != std::string_view::npos && at < url.find('/', host)) {
+    auto colon = url.find(':', host);
+    if (colon < at) return std::string(url.substr(0, colon)) + std::string(url.substr(at));
+  }
+  return std::string(url);
+}
+
 bool contains(const Location& outer, const Location& inner) {
   if (outer.server != inner.server) return false;
   const std::string& o = outer.path;
@@ -116,8 +128,9 @@ Result<std::string> eos_path_url(const std::string& spec, const std::string& mgm
   // XRootD takes what follows a '?' for opaque parameters: another
   // directory would be synchronized.
   if (spec.find('?') != std::string::npos)
-    return Error{ErrorKind::Other, spec + " contains a '?', which would end the path and start "
-                                          "the opaque parameters of its URL"};
+    return Error{ErrorKind::Other, display_url(spec) + "?...: a path below /eos with a '?', "
+                                                       "which would start the opaque parameters "
+                                                       "of its URL"};
   std::string server = !mgm.empty() ? mgm : env_mgm ? env_mgm : "";
   while (!server.empty() && server.back() == '/') server.pop_back();
   if (server.empty())
@@ -159,10 +172,10 @@ Result<std::unique_ptr<Endpoint>> make_endpoint(const std::string& given,
       log_server(url, "XRootD server");
       return std::unique_ptr<Endpoint>(std::move(ep).value());
 #else
-      return Error{ErrorKind::Unsupported, "built without XRootD support: " + spec};
+      return Error{ErrorKind::Unsupported, "built without XRootD support: " + display_url(spec)};
 #endif
     }
-    return Error{ErrorKind::Unsupported, "unknown URL scheme in " + spec};
+    return Error{ErrorKind::Unsupported, "unknown URL scheme in " + display_url(spec)};
   }
   return std::unique_ptr<Endpoint>(new PosixEndpoint(spec, settings.posix));
 }
