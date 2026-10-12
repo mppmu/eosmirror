@@ -751,9 +751,13 @@ struct Engine::Impl {
     child->parent = node;
     child->owned = shard_owns(path);
     if (existing && existing->type != EntryType::Directory) {
+      // The shard that owns the directory replaces the entry; until then,
+      // this one cannot walk the subtree, which a later run does.
       if (!node->owned) {
-        log::warn("skipping ", path, " in this run: the target entry is a ",
-                  to_string(existing->type), " that another shard replaces");
+        fail(path, EntryType::Directory,
+             Error{ErrorKind::Exists, "target is a " + std::string(to_string(existing->type)) +
+                                          ", which the shard that owns its directory replaces: "
+                                          "not walked in this run"});
         return;
       }
       if (!resolve_conflict(node, path, *existing, EntryType::Directory)) return;

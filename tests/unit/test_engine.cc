@@ -807,6 +807,28 @@ TEST_CASE("fake: shards partition the files and together cover everything") {
   CHECK(check.stats.symlinks_created == 0);
 }
 
+TEST_CASE("fake: a shard that cannot walk a subtree for an entry in the way fails it") {
+  // Shard 1 of 2 owns the top directory, shard 0 owns a.
+  FakeEndpoint src, dst;
+  src.add_dir("a");
+  src.add_file("a/f", "in a");
+  dst.add_file("a", "in the way");
+  auto shard = [&](int k) {
+    SyncOptions o = fake_options();
+    o.delete_extra = true;
+    o.shard_index = k;
+    o.shard_count = 2;
+    Report r;
+    REQUIRE(run_sync(src, dst, o, r).ok());
+    return r.stats.failures.load();
+  };
+  CHECK(shard(0) == 1);
+  CHECK(shard(1) == 0);  // replaces the file, but a/f is shard 0's
+  CHECK_FALSE(dst.get("a/f"));
+  CHECK(shard(0) == 0);
+  expect_mirrored(src, dst);
+}
+
 TEST_CASE("fake: cancellation stops the run and leaves nothing partial") {
   FakeEndpoint src, dst;
   for (int f = 0; f < 200; ++f) src.add_file("f" + std::to_string(f), "content");

@@ -242,7 +242,10 @@ Modes:
 directory skeleton (mkdir is idempotent), but files, symlinks, metadata and
 deletions of a directory are handled only by the shard that owns it,
 chosen by a hash of the directory path. Directory listings are repeated per
-shard, which is cheap compared to the copies.
+shard, which is cheap compared to the copies. A target entry of another
+type in the way of a source directory is replaced by the shard that owns
+the directory above it; the other shards cannot walk the subtree until
+then and record it as a failure, so that their next run walks it.
 
 ### Reporting
 
