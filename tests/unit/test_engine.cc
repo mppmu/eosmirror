@@ -523,6 +523,25 @@ TEST_CASE("fake: uploads that fail their verification are taken back") {
   expect_mirrored(src, dst);
 }
 
+TEST_CASE("fake: a file that cannot be told from a failed upload is left alone") {
+  FakeEndpoint src, dst;
+  dst.atomic_uploads = true;  // confirmed by size and mtime: no checksums
+  populate(src);
+  dst.add_file("f0", "previous", 0644, {2500, 0});
+  // The storage node discards the upload, the close reports success, and the
+  // stats that would show the previous file in place time out.
+  const int attempts = fake_options().retry.attempts;
+  dst.fail("lost", "f0", Error{ErrorKind::IO, "connection gone"}, attempts);
+  dst.fail("stat", "f0", Error{ErrorKind::Timeout, "no answer"}, 2 * attempts);
+  Report r;
+  REQUIRE(run_sync(src, dst, fake_options(), r).ok());
+  REQUIRE(r.stats.failures == 1);
+  CHECK(r.failures()[0].error.kind == ErrorKind::IO);
+  REQUIRE(dst.get("f0"));
+  CHECK(dst.get("f0")->content == "previous");
+  CHECK(dst.get("f0")->entry.mtime == Timespec{2500, 0});
+}
+
 TEST_CASE("fake: files whose last copy failed are copied again, whatever their size and mtime") {
   TempDir tmp;
   auto journal = Journal::open(tmp.sub("j.sqlite"), "fake", "fake");

@@ -71,9 +71,15 @@ Result<bool> AtomicUploadWriter::in_place(const CommitSpec& spec) {
 }
 
 // Removes the upload, or else sets its mtime to 0 so that the next run copies
-// it again. A file in place that is not the upload is left alone.
+// it again. A file in place that is not the upload is left alone, and so is
+// one that cannot be told apart from it.
 AtomicUploadWriter::Gone AtomicUploadWriter::take_back(const CommitSpec& spec) {
-  if (auto ours = in_place(spec); ours.ok() && !ours.value()) return Gone::NotInPlace;
+  auto ours = in_place(spec);
+  if (!ours.ok()) {
+    log::error("cannot tell whether ", name_, " is the failed upload: ", ours.error().describe());
+    return Gone::Stuck;
+  }
+  if (!ours.value()) return Gone::NotInPlace;
   Status removed = ep_.remove(path_, EntryType::File);
   if (removed.ok() || removed.error().kind == ErrorKind::NotFound) return Gone::TakenBack;
   Entry md = spec.metadata;
@@ -89,7 +95,7 @@ AtomicUploadWriter::Gone AtomicUploadWriter::take_back(const CommitSpec& spec) {
 Error AtomicUploadWriter::failed(Gone gone, Error e) const {
   if (gone == Gone::Stuck) {
     e.kind = ErrorKind::IO;
-    e.message += "; " + name_ + " stays in place unverified";
+    e.message += "; " + name_ + " may stay in place unverified";
   }
   return e;
 }

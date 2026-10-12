@@ -18,8 +18,9 @@ namespace eosmirror {
 // commit an upload whose close failed. The upload carries the source's size
 // and mtime, so that it would pass for a good copy: one that fails its
 // verification, or whose close failed, is taken away again if it is in
-// place, removed or else given mtime 0. Owner and mode are applied once the
-// file is confirmed.
+// place, removed or else given mtime 0. A file in place that cannot be told
+// apart from it is left alone. Owner and mode are applied once the file is
+// confirmed.
 class AtomicUploadWriter : public FileWriter {
  public:
   // The checksum the endpoint stores for the file in place; None if it
@@ -38,11 +39,12 @@ class AtomicUploadWriter : public FileWriter {
  private:
   // Whether the file in place is this upload, by size and mtime.
   Result<bool> in_place(const CommitSpec& spec);
-  // Takes the upload away if it is in place, or may be.
+  // Takes the upload away if it is in place. Stuck: it is, or may be, and
+  // stays.
   enum class Gone { NotInPlace, TakenBack, Stuck };
   Gone take_back(const CommitSpec& spec);
   // The error e of a copy whose upload was taken back: an I/O error if it
-  // stays in place, so that a journal records the copy as one in doubt.
+  // may stay in place, so that a journal records the copy as one in doubt.
   Error failed(Gone gone, Error e) const;
   // The error of a failed verification: that of failed(), or that the
   // upload was not committed if it is not in place.

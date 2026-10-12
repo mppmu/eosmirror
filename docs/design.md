@@ -404,7 +404,10 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
   again, or else gets mtime 0, since it already carries the size and mtime
   of the source and would pass for a good copy. So is the upload after a
   close that failed, if a file with its size and mtime is in place: the
-  storage node may have committed it all the same. Owner and mode are applied
+  storage node may have committed it all the same. Where a stat cannot tell
+  whether the file in place is the upload, it is left alone, since it may be
+  the previous file, and the copy fails as an I/O error, which keeps it in
+  doubt (see the journal above). Owner and mode are applied
   after the close, since an upload runs under the client's identity: the
   file is briefly visible with the uploader's owner. The mode is passed in
   the open, which gives a new file that mode plus the owner's read and
