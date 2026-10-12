@@ -1258,6 +1258,20 @@ TEST_CASE("fake: nothing is deleted where a listing skipped entries") {
   CHECK_FALSE(dst.get("extra"));
   CHECK(r.summary(false).find("could not be listed, whose target entries were kept: 2") !=
         std::string::npos);
+
+  // Where nothing would be deleted, nothing is held back either.
+  src.unlistable.clear();
+  dst.unlistable = {"d1/f1"};
+  dst.erase("d1/extra");
+  int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::system_clock::now().time_since_epoch())
+                    .count();
+  dst.add_file("d1/.tmp-upload", "in progress", 0600, {now, 0});
+  Report r2;
+  REQUIRE(run_sync(src, dst, o, r2).ok());
+  CHECK(r2.stats.incomplete_dirs == 0);
+  CHECK(r2.stats.deleted == 2);  // in d1/d2
+  CHECK(dst.get("d1/.tmp-upload"));
 }
 
 TEST_CASE("fake: slow source reads are logged") {

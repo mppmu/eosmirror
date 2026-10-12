@@ -568,11 +568,24 @@ struct Engine::Impl {
       // A retry handles only its own names, among them failed deletions.
       if (node->only)
         std::erase_if(dst_entries, [&](const auto& e) { return !node->only->count(e.first); });
+      bool removable = std::any_of(dst_entries.begin(), dst_entries.end(), [&](const auto& e) {
+        return !target.is_temporary(e.first) || stale(e.second);
+      });
       handle_extras(node, dst_entries,
-                    options.delete_extra &&
-                        (dst_entries.empty() || may_delete(node, emptied, skipped)));
+                    options.delete_extra && removable && may_delete(node, emptied, skipped));
     }
     entry_done(node);
+  }
+
+  // Whether a temporary on the target is a leftover that nobody works on:
+  // neither its mtime nor its ctime is recent. EOS sets an atomic upload's
+  // mtime to the source's when it creates it (eos.mtime), so its ctime tells
+  // when it was created.
+  bool stale(const Entry& temporary) const {
+    int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
+                      std::chrono::system_clock::now().time_since_epoch())
+                      .count();
+    return std::max(temporary.mtime, temporary.ctime).sec + options.stale_temp_age.count() < now;
   }
 
   // Whether --delete may delete the extras of a directory: not where a
@@ -768,17 +781,11 @@ struct Engine::Impl {
   // stale temporaries included, if deleting.
   void handle_extras(const std::shared_ptr<DirNode>& node,
                      const std::unordered_map<std::string, Entry>& extras, bool deleting) {
-    int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
-                      std::chrono::system_clock::now().time_since_epoch())
-                      .count();
     for (const auto& [name, e] : extras) {
       if (cancel.requested()) return;
       RelPath path = join(node->path, name);
       if (target.is_temporary(name)) {
-        // EOS sets an atomic upload's mtime to the source's when it creates
-        // it (eos.mtime), so its ctime tells when it was created.
-        bool stale = std::max(e.mtime, e.ctime).sec + options.stale_temp_age.count() < now;
-        if (!stale) continue;
+        if (!stale(e)) continue;
         if (!deleting) {
           stats.stale_temps.fetch_add(1);
           continue;
