@@ -202,6 +202,10 @@ TEST_CASE("FS to xrootd and back") {
   CHECK(r.stats.failures == 0);
   CHECK(r.stats.symlinks_skipped == 1);
   CHECK(dst.stat("sub/nested/file").value().size == 1000);
+  // Also modes without the owner's read and write bits, which the server
+  // adds to those of new files.
+  CHECK(dst.stat("empty").value().mode == 0444);
+  CHECK(dst.stat("a.txt").value().mode == 0640);
 
   // Without mtimes on the target, a rerun compares sizes only.
   Report r2;
@@ -236,6 +240,7 @@ TEST_CASE("xrootd to FS: pipelined reads of many chunks, and a file cut short me
   std::string content = pattern(3 * 1024 * 1024 + 17);
   CommitSpec spec;
   spec.size = content.size();
+  spec.fields = MetaFields::None;
   Hasher hasher(ChecksumType::Adler32);
   hasher.update(bytes(content));
   spec.checksum = hasher.finish();

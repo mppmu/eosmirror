@@ -299,7 +299,9 @@ than once are left out (counted), as in EOS listings. Writes go to
 a temporary name `.<name>.eosmirror-<12 hex digits>` with up to
 `--write-window` writes in flight per file, the stored checksum is verified
 by a checksum query (where nothing is compared, a stat checks the size),
-and the file is renamed into place. A server that refuses to replace an
+and the file is renamed into place. The server gives a new file the mode
+of the open plus the owner's read and write bits, so a mode without them
+is set before the rename. A server that refuses to replace an
 existing file gets that file moved aside to a temporary name first, removed
 once the new one is in place, or moved back if that fails. A file read from a
 server that computes checksums is verified by a checksum query after the

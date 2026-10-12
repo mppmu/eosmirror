@@ -167,6 +167,11 @@ class XrdWriter : public XrdFileWriter {
         return Error{ErrorKind::IO, temp_ + " has " + std::to_string(st.value().size) +
                                         " bytes instead of " + std::to_string(spec.size)};
     }
+    // The server gives a new file the mode of the open plus the owner's read
+    // and write bits (XrdXrootdXeq.cc, do_Open).
+    if (has(spec.fields, MetaFields::Mode) && (spec.metadata.mode & 0600) != 0600) {
+      if (Status s = ep_.chmod_abs(temp_, spec.metadata.mode); !s.ok()) return s;
+    }
     Status renamed = ep_.rename_abs(temp_, final_);
     if (renamed.ok()) temp_exists_ = false;
     return renamed;
@@ -635,12 +640,16 @@ Status XrdEndpoint::set_metadata(const RelPath& path, const Entry& md, MetaField
     return Error{ErrorKind::Unsupported, "owners cannot be set on " + url_of(abs)};
   if (has(fields, MetaFields::Mtime))
     return Error{ErrorKind::Unsupported, "mtimes cannot be set on " + url_of(abs)};
-  if (has(fields, MetaFields::Mode) && md.type != EntryType::Symlink) {
-    auto request = request_path(abs);
-    if (!request.ok()) return request.error();
-    XrdCl::XRootDStatus st = fs().ChMod(request.value(), access_mode(md.mode));
-    if (!st.IsOK()) return xrd_error(st, "chmod " + url_of(abs));
-  }
+  if (has(fields, MetaFields::Mode) && md.type != EntryType::Symlink)
+    return chmod_abs(abs, md.mode);
+  return {};
+}
+
+Status XrdEndpoint::chmod_abs(const std::string& abs, ModeBits mode) {
+  auto request = request_path(abs);
+  if (!request.ok()) return request.error();
+  XrdCl::XRootDStatus st = fs().ChMod(request.value(), access_mode(mode));
+  if (!st.IsOK()) return xrd_error(st, "chmod " + url_of(abs));
   return {};
 }
 

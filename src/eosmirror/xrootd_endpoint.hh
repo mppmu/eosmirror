@@ -114,6 +114,7 @@ class XrdEndpoint : public Endpoint {
   Result<Checksum> query_checksum(const std::string& abs_path);
   Status remove_abs(const std::string& abs_path);
   Status rename_abs(const std::string& from, const std::string& to);
+  Status chmod_abs(const std::string& abs_path, ModeBits mode);
 
   // Converts an XrdCl status into an error with the given context.
   static Error xrd_error(const XrdCl::XRootDStatus& status, const std::string& context);
