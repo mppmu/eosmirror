@@ -677,6 +677,19 @@ TEST_CASE("EOS to FS: files that changed since the listing or while they are rea
   CHECK(tmp.read_file("dst/f") == "replaced with a longer content");
   CHECK(must(dst.stat("f")).mtime == Timespec{1600000500, 2});
 
+  // Replaced once more after it was opened, with the size of the file read:
+  // the MGM's stat is of another file, whose metadata are not those of the
+  // data read.
+  put(ep, "h", "version A", {1600000000, 1});
+  Entry a = listed(ep, "h");
+  put(ep, "h", "version B, longer", {1600000100, 1});
+  auto reader = ep.open_read("h");
+  REQUIRE(reader.ok());
+  put(ep, "h", "version C, longer", {1600000200, 1});
+  auto state = reader.value()->state(a);
+  REQUIRE_FALSE(state.ok());
+  CHECK(state.error().kind == ErrorKind::Changed);
+
   // Rewritten with its size: the data does not match the listed checksum,
   // and the MGM has another mtime for it.
   old = listed(ep, "f");

@@ -489,7 +489,11 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
   read is not seen there, its copy gets the old, listed mtime, and the next
   run copies it again. A file with another size than listed has changed
   since the listing: it is stated through the MGM before and after reading,
-  so that it is still copied in this run, with its current metadata. A file
+  so that it is still copied in this run, with its current metadata. Those
+  stats must find the file opened under its name: the MGM names its id in
+  the URL of the storage node it redirects the open to (`mgm.id`), and a
+  file replaced once more since the open has another one, which fails the
+  copy as changed (it is retried). A file
   rewritten with its size after the listing shows in a checksum that differs
   from the listed one; a stat through the MGM then tells a change (the copy
   fails as changed, after its retries, and the next run copies it) from

@@ -3,6 +3,7 @@
 
 #include <XrdCl/XrdClFile.hh>
 #include <XrdCl/XrdClFileSystem.hh>
+#include <XrdCl/XrdClURL.hh>
 #include <XrdCl/XrdClXRootDResponses.hh>
 
 #include <algorithm>
@@ -182,6 +183,25 @@ Checksum listed_checksum(std::string_view type, std::string_view hex) {
   return {*parsed, value};
 }
 
+// The file id in an inode number as EOS gives it to files (common/FileId.hh):
+// with the top bit set, in the bits below it, else shifted by 28 bits.
+uint64_t file_id(uint64_t inode) {
+  constexpr uint64_t kTopBit = 1ull << 63;
+  return inode & kTopBit ? inode & ~kTopBit : inode >> 28;
+}
+
+// The id of an open file, which the MGM names (mgm.id, in hex) in the URL of
+// the storage node it redirects the open to; 0 for one served without a
+// redirection, such as an empty file, which the MGM serves itself.
+uint64_t opened_file_id(const XrdCl::File& file) {
+  std::string url;
+  if (!file.GetProperty("LastURL", url)) return 0;
+  auto params = XrdCl::URL(url).GetParams();
+  auto id = params.find("mgm.id");
+  if (id == params.end()) return 0;
+  return parse_number<uint64_t>(id->second, 16).value_or(0);
+}
+
 std::string format_timespec(const Timespec& t) {
   char buf[40];
   std::snprintf(buf, sizeof buf, "%lld.%09d", static_cast<long long>(t.sec), t.nsec);
@@ -195,12 +215,17 @@ std::string format_timespec(const Timespec& t) {
 // erasure-coded files) but the replica's own mtime, in seconds
 // (fst/XrdFstOfsFile.cc stat): a change during the copy shows in its stat
 // after the read. A file whose size differs from the listing has changed
-// since; it is stated through the MGM before and after reading.
+// since; it is stated through the MGM before and after reading, which must
+// find the file opened under its name: one replaced since has another id.
 class EosReader : public XrdReader {
  public:
+  // fid: the id of the file opened, 0 if unknown.
   EosReader(EosEndpoint& ep, std::unique_ptr<XrdCl::File> file, std::string url, int window,
-            RelPath path)
-      : XrdReader(std::move(file), std::move(url), window), ep_(ep), path_(std::move(path)) {}
+            RelPath path, uint64_t fid)
+      : XrdReader(std::move(file), std::move(url), window),
+        ep_(ep),
+        path_(std::move(path)),
+        fid_(fid) {}
 
   Result<Entry> state(const Entry& listed) override {
     auto opened = file_stat(false);
@@ -223,11 +248,18 @@ class EosReader : public XrdReader {
     return now.value().size == replica_->size && now.value().mtime == replica_->mtime;
   }
 
-  Result<Entry> stat() override { return ep_.stat(path_); }
+  Result<Entry> stat() override {
+    auto st = ep_.stat(path_);
+    if (st.ok() && fid_ != 0 && st.value().type == EntryType::File &&
+        st.value().id != std::to_string(fid_))
+      return Error{ErrorKind::Changed, path_ + " was replaced after it was opened"};
+    return st;
+  }
 
  private:
   EosEndpoint& ep_;
   RelPath path_;
+  uint64_t fid_;
   std::optional<Entry> replica_;  // the replica at the open, when the listing was taken
 };
 
@@ -611,7 +643,10 @@ Result<Entry> EosEndpoint::stat_abs(const std::string& abs) {
   e.mode = e.type == EntryType::Symlink ? 0777 : (mode & 07777);
   e.uid = static_cast<uint32_t>(v[4]);
   e.gid = static_cast<uint32_t>(v[5]);
-  if (e.type == EntryType::File) e.size = v[7];
+  if (e.type == EntryType::File) {
+    e.size = v[7];
+    e.id = std::to_string(file_id(v[1]));
+  }
   e.mtime = {static_cast<int64_t>(v[11]), static_cast<int32_t>(v[14])};
   e.ctime = {static_cast<int64_t>(v[12]), static_cast<int32_t>(v[15])};
   if (e.type == EntryType::Symlink) {
@@ -865,8 +900,9 @@ Result<std::unique_ptr<FileReader>> EosEndpoint::open_read(const RelPath& path) 
   std::string abs = absolute(path);
   auto file = open_file(abs);
   if (!file.ok()) return file.error();
+  uint64_t fid = opened_file_id(*file.value());
   return std::unique_ptr<FileReader>(
-      new EosReader(*this, std::move(file).value(), url_of(abs), options_.read_window, path));
+      new EosReader(*this, std::move(file).value(), url_of(abs), options_.read_window, path, fid));
 }
 
 Result<std::unique_ptr<FileWriter>> EosEndpoint::open_write(const RelPath& path,
