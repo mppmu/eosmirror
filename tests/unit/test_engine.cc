@@ -200,21 +200,20 @@ TEST_CASE("FS to FS: a tree is replicated and reruns change nothing") {
     CHECK(remaining == 1);
   }
 
-  SUBCASE("stale temporaries of earlier runs are not extras and are cleaned with --delete") {
+  SUBCASE("temporaries are not extras, and recent ones stay with --delete") {
+    // Copies set the mtime of their temporary before renaming it; the
+    // ctime tells that it is being worked on.
     tmp.write_file("dst/.a.txt.eosmirror-0123456789ab", "partial");
     set_mtime(tmp.sub("dst/.a.txt.eosmirror-0123456789ab"), 1500000000, 0);
     tmp.write_file("dst/.fresh.eosmirror-0123456789ab", "in progress");
-    Report r;
-    REQUIRE(run_sync(src, dst, options, r).ok());
-    CHECK(r.stats.extras == 0);
-    CHECK(r.stats.stale_temps == 1);
-
     SyncOptions del = options;
     del.delete_extra = true;
-    Report r2;
-    REQUIRE(run_sync(src, dst, del, r2).ok());
-    CHECK(r2.stats.deleted == 1);
-    CHECK_FALSE(fs::exists(tmp.sub("dst/.a.txt.eosmirror-0123456789ab")));
+    Report r;
+    REQUIRE(run_sync(src, dst, del, r).ok());
+    CHECK(r.stats.extras == 0);
+    CHECK(r.stats.stale_temps == 0);
+    CHECK(r.stats.deleted == 0);
+    CHECK(fs::exists(tmp.sub("dst/.a.txt.eosmirror-0123456789ab")));
     CHECK(fs::exists(tmp.sub("dst/.fresh.eosmirror-0123456789ab")));
   }
 
@@ -1071,6 +1070,32 @@ TEST_CASE("FS to FS: --require-checksum reads local copies back") {
   CHECK(r.stats.files_copied == 1);
   CHECK(r.stats.files_unverified == 0);
   CHECK(tmp.read_file("dst/f") == "verify me");
+}
+
+TEST_CASE("fake: temporaries are stale once neither their mtime nor their ctime is recent") {
+  FakeEndpoint src, dst;
+  populate(src);
+  int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::system_clock::now().time_since_epoch())
+                    .count();
+  // A leftover of an earlier run; an upload in progress that EOS gave the
+  // source's mtime when it created it; and a temporary being written.
+  dst.add_file(".tmp-left", "partial", 0600, {now - 7200, 0}).ctime = {now - 7200, 0};
+  dst.add_file(".tmp-upload", "in flight", 0600, {1500000000, 0}).ctime = {now - 60, 0};
+  dst.add_file(".tmp-written", "in progress", 0600, {now - 10, 0});
+  Report r;
+  REQUIRE(run_sync(src, dst, fake_options(), r).ok());
+  CHECK(r.stats.extras == 0);
+  CHECK(r.stats.stale_temps == 1);
+
+  SyncOptions o = fake_options();
+  o.delete_extra = true;
+  Report r2;
+  REQUIRE(run_sync(src, dst, o, r2).ok());
+  CHECK(r2.stats.deleted == 1);
+  CHECK_FALSE(dst.get(".tmp-left"));
+  CHECK(dst.get(".tmp-upload"));
+  CHECK(dst.get(".tmp-written"));
 }
 
 TEST_CASE("fake: temporaries of the source are not entries of the tree") {

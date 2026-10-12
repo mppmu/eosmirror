@@ -395,6 +395,55 @@ TEST_CASE("eos endpoint: aborted uploads leave the previous file as it was") {
   }
 }
 
+TEST_CASE("FS to EOS: --delete leaves another writer's upload in progress alone") {
+  if (!base_url()) return;
+  RemoteDir dir("inflight");
+  EosEndpoint& ep = *dir.endpoint;
+  // An atomic upload with the old mtime of its source, partly written and
+  // held open.
+  std::string server = parse_endpoint_url(dir.url).value().server;
+  XrdCl::File upload;
+  REQUIRE(upload
+              .Open(server + "/" + eos_request_path(ep.absolute("big")) +
+                        "&eos.atomic=1&eos.mtime=1500000000.000000000",
+                    XrdCl::OpenFlags::Delete | XrdCl::OpenFlags::Write,
+                    XrdCl::Access::UR | XrdCl::Access::UW)
+              .IsOK());
+  std::string part = pattern(100000);
+  REQUIRE(upload.Write(0, static_cast<uint32_t>(part.size()), part.data()).IsOK());
+
+  // EOS lists it under a hidden name with that mtime, and the time it was
+  // created as its ctime.
+  int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::system_clock::now().time_since_epoch())
+                    .count();
+  auto listed = ep.list("");
+  REQUIRE(listed.ok());
+  REQUIRE(listed.value().entries.size() == 1);
+  const Entry& hidden = listed.value().entries[0];
+  CHECK(ep.is_temporary(hidden.name));
+  CHECK(hidden.mtime.sec == 1500000000);
+  CHECK(hidden.ctime.sec > now - 600);
+
+  TempDir tmp;
+  tmp.write_file("src/f", "x");
+  PosixEndpoint src(tmp.sub("src"));
+  SyncOptions options = test_options();
+  options.delete_extra = true;
+  Cancellation cancel;
+  Report r;
+  Engine engine(src, ep, options, r, nullptr, cancel);
+  REQUIRE(engine.run().ok());
+  CHECK(r.stats.failures == 0);
+  CHECK(r.stats.deleted == 0);
+  CHECK(r.stats.files_copied == 1);
+
+  // The upload completes as if nothing had happened.
+  REQUIRE(upload.Close().IsOK());
+  CHECK(get(ep, "big") == part);
+  CHECK(must(ep.stat("big")).mtime == Timespec{1500000000, 0});
+}
+
 TEST_CASE("eos endpoint: pipelined uploads and downloads of many chunks") {
   if (!base_url()) return;
   std::string content = pattern(5 * 1024 * 1024 + 17);

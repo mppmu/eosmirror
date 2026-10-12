@@ -340,8 +340,8 @@ Result<std::optional<Entry>> parse_find_line(std::string_view line, std::string_
     return bad("ambiguous listing line");
   std::string_view path = line.substr(kPath.size(), path_end - kPath.size());
 
-  // "type=... size=N uid=U gid=G mode=M flags=F mtime=S.N checksum=X
-  // checksumtype=T target="..."", the target last.
+  // "type=... size=N uid=U gid=G mode=M flags=F mtime=S.N ctime=S.N
+  // checksum=X checksumtype=T target="..."", the target last.
   Entry e;
   std::string_view checksum, checksum_type;
   std::string_view rest = line.substr(path_end + 2);
@@ -383,6 +383,8 @@ Result<std::optional<Entry>> parse_find_line(std::string_view line, std::string_
       e.mode = parse_number<ModeBits>(value, 8) & 07777;
     } else if (key == "mtime") {
       e.mtime = parse_timespec(value);
+    } else if (key == "ctime") {
+      e.ctime = parse_timespec(value);
     } else if (key == "checksum") {
       checksum = value;
     } else if (key == "checksumtype") {
@@ -590,6 +592,7 @@ Result<Entry> EosEndpoint::stat_abs(const std::string& abs) {
   e.gid = static_cast<uint32_t>(v[5]);
   if (e.type == EntryType::File) e.size = v[7];
   e.mtime = {static_cast<int64_t>(v[11]), static_cast<int32_t>(v[14])};
+  e.ctime = {static_cast<int64_t>(v[12]), static_cast<int32_t>(v[15])};
   if (e.type == EntryType::Symlink) {
     XrdCl::Buffer link_arg;
     link_arg.FromString(request + "&mgm.pcmd=readlink");
@@ -656,7 +659,7 @@ Result<Listing> EosEndpoint::list(const RelPath& dir) {
   std::string abs = absolute(dir);
   // The link target comes last: parse_find_line takes it to the end of the line.
   std::string request =
-      find_request(abs, "type,size,uid,gid,mode,flags,mtime,checksum,checksumtype,link");
+      find_request(abs, "type,size,uid,gid,mode,flags,mtime,ctime,checksum,checksumtype,link");
   auto result = proc("mgm.cmd.proto=" + base64(request));
   if (!result.ok()) return result.error();
   const ProcResult& reply = result.value();

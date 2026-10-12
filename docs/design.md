@@ -43,7 +43,11 @@ mtime is always the source mtime as observed *before* reading the file (by a
 stat, or for EOS sources from the listing, see below). If the source changed
 while it was read (size or mtime differ afterwards), the copy is reported as
 "changed" and retried; whatever was renamed into place carries the old mtime,
-so a later run copies it again.
+so a later run copies it again. Temporaries on the target that neither
+their mtime nor their ctime shows changed for an hour are taken for
+leftovers of interrupted runs and removed with `--delete`; a copy sets the
+mtime of its temporary before the rename, and EOS gives an atomic upload
+the source's mtime when it creates it, which is why the ctime counts.
 
 Checksums (adler32, through zlib) are computed while streaming and compared
 with what an endpoint stores: an EOS or XRootD target with the checksum it
@@ -313,10 +317,10 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
   URL as given is kept for messages and the journal.
 - Listing: `find` (RequestProto field 5, FindProto) with `Files`,
   `Directories`, `Maxdepth=1` (a oneof, so it must be sent), `Path` and
-  `Format="type,size,uid,gid,mode,flags,mtime,checksum,checksumtype,link"`,
+  `Format="type,size,uid,gid,mode,flags,mtime,ctime,checksum,checksumtype,link"`,
   plus `SkipVersionDirs`. Each output line is `path="<abs>" type=... size=N
   uid=U gid=G mode=<octal, directories> flags=<octal, files>
-  mtime=<sec>.<nsec> checksum=<hex, files> checksumtype=<adler, crc32c, ...,
+  mtime=<sec>.<nsec> ctime=<sec>.<nsec> checksum=<hex, files> checksumtype=<adler, crc32c, ...,
   none> target="<link target>"`, the fields in the order of the format and
   the target only for symlinks (`mgm/proc/user/NewfindCmd.cc`, printFormat).
   A file's checksum is kept with its entry when its type is adler32; one of
@@ -419,7 +423,12 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
   a file is copied with the listed, older mtime, and the next run copies it
   again.
 - EOS's own hidden entries (atomic temporaries `.sys.a#.`, version
-  directories `.sys.v#.`) are never treated as entries of the tree.
+  directories `.sys.v#.`) are never treated as entries of the tree. An
+  atomic temporary gets the `eos.mtime` of its open when EOS creates it,
+  and the creation time as ctime (`mgm/ofs/XrdMgmOfsFile.cc`, setCTimeNow
+  at the creation, setMTime from `eos.mtime` further down), which the
+  storage nodes do not change before the close: an upload in progress for
+  longer than an hour is taken for a leftover by a run with `--delete`.
 - Files are written through XRootD with up to `--write-window` writes in
   flight (default 4). EOS up to 5.5.2 stores zero parity for an
   erasure-coded file when the first storage node executes a write that does

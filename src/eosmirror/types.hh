@@ -53,6 +53,9 @@ struct Entry {
   EntryType type = EntryType::Other;
   uint64_t size = 0;  // files only
   Timespec mtime;
+  // The last change of the entry or of its metadata, where known (0
+  // otherwise): when a temporary was last worked on.
+  Timespec ctime;
   uint32_t uid = 0;
   uint32_t gid = 0;
   ModeBits mode = 0;

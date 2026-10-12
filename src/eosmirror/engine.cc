@@ -769,7 +769,9 @@ struct Engine::Impl {
       if (cancel.requested()) return;
       RelPath path = join(node->path, name);
       if (target.is_temporary(name)) {
-        bool stale = e.mtime.sec + options.stale_temp_age.count() < now;
+        // EOS sets an atomic upload's mtime to the source's when it creates
+        // it (eos.mtime), so its ctime tells when it was created.
+        bool stale = std::max(e.mtime, e.ctime).sec + options.stale_temp_age.count() < now;
         if (!stale) continue;
         if (!deleting) {
           stats.stale_temps.fetch_add(1);

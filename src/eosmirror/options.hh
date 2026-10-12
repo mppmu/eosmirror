@@ -61,7 +61,8 @@ struct SyncOptions {
   // Symlink targets starting with .first are rewritten to start with .second.
   std::vector<std::pair<std::string, std::string>> link_rewrites;
 
-  // Temporary files of earlier runs older than this are removed with --delete.
+  // Temporaries not changed for this long (by mtime and ctime) are taken
+  // for leftovers of earlier runs, and removed with --delete.
   std::chrono::seconds stale_temp_age{3600};
 };
 

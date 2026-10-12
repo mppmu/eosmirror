@@ -33,6 +33,7 @@ Entry entry_from_stat(std::string name, const struct stat& st) {
   if (e.type == EntryType::Directory)
     e.id = std::to_string(st.st_dev) + ":" + std::to_string(st.st_ino);
   e.mtime = {static_cast<int64_t>(st.st_mtim.tv_sec), static_cast<int32_t>(st.st_mtim.tv_nsec)};
+  e.ctime = {static_cast<int64_t>(st.st_ctim.tv_sec), static_cast<int32_t>(st.st_ctim.tv_nsec)};
   e.uid = st.st_uid;
   e.gid = st.st_gid;
   e.mode = st.st_mode & 07777;
