@@ -1422,6 +1422,36 @@ TEST_CASE("fake: nothing is deleted where a listing skipped entries") {
   CHECK(dst.get("d1/.tmp-upload"));
 }
 
+TEST_CASE("fake: no type conflict is resolved and no tree deleted where a listing skipped entries") {
+  FakeEndpoint src, dst;
+  src.add_dir("d");
+  src.add_file("d/x", "file");
+  src.add_file("d/y", "y");
+  src.unlistable.insert("d/y");
+  dst.add_dir("d");
+  dst.add_dir("d/x");
+  dst.add_file("d/x/inner", "kept");
+  // An extra tree with a directory whose listing skips an entry.
+  dst.add_dir("gone");
+  dst.add_dir("gone/sub");
+  dst.add_file("gone/sub/a", "a");
+  dst.add_file("gone/sub/hidden", "h");
+  dst.unlistable.insert("gone/sub/hidden");
+  SyncOptions o = fake_options();
+  o.delete_extra = true;
+  Report r;
+  REQUIRE(run_sync(src, dst, o, r).ok());
+  CHECK(r.stats.incomplete_dirs == 1);
+  CHECK(r.stats.deleted == 0);
+  CHECK(dst.get("d/x/inner"));
+  CHECK(dst.get("gone/sub/a"));
+  REQUIRE(r.failures().size() == 2);
+  for (const Failure& f : r.failures()) {
+    INFO("failure of ", f.path);
+    CHECK((f.path == "d/x" || f.path == "gone"));
+  }
+}
+
 TEST_CASE("fake: slow source reads are logged") {
   FakeEndpoint src, dst;
   src.add_file("f", std::string(10000, 'x'));

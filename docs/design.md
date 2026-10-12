@@ -92,8 +92,11 @@ with a warning and counted, on both sides and when deleting trees. Listings
 report the entries they left out themselves (lines of an EOS listing that
 cannot be told apart, names a plain XRootD server cannot address). In a
 directory where either listing missed entries, `--delete` deletes nothing,
-since the other side may list one of them as an entry the source lacks;
-such directories are counted and warned about. Log lines,
+neither extras nor entries of another type than the source's, since the
+other side may list one of them as an entry the source lacks; such
+directories are counted and warned about. A tree being deleted is not
+deleted further where the listing of one of its directories missed
+entries, which is a failure. Log lines,
 the progress display and the summary replace control characters and invalid
 UTF-8 in names with `?`.
 

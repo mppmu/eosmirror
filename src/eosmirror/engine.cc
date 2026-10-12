@@ -35,6 +35,10 @@ struct DirNode {
   Entry target;          // the target's metadata as listed, when not created
   bool owned = true;     // this shard handles the directory's entries
   std::optional<std::set<std::string>> only;  // restrict to these entry names
+  // For the checker that processes the directory: the entries its listings
+  // left out, and whether deletions in it are held back.
+  size_t unlisted = 0;
+  bool deletions_held = false;
 
   std::atomic<int> pending{1};  // own processing plus unfinished entries
   std::atomic<bool> touched{false};        // entries were created, replaced or removed
@@ -496,15 +500,13 @@ struct Engine::Impl {
       return;
     }
     std::vector<Entry>& src_entries = listed.value().entries;
-    // Entries missing from either listing, whose names the other side may
-    // list as entries it lacks.
-    size_t skipped = drop_invalid_names(source, node->path, listed.value());
+    node->unlisted = drop_invalid_names(source, node->path, listed.value());
 
     std::unordered_map<std::string, Entry> dst_entries;
     if (!node->created) {
       auto dst_listed = retry([&] { return target.list(node->path); });
       if (dst_listed.ok()) {
-        skipped += drop_invalid_names(target, node->path, dst_listed.value());
+        node->unlisted += drop_invalid_names(target, node->path, dst_listed.value());
         for (Entry& e : dst_listed.value().entries) {
           std::string name = e.name;
           dst_entries.emplace(std::move(name), std::move(e));
@@ -571,8 +573,7 @@ struct Engine::Impl {
       bool removable = std::any_of(dst_entries.begin(), dst_entries.end(), [&](const auto& e) {
         return !target.is_temporary(e.second) || stale(e.second);
       });
-      handle_extras(node, dst_entries,
-                    options.delete_extra && removable && may_delete(node, emptied, skipped));
+      handle_extras(node, dst_entries, options.delete_extra && removable && may_delete(node, emptied));
     }
     entry_done(node);
   }
@@ -588,23 +589,36 @@ struct Engine::Impl {
     return std::max(temporary.mtime, temporary.ctime).sec + options.stale_temp_age.count() < now;
   }
 
-  // Whether --delete may delete the extras of a directory: not where a
-  // listing missed entries, and not in a directory emptied on the source
+  // Whether --delete may delete the extras of a directory: not where
+  // deletions are held back, and not in a directory emptied on the source
   // unless --delete-emptied says so.
-  bool may_delete(const std::shared_ptr<DirNode>& node, bool emptied, size_t skipped) {
-    std::string dir = node->path.empty() ? "." : node->path;
-    if (skipped > 0) {
-      stats.incomplete_dirs.fetch_add(1);
-      log::warn("deleting nothing in ", dir, ": ", skipped,
-                " entries could not be listed safely, on one side or the other");
-      return false;
-    }
+  bool may_delete(const std::shared_ptr<DirNode>& node, bool emptied) {
+    if (!deletions_allowed(node)) return false;
     if (!emptied || options.delete_emptied) return true;
     stats.emptied_dirs.fetch_add(1);
-    log::warn("deleting nothing in ", dir,
+    log::warn("deleting nothing in ", node->path.empty() ? "." : node->path,
               ": the source's directory is empty, the target's is not (--delete-emptied "
               "deletes there)");
     return false;
+  }
+
+  // Whether entries of a directory may be deleted, so far: not where a
+  // listing left out entries, whose names the other side may list as
+  // entries it lacks.
+  bool deletions_allowed(const std::shared_ptr<DirNode>& node) {
+    if (node->unlisted > 0)
+      hold_deletions(node, std::to_string(node->unlisted) +
+                               " entries could not be listed safely, on one side or the other");
+    return !node->deletions_held;
+  }
+
+  // Deletes nothing more in a directory whose listings may be incomplete;
+  // counted and told once.
+  void hold_deletions(const std::shared_ptr<DirNode>& node, const std::string& why) {
+    if (node->deletions_held) return;
+    node->deletions_held = true;
+    stats.incomplete_dirs.fetch_add(1);
+    log::warn("deleting nothing in ", node->path.empty() ? "." : node->path, ": ", why);
   }
 
   bool empty_source(const std::vector<Entry>& entries) const {
@@ -657,6 +671,13 @@ struct Engine::Impl {
       fail(path, wanted,
            Error{ErrorKind::Exists, "target is a " + std::string(to_string(existing.type)) +
                                         ", use --delete to replace it"});
+      return false;
+    }
+    if (!deletions_allowed(node)) {
+      fail(path, wanted,
+           Error{ErrorKind::Exists, "target is a " + std::string(to_string(existing.type)) +
+                                        ", not replaced while deletions in its directory are "
+                                        "held back"});
       return false;
     }
     ensure_writable(node);
@@ -839,7 +860,12 @@ struct Engine::Impl {
       }
       auto listed = retry([&] { return target.list(path); });
       if (!listed.ok()) return listed.error();
-      drop_invalid_names(target, path, listed.value());
+      // Entries left out of the listing would remain, and their names may
+      // be on the source.
+      if (size_t unlisted = drop_invalid_names(target, path, listed.value()); unlisted > 0)
+        return Error{ErrorKind::NotEmpty, "not deleting " + path + ": " +
+                                              std::to_string(unlisted) +
+                                              " of its entries could not be listed safely"};
       for (const Entry& child : listed.value().entries) {
         if (cancel.requested()) return Error{ErrorKind::Cancelled, "cancelled"};
         Status s = delete_tree(join(path, child.name), child);
