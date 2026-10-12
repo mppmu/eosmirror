@@ -63,7 +63,11 @@ if(EOSMIRROR_WITH_XROOTD)
     PRIVATE ${PROJECT_SOURCE_DIR}/third_party ${CMAKE_CURRENT_SOURCE_DIR}/unit)
   target_link_libraries(eosmirror_integration_tests PRIVATE eosmirror_core)
   add_test(NAME integration COMMAND ${test_launcher} $<TARGET_FILE:eosmirror_integration_tests>)
-  set_tests_properties(integration PROPERTIES SKIP_RETURN_CODE 77)
+  # The test of a sudoer's identity on EOS, with a sudoer's key.
+  add_test(NAME integration_sudoer
+    COMMAND ${test_launcher} sh ${CMAKE_CURRENT_SOURCE_DIR}/integration/as-sudoer.sh
+            $<TARGET_FILE:eosmirror_integration_tests>)
+  set_tests_properties(integration integration_sudoer PROPERTIES SKIP_RETURN_CODE 77)
   # Under a sanitizer, XRootD's plugins (the security protocols) are loaded
   # through the sanitizer's dlopen, which ignores the library's own search
   # path, so the tests get it in LD_LIBRARY_PATH. Leaks in XRootD's and
@@ -71,7 +75,7 @@ if(EOSMIRROR_WITH_XROOTD)
   # sees in glibc's time zone setup (tsan.supp). The unit tests load the
   # client library too.
   if(EOSMIRROR_SANITIZER AND EOSMIRROR_XROOTD_LIBDIR)
-    set_tests_properties(unit unit_unprivileged integration cli_smoke differential crash_consistency
+    set_tests_properties(unit unit_unprivileged integration integration_sudoer cli_smoke differential crash_consistency
       PROPERTIES ENVIRONMENT
       "LD_LIBRARY_PATH=${EOSMIRROR_XROOTD_LIBDIR};LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/lsan.supp;TSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tsan.supp")
   endif()

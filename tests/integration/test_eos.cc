@@ -3,8 +3,8 @@
 // Integration tests against a live EOS instance. EOSMIRROR_EOS_URL names a
 // writable directory on it, e.g. root://eosmirror-mgm.eosmirror.test//eos/test,
 // with the subdirectories replica2, raid6 and nochecksum as the test instance
-// creates them. The tests run as root, except for the one that needs
-// EOSMIRROR_EOS_SUDOER=1 and a sudoer's identity (tests/integration/eos).
+// creates them. The tests run as root, except for the one of a sudoer's
+// identity, which as-sudoer.sh runs on its own.
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -16,7 +16,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
-#include <cstring>
 #include <utility>
 
 #include "doctest/doctest.h"
@@ -881,13 +880,9 @@ TEST_CASE("eos endpoint: listings for an identity with find limits") {
   CHECK(r.failures()[0].path == "secret");
 }
 
-TEST_CASE("eos endpoint: a sudoer cannot set owners") {
+// Run as a sudoer by the integration_sudoer test, see tests/CMakeLists.txt.
+TEST_CASE("eos endpoint: a sudoer cannot set owners" * doctest::skip()) {
   if (!base_url()) return;
-  const char* sudoer = std::getenv("EOSMIRROR_EOS_SUDOER");
-  if (!sudoer || std::strcmp(sudoer, "1") != 0) {
-    MESSAGE("skipped: needs EOSMIRROR_EOS_SUDOER=1 and the identity of a sudoer other than root");
-    return;
-  }
   auto ep = EosEndpoint::create(base_url());
   REQUIRE(ep.ok());
   auto who = ep.value()->proc("mgm.cmd=whoami");

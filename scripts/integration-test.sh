@@ -29,7 +29,8 @@ trap cleanup EXIT
 "$repo/tests/integration/xrootd-server.sh" start
 
 # The test container authenticates with the instance's root key, which EOS
-# maps to root, and resolves the daemons through /etc/hosts.
+# maps to root, the test of a sudoer with its daemon key, and resolves the
+# daemons through /etc/hosts.
 podman_opts=(
   --network=eosmirror-test
   --add-host=eosmirror-mgm.eosmirror.test:$subnet.12 --add-host=eosmirror-fst.eosmirror.test:$subnet.13
@@ -37,6 +38,8 @@ podman_opts=(
   --env=EOSMIRROR_EOS_URL=root://eosmirror-mgm.eosmirror.test//eos/test
   --env=XrdSecPROTOCOL=sss --env=XrdSecSSSKT=/etc/eos.client.keytab
   --volume="$state/secrets/eos-root.keytab:/etc/eos.client.keytab:ro"
+  --env=EOSMIRROR_EOS_SUDOER_KEYTAB=/etc/eos.sudoer.keytab
+  --volume="$state/secrets/eos-daemon.keytab:/etc/eos.sudoer.keytab:ro"
 )
 [[ $sanitizer == thread ]] && podman_opts+=(--security-opt=seccomp=unconfined)
 

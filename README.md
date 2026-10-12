@@ -94,7 +94,7 @@ eosmirror sync --journal migration.db --progress 60 /data/project root://eos.exa
 eosmirror sync --journal migration.db --retry-failed /data/project root://eos.example.org//eos/project
 ```
 
-Setting owners on EOS needs an identity that EOS treats as root or sudoer;
+Setting owners on EOS needs an identity that EOS treats as root (a sudoer cannot);
 the run refuses to start otherwise unless `--no-owner` is given. Plain
 XRootD servers store no mtimes and have no symlinks, so against them files
 are compared by size only and symlinks are skipped (both are reported).
