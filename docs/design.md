@@ -203,7 +203,9 @@ transient (I/O errors, timeouts, busy or failing servers, the source
 changing). A full disk or exceeded quota is not retried. A retry that
 cancellation cuts short is no failure. What still fails is recorded in the
 journal (`--journal FILE`, SQLite) with the path, the kind of entry and the
-last error, and the run goes on. Finalized directories are recorded too.
+last error, and the run goes on. Finalized directories are recorded too. A
+journal that cannot be read or written stops the run (exit status 3), since
+it would lose what later runs need.
 
 An endpoint that becomes unusable during a run (a target outage, an
 unmounted source) would make every remaining entry fail and fill the
@@ -230,7 +232,11 @@ Modes:
   the next one.
 - `--resume` skips directories finalized by the previous run if that run
   was interrupted; after a completed run there is nothing to resume and
-  everything is walked. Recorded failures are not retried by resuming.
+  everything is walked. Recorded failures are not retried by resuming. A
+  run resumes only with the options of the interrupted run that decide
+  what it makes of the target (`--delete`, `--delete-emptied`,
+  `--no-owner`, `--no-mode`, `--no-verify`, `--require-checksum`,
+  `--verify-readback`, `--rewrite-links`), which the journal records.
 - `--retry-failed` processes only the recorded failures: each within its
   parent directory, failed directories as subtree walks (rows below them are
   covered by that walk), the top directory as a walk of the whole tree, and
@@ -238,7 +244,13 @@ Modes:
   source are dropped; rows whose target directory cannot be created again
   (when one above it is gone) are kept, and a plain run recreates it.
 - A journal belongs to one source, target and shard, with local paths in
-  canonical form; dry runs read it but never change it.
+  canonical form, which it records in the same transaction as it checks
+  them, so that runs started together cannot both take a new journal.
+  Dry runs open it read-only and change nothing (a journal without a
+  write-ahead log is opened as immutable, since SQLite would otherwise
+  leave the files of one behind), go without one that does not exist yet,
+  and resume what the run would. A journal in the tree of the source or
+  the target is refused, as is a database that is not a journal.
 
 ### Sharding
 
@@ -262,10 +274,10 @@ found no copy to make while every checker was busy ("listing-bound"),
 which shows that listing bounds the run and more `--checkers` may help. Exit status: 0 when everything succeeded, 1 when
 something failed after retries (also the metadata of the top directory), 2
 for usage errors, 3 when the run could not start (unreadable source,
-unusable journal, failed preflight, overlapping source and target, a top
-directory that cannot be listed, an empty source against a target that is
-not), 4 when it stopped after
-failures in a row, 130 when interrupted.
+unusable journal, other options than the run to resume, failed preflight,
+overlapping source and target, a top directory that cannot be listed, an
+empty source against a target that is not) or its journal failed, 4 when
+it stopped after failures in a row, 130 when interrupted.
 
 ## XRootD endpoint
 

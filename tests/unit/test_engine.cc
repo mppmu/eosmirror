@@ -2,6 +2,7 @@
 #include "eosmirror/engine.hh"
 
 #include <fcntl.h>
+#include <sqlite3.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -556,9 +557,11 @@ TEST_CASE("fake: files whose last copy failed are copied again, whatever their s
   dst.modify("f0", [](FakeEndpoint::Node& n) { n.content = "root fil3"; });
   dst.modify("d1/d2/f2", [](FakeEndpoint::Node& n) { n.content = "dEEp"; });
   REQUIRE(j.begin_run(false).ok());
-  j.record_failure({"f0", EntryType::File, Error{ErrorKind::Checksum, "mismatch"}});
-  j.record_failure({"d1/d2/f2", EntryType::File, Error{ErrorKind::IO, "close failed"}});
-  j.record_failure({"d1/f1", EntryType::File, Error{ErrorKind::Permission, "chown"}});
+  REQUIRE(j.record_failure({"f0", EntryType::File, Error{ErrorKind::Checksum, "mismatch"}}).ok());
+  REQUIRE(j.record_failure(
+              {"d1/d2/f2", EntryType::File, Error{ErrorKind::IO, "close failed"}})
+              .ok());
+  REQUIRE(j.record_failure({"d1/f1", EntryType::File, Error{ErrorKind::Permission, "chown"}}).ok());
   REQUIRE(j.end_run(true).ok());
 
   SUBCASE("retrying the failures") {
@@ -566,7 +569,7 @@ TEST_CASE("fake: files whose last copy failed are copied again, whatever their s
     Report r;
     Cancellation cancel;
     Engine engine(src, dst, fake_options(), r, &j, cancel);
-    REQUIRE(engine.run(j.failures()).ok());
+    REQUIRE(engine.run(j.failures().value()).ok());
     REQUIRE(j.end_run(true).ok());
     CHECK(r.stats.files_copied == 2);
     CHECK(r.stats.files_unchanged == 1);
@@ -579,7 +582,7 @@ TEST_CASE("fake: files whose last copy failed are copied again, whatever their s
     CHECK(r.stats.files_copied == 2);
     CHECK(r.stats.files_unchanged == 1);
   }
-  CHECK(j.failures().empty());
+  CHECK(j.failures().value().empty());
   expect_mirrored(src, dst);
 }
 
@@ -596,7 +599,7 @@ TEST_CASE("fake: a file in doubt is not taken for its new copy when that does no
   // A wrong upload stayed in place with the source's size and mtime.
   dst.modify("f0", [](FakeEndpoint::Node& n) { n.content = "root fil3"; });
   REQUIRE(j.begin_run(false).ok());
-  j.record_failure({"f0", EntryType::File, Error{ErrorKind::IO, "close failed"}});
+  REQUIRE(j.record_failure({"f0", EntryType::File, Error{ErrorKind::IO, "close failed"}}).ok());
   REQUIRE(j.end_run(true).ok());
 
   // The close of the new copy reports success, but its upload is lost.
@@ -608,7 +611,7 @@ TEST_CASE("fake: a file in doubt is not taken for its new copy when that does no
   CHECK(r.stats.failures == 0);
   CHECK(r.stats.retries == 1);
   CHECK(dst.get("f0")->content == "root file");
-  CHECK(j.failures().empty());
+  CHECK(j.failures().value().empty());
 }
 
 TEST_CASE("fake: an upload that cannot be taken back leaves its copy in doubt") {
@@ -630,7 +633,9 @@ TEST_CASE("fake: an upload that cannot be taken back leaves its copy in doubt") 
   REQUIRE(run_sync(src, dst, o, r, &j).ok());
   REQUIRE(j.end_run(true).ok());
   CHECK(r.stats.failures == 3);
-  for (const Failure& f : j.failures())
+  auto rows = j.failures();
+  REQUIRE(rows.ok());
+  for (const Failure& f : rows.value())
     CHECK(f.error.kind == (f.path == "f0" ? ErrorKind::IO : ErrorKind::Unsupported));
   REQUIRE(dst.get("f0"));
 
@@ -642,7 +647,7 @@ TEST_CASE("fake: an upload that cannot be taken back leaves its copy in doubt") 
   REQUIRE(j.end_run(true).ok());
   CHECK(r2.stats.files_copied == 3);
   CHECK(r2.stats.files_unchanged == 0);
-  CHECK(j.failures().empty());
+  CHECK(j.failures().value().empty());
   expect_mirrored(src, dst);
 }
 
@@ -682,7 +687,7 @@ TEST_CASE("fake: a copy stays in doubt however its later attempts end") {
     REQUIRE_FALSE(s.ok());
     CHECK(s.error().kind == ErrorKind::Cancelled);
   }
-  auto rows = j.failures();
+  auto rows = j.failures().value();
   REQUIRE(rows.size() == 1);
   CHECK(rows[0].path == "f0");
   CHECK(rows[0].error.kind == ErrorKind::IO);
@@ -864,24 +869,24 @@ TEST_CASE("fake: journal records failures and finalized directories, resume and 
   REQUIRE(run_sync(src, dst, fake_options(), r, &j).ok());
   REQUIRE(j.end_run(false).ok());  // as if interrupted
   CHECK(r.stats.failures == 1);  // the listing of d1
-  auto failures = j.failures();
+  auto failures = j.failures().value();
   REQUIRE(failures.size() == 1);
   CHECK(failures[0].path == "d1");
   CHECK(failures[0].type == EntryType::Directory);
-  CHECK(j.is_done_dir(""));
-  CHECK_FALSE(j.is_done_dir("d1"));
+  CHECK(j.is_done_dir("").value());
+  CHECK_FALSE(j.is_done_dir("d1").value());
 
   SUBCASE("retrying the failures processes only them") {
     REQUIRE(j.begin_run(false).ok());
     Report r2;
     Cancellation cancel;
     Engine engine(src, dst, fake_options(), r2, &j, cancel);
-    REQUIRE(engine.run(j.failures()).ok());
+    REQUIRE(engine.run(j.failures().value()).ok());
     REQUIRE(j.end_run(true).ok());
     CHECK(r2.stats.files_copied == 1);  // d1/f1; f0 was not looked at
     CHECK(r2.stats.files_checked == 2);
     CHECK(r2.stats.failures == 1);      // d1/d2/f2 still fails
-    failures = j.failures();
+    failures = j.failures().value();
     REQUIRE(failures.size() == 1);
     CHECK(failures[0].path == "d1/d2/f2");
     CHECK(dst.get("d1/d2"));
@@ -894,10 +899,10 @@ TEST_CASE("fake: journal records failures and finalized directories, resume and 
     REQUIRE(j.begin_run(false).ok());
     Report r3;
     Engine engine3(fresh_src, dst, fake_options(), r3, &j, cancel);
-    REQUIRE(engine3.run(j.failures()).ok());
+    REQUIRE(engine3.run(j.failures().value()).ok());
     CHECK(r3.stats.files_copied == 1);
     CHECK(r3.stats.files_checked == 1);
-    CHECK(j.failures().empty());
+    CHECK(j.failures().value().empty());
     expect_mirrored(fresh_src, dst);
   }
 
@@ -926,15 +931,38 @@ TEST_CASE("fake: journal records failures and finalized directories, resume and 
     Report r2;
     Cancellation cancel;
     Engine engine(src, dst, o, r2, &j, cancel);
-    REQUIRE(engine.run(j.failures()).ok());
-    CHECK(j.failures().size() == 1);
-    CHECK(j.failures()[0].path == "d1");
+    REQUIRE(engine.run(j.failures().value()).ok());
+    CHECK(j.failures().value().size() == 1);
+    CHECK(j.failures().value()[0].path == "d1");
   }
 
   SUBCASE("a journal refuses another source/target pair") {
     auto other = Journal::open(tmp.sub("journal.sqlite"), "fake", "elsewhere");
     REQUIRE_FALSE(other.ok());
   }
+}
+
+TEST_CASE("fake: a run stops when its journal cannot be written") {
+  TempDir tmp;
+  auto journal = Journal::open(tmp.sub("j.sqlite"), "fake", "fake");
+  REQUIRE(journal.ok());
+  Journal& j = *journal.value();
+  REQUIRE(j.begin_run(false).ok());
+  // As if the disk were full when the first failure is recorded.
+  sqlite3* db = nullptr;
+  REQUIRE(sqlite3_open(tmp.sub("j.sqlite").c_str(), &db) == SQLITE_OK);
+  REQUIRE(sqlite3_exec(db, "CREATE TRIGGER full BEFORE INSERT ON failures BEGIN "
+                           "SELECT RAISE(FAIL, 'database or disk is full'); END;",
+                       nullptr, nullptr, nullptr) == SQLITE_OK);
+  sqlite3_close(db);
+  FakeEndpoint src, dst;
+  populate(src);
+  src.fail("open_read", "f0", Error{ErrorKind::Permission, "denied"});
+  Report r;
+  Status s = run_sync(src, dst, fake_options(), r, &j);
+  REQUIRE_FALSE(s.ok());
+  CHECK(s.error().kind != ErrorKind::Cancelled);
+  CHECK(s.error().message.find("full") != std::string::npos);
 }
 
 TEST_CASE("fake: journal rows are cleared by deletions, metadata fixes and vanished sources") {
@@ -957,8 +985,8 @@ TEST_CASE("fake: journal rows are cleared by deletions, metadata fixes and vanis
   REQUIRE(j.end_run(true).ok());
   CHECK(r.stats.deleted == 1);  // "gone"; the failed removal is not counted
   CHECK(r.stats.failures == 1);
-  REQUIRE(j.failures().size() == 1);
-  CHECK(j.failures()[0].path == "extra");
+  REQUIRE(j.failures().value().size() == 1);
+  CHECK(j.failures().value()[0].path == "extra");
 
   // A metadata-only fix of a copied file: the owner differs after the copy.
   dst.modify("d1/f1", [](FakeEndpoint::Node& n) { n.entry.uid = 7; });
@@ -969,15 +997,15 @@ TEST_CASE("fake: journal rows are cleared by deletions, metadata fixes and vanis
   REQUIRE(j.end_run(true).ok());
   CHECK(r2.stats.deleted == 1);  // "extra" now
   CHECK(r2.stats.failures == 1);
-  REQUIRE(j.failures().size() == 1);
-  CHECK(j.failures()[0].path == "d1/f1");
+  REQUIRE(j.failures().value().size() == 1);
+  CHECK(j.failures().value()[0].path == "d1/f1");
 
   REQUIRE(j.begin_run(false).ok());
   Report r3;
   REQUIRE(run_sync(src, dst, o, r3, &j).ok());
   REQUIRE(j.end_run(true).ok());
   CHECK(r3.stats.metadata_fixed == 1);
-  CHECK(j.failures().empty());
+  CHECK(j.failures().value().empty());
 
   // A failure whose source vanishes is dropped when retried.
   src.fail("open_read", "f0", Error{ErrorKind::Permission, "denied"}, 1);
@@ -986,7 +1014,7 @@ TEST_CASE("fake: journal rows are cleared by deletions, metadata fixes and vanis
   Report r4;
   REQUIRE(run_sync(src, dst, o, r4, &j).ok());
   REQUIRE(j.end_run(true).ok());
-  REQUIRE(j.failures().size() == 1);
+  REQUIRE(j.failures().value().size() == 1);
   dst.modify("f0", [](FakeEndpoint::Node&) {});
   FakeEndpoint src2;
   populate(src2);
@@ -1003,8 +1031,8 @@ TEST_CASE("fake: journal rows are cleared by deletions, metadata fixes and vanis
   Report r5;
   Engine engine(src3, dst, o, r5, &j, cancel);
   REQUIRE(dst.remove("f0", EntryType::File).ok());
-  REQUIRE(engine.run(j.failures()).ok());
-  CHECK(j.failures().empty());
+  REQUIRE(engine.run(j.failures().value()).ok());
+  CHECK(j.failures().value().empty());
 }
 
 TEST_CASE("fake: an exhausted deletion cap still reports blocked conflicts") {
@@ -1046,7 +1074,7 @@ TEST_CASE("fake: every deletion that the cap withholds is journaled, and told on
   REQUIRE(j.end_run(true).ok());
   CHECK(r.stats.deleted == 2);
   CHECK(r.stats.failures == 3);
-  CHECK(j.failures().size() == 3);
+  CHECK(j.failures().value().size() == 3);
   size_t told = 0;
   for (size_t at = 0; (at = text.find("deletion cap", at)) != std::string::npos; ++at) ++told;
   CHECK(told == 1);
@@ -1056,10 +1084,10 @@ TEST_CASE("fake: every deletion that the cap withholds is journaled, and told on
   Report r2;
   Cancellation cancel;
   Engine engine(src, dst, o, r2, &j, cancel);
-  REQUIRE(engine.run(j.failures()).ok());
+  REQUIRE(engine.run(j.failures().value()).ok());
   REQUIRE(j.end_run(true).ok());
   CHECK(r2.stats.deleted == 3);
-  CHECK(j.failures().empty());
+  CHECK(j.failures().value().empty());
   expect_mirrored(src, dst);
   CHECK(dst.paths().size() == src.paths().size());
 }
@@ -1820,8 +1848,8 @@ TEST_CASE("fake: entries that vanish from the source before they are handled are
   REQUIRE(journal.ok());
   Journal& j = *journal.value();
   REQUIRE(j.begin_run(false).ok());
-  j.record_failure({"f0", EntryType::File, Error{ErrorKind::IO, "earlier"}});
-  j.record_failure({"d1/d2", EntryType::Directory, Error{ErrorKind::IO, "earlier"}});
+  REQUIRE(j.record_failure({"f0", EntryType::File, Error{ErrorKind::IO, "earlier"}}).ok());
+  REQUIRE(j.record_failure({"d1/d2", EntryType::Directory, Error{ErrorKind::IO, "earlier"}}).ok());
   REQUIRE(j.end_run(true).ok());
 
   FakeEndpoint src, dst;
@@ -1839,7 +1867,7 @@ TEST_CASE("fake: entries that vanish from the source before they are handled are
   CHECK(r.stats.failures == 0);
   CHECK(r.stats.retries == 0);
   CHECK(r.stats.files_copied == 1);
-  CHECK(j.failures().empty());
+  CHECK(j.failures().value().empty());
   CHECK_FALSE(dst.get("f0"));
   CHECK(r.summary(false).find("vanished from the source: 2\n") != std::string::npos);
 
@@ -2063,7 +2091,7 @@ TEST_CASE("fake: cancelling during a retry wait records no failure") {
   CHECK(s.error().kind == ErrorKind::Cancelled);
   CHECK(r.stats.retries == 1);
   CHECK(r.stats.failures == 0);
-  CHECK(journal.value()->failures().empty());
+  CHECK(journal.value()->failures().value().empty());
 }
 
 TEST_CASE("fake: only what succeeded is counted") {
@@ -2100,8 +2128,8 @@ TEST_CASE("fake: a top directory whose metadata cannot be set is a failure that 
   REQUIRE(j.end_run(true).ok());
   CHECK(r.stats.failures == 1);
   CHECK(r.stats.files_copied == 3);
-  REQUIRE(j.failures().size() == 1);
-  CHECK(j.failures()[0].path == "");
+  REQUIRE(j.failures().value().size() == 1);
+  CHECK(j.failures().value()[0].path == "");
 
   // Retrying the row walks the whole tree.
   for (uint64_t failures : {1, 0}) {
@@ -2109,11 +2137,11 @@ TEST_CASE("fake: a top directory whose metadata cannot be set is a failure that 
     Report r2;
     Cancellation cancel;
     Engine engine(src, dst, fake_options(), r2, &j, cancel);
-    REQUIRE(engine.run(j.failures()).ok());
+    REQUIRE(engine.run(j.failures().value()).ok());
     REQUIRE(j.end_run(true).ok());
     CHECK(r2.stats.dirs_listed == 3);
     CHECK(r2.stats.failures == failures);
-    CHECK(j.failures().size() == failures);
+    CHECK(j.failures().value().size() == failures);
   }
   CHECK(dst.get("")->entry.mtime == src.get("")->entry.mtime);
 }
@@ -2127,19 +2155,19 @@ TEST_CASE("fake: retrying keeps the rows of a directory that cannot be recreated
   populate(src);
   // As if d1/d2/f2 had failed and d1 then vanished from the target.
   REQUIRE(j.begin_run(false).ok());
-  j.record_failure({"d1/d2/f2", EntryType::File, Error{ErrorKind::IO, "earlier"}});
+  REQUIRE(j.record_failure({"d1/d2/f2", EntryType::File, Error{ErrorKind::IO, "earlier"}}).ok());
   REQUIRE(j.end_run(true).ok());
 
   REQUIRE(j.begin_run(false).ok());
   Report r;
   Cancellation cancel;
   Engine engine(src, dst, fake_options(), r, &j, cancel);
-  REQUIRE(engine.run(j.failures()).ok());
+  REQUIRE(engine.run(j.failures().value()).ok());
   REQUIRE(j.end_run(true).ok());
   REQUIRE(r.stats.failures == 1);
   CHECK(r.failures()[0].path == "d1/d2");
   CHECK(r.failures()[0].error.kind == ErrorKind::NotFound);
-  auto rows = j.failures();
+  auto rows = j.failures().value();
   REQUIRE(rows.size() == 2);
   CHECK(rows[0].path == "d1/d2");
   CHECK(rows[1].path == "d1/d2/f2");
@@ -2150,7 +2178,7 @@ TEST_CASE("fake: retrying keeps the rows of a directory that cannot be recreated
   REQUIRE(run_sync(src, dst, fake_options(), r2, &j).ok());
   REQUIRE(j.end_run(true).ok());
   CHECK(r2.stats.failures == 0);
-  CHECK(j.failures().empty());
+  CHECK(j.failures().value().empty());
   expect_mirrored(src, dst);
 }
 
@@ -2167,9 +2195,13 @@ TEST_CASE("fake: retrying a failed deletion deletes, with --delete") {
   dst.add_dir("gone");
   dst.add_file("gone/inner", "y");
   REQUIRE(j.begin_run(false).ok());
-  j.record_failure({"d1/extra", EntryType::File, Error{ErrorKind::Permission, "locked"}});
-  j.record_failure({"gone", EntryType::Directory, Error{ErrorKind::Permission, "locked"}});
-  j.record_failure({"gone/inner", EntryType::File, Error{ErrorKind::IO, "earlier"}});
+  REQUIRE(j.record_failure(
+              {"d1/extra", EntryType::File, Error{ErrorKind::Permission, "locked"}})
+              .ok());
+  REQUIRE(j.record_failure(
+              {"gone", EntryType::Directory, Error{ErrorKind::Permission, "locked"}})
+              .ok());
+  REQUIRE(j.record_failure({"gone/inner", EntryType::File, Error{ErrorKind::IO, "earlier"}}).ok());
   REQUIRE(j.end_run(true).ok());
 
   for (bool delete_extra : {false, true}) {
@@ -2179,12 +2211,12 @@ TEST_CASE("fake: retrying a failed deletion deletes, with --delete") {
     Report r;
     Cancellation cancel;
     Engine engine(src, dst, o, r, &j, cancel);
-    REQUIRE(engine.run(j.failures()).ok());
+    REQUIRE(engine.run(j.failures().value()).ok());
     REQUIRE(j.end_run(true).ok());
     CHECK(r.stats.failures == 0);
     CHECK(r.stats.extras == 2);
     CHECK(r.stats.deleted == (delete_extra ? 3 : 0));
-    CHECK(j.failures().size() == (delete_extra ? 0 : 3));
+    CHECK(j.failures().value().size() == (delete_extra ? 0 : 3));
     CHECK(static_cast<bool>(dst.get("gone/inner")) == !delete_extra);
   }
   CHECK_FALSE(dst.get("d1/extra"));
@@ -2203,8 +2235,10 @@ TEST_CASE("fake: plain runs clear the rows of entries gone from both sides") {
   dst.add_file("d1/extra", "x");
   REQUIRE(j.begin_run(false).ok());
   for (const char* path : {"d1/vanished", "d1/extra", "nowhere/deep/file", "d1/d2/gone/f"})
-    j.record_failure({path, EntryType::File, Error{ErrorKind::IO, "earlier"}});
-  j.record_failure({"nowhere", EntryType::Directory, Error{ErrorKind::IO, "earlier"}});
+    REQUIRE(j.record_failure({path, EntryType::File, Error{ErrorKind::IO, "earlier"}}).ok());
+  REQUIRE(j.record_failure(
+              {"nowhere", EntryType::Directory, Error{ErrorKind::IO, "earlier"}})
+              .ok());
   REQUIRE(j.end_run(true).ok());
 
   REQUIRE(j.begin_run(false).ok());
@@ -2212,7 +2246,7 @@ TEST_CASE("fake: plain runs clear the rows of entries gone from both sides") {
   REQUIRE(run_sync(src, dst, fake_options(), r, &j).ok());
   REQUIRE(j.end_run(true).ok());
   // Only the extra, which a run with --delete would delete, is left.
-  auto rows = j.failures();
+  auto rows = j.failures().value();
   REQUIRE(rows.size() == 1);
   CHECK(rows[0].path == "d1/extra");
 }

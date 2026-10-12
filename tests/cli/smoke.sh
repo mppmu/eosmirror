@@ -55,6 +55,28 @@ grep -q "target: $(readlink -f "$work")/dst\$" "$work/run.err" || fail "target n
 [[ $(stat -c %Y "$work/dst/sub/deep") == $(stat -c %Y "$work/src/sub/deep") ]] || fail "mtime of dir"
 grep -q 'failures: 0' "$work/run.out" || fail "summary: $(cat "$work/run.out")"
 
+# Dry runs neither create nor change a journal, and resume what the real run
+# would resume: nothing after a completed run.
+"$bin" sync -n -q "${owner_opt[@]}" --journal "$work/new.db" "$work/src" "$work/dst" > /dev/null \
+  || fail "dry run without its journal"
+[[ ! -e $work/new.db ]] || fail "a dry run created its journal"
+journal_state() { ls "$work" | grep '^j\.db'; sha256sum < "$work/j.db"; }
+before=$(journal_state)
+"$bin" sync -n "${owner_opt[@]}" --resume --journal "$work/j.db" "$work/src" "$work/dst" > "$work/dry.out" 2>&1 \
+  || fail "dry run with the journal: $(cat "$work/dry.out")"
+grep -q 'directories: 3 listed' "$work/dry.out" || fail "dry --resume after a completed run: $(cat "$work/dry.out")"
+[[ $(journal_state) == "$before" ]] || fail "a dry run changed the journal"
+
+# Journals in the trees they record, and files that are not journals, are
+# refused.
+rc=0; "$bin" sync -q "${owner_opt[@]}" --journal "$work/dst/j.db" "$work/src" "$work/dst" > /dev/null 2> "$work/inside.err" || rc=$?
+[[ $rc == 3 && ! -e $work/dst/j.db ]] && grep -q 'is in the tree of' "$work/inside.err" \
+  || fail "journal in the target: $rc $(cat "$work/inside.err")"
+echo notes > "$work/notes.db"
+rc=0; "$bin" failures "$work/notes.db" 2> "$work/notes.err" || rc=$?
+[[ $rc == 3 && $(cat "$work/notes.db") == notes ]] && grep -q 'not an eosmirror journal' "$work/notes.err" \
+  || fail "failures of a file that is not a journal: $rc $(cat "$work/notes.err")"
+
 # Missing parents of the target are created, also for relative paths and
 # for shards that start together.
 "$bin" sync -q "${owner_opt[@]}" "$work/src" "$work/deep/er/dst" > /dev/null || fail "sync into missing parents"
@@ -136,8 +158,11 @@ for i in 1 2 3 4 5 6; do
   echo $i > "$work/conflicts/src/f$i"
   mkdir "$work/conflicts/dst/f$i"
 done
-rc=0; "$bin" sync -q "${owner_opt[@]}" --max-consecutive-failures 3 "$work/conflicts/src" "$work/conflicts/dst" > /dev/null 2> "$work/stop.err" || rc=$?
+rc=0; "$bin" sync -q "${owner_opt[@]}" --journal "$work/stop.db" --max-consecutive-failures 3 "$work/conflicts/src" "$work/conflicts/dst" > /dev/null 2> "$work/stop.err" || rc=$?
 [[ $rc == 4 ]] && grep -q '3 failures in a row' "$work/stop.err" || fail "stop after failures: $rc $(cat "$work/stop.err")"
+# Resuming it needs the same options.
+rc=0; "$bin" sync -q "${owner_opt[@]}" --journal "$work/stop.db" --resume --delete "$work/conflicts/src" "$work/conflicts/dst" > /dev/null 2> "$work/resume.err" || rc=$?
+[[ $rc == 3 ]] && grep -q 'other --delete$' "$work/resume.err" || fail "resume with other options: $rc $(cat "$work/resume.err")"
 rc=0; "$bin" sync -q "${owner_opt[@]}" --max-consecutive-failures unlimited "$work/conflicts/src" "$work/conflicts/dst" > /dev/null 2>&1 || rc=$?
 [[ $rc == 1 ]] || fail "unlimited failures should exit 1, got $rc"
 

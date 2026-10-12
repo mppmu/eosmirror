@@ -3,6 +3,7 @@
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <thread>
 #include <utility>
 
@@ -30,14 +31,19 @@ void on_signal(int) {
 }
 
 int list_failures(const std::string& file) {
-  auto opened = Journal::open_any(file);
+  auto opened = Journal::open_read_only(file);
   if (!opened.ok()) {
     std::fprintf(stderr, "eosmirror: %s\n", opened.error().describe().c_str());
     return kFatal;
   }
+  auto failures = opened.value()->failures();
+  if (!failures.ok()) {
+    std::fprintf(stderr, "eosmirror: %s\n", failures.error().describe().c_str());
+    return kFatal;
+  }
   std::fprintf(stderr, "failures of %s -> %s\n", opened.value()->source().c_str(),
                opened.value()->target().c_str());
-  for (const Failure& f : opened.value()->failures())
+  for (const Failure& f : failures.value())
     std::printf("%s\t%s\t%s\n", std::string(to_string(f.type)).c_str(), printable(f.path).c_str(),
                 printable(f.error.describe()).c_str());
   return kOk;
@@ -102,6 +108,68 @@ std::string spec_name(const std::string& spec) {
   return path.substr(path.rfind('/') + 1);
 }
 
+// An error if the journal, or a file of its write-ahead log, is in the tree
+// of the source or the target: a run would copy or delete it.
+Status check_journal_outside(const std::string& file, const Endpoint& source,
+                             const Endpoint& target) {
+  std::error_code ec;
+  std::filesystem::path path = std::filesystem::absolute(file, ec);
+  if (!ec) path = std::filesystem::weakly_canonical(path, ec);
+  for (const char* suffix : {"", "-wal", "-shm", "-journal"}) {
+    Location journal{"", path.string() + suffix};
+    for (const Endpoint* tree : {&source, &target})
+      if (contains(tree->location(), journal))
+        return Error{ErrorKind::Other, "the journal " + journal.path + " is in the tree of " +
+                                           tree->describe() + ": refusing to run"};
+  }
+  return {};
+}
+
+// Opens the journal of a run, and settles whether it resumes: only an
+// interrupted run with the same options, see RunOptions. A dry run reads
+// the journal but never changes it, and goes without one that does not
+// exist yet.
+Result<std::unique_ptr<Journal>> open_journal(const CliOptions& opts, const Endpoint& source,
+                                              const Endpoint& target, SyncOptions& sync) {
+  std::string shard =
+      std::to_string(opts.sync.shard_index) + "/" + std::to_string(opts.sync.shard_count);
+  std::error_code ec;
+  if (sync.dry_run && !std::filesystem::exists(opts.journal, ec)) {
+    log::info("the journal ", opts.journal, " does not exist yet; the dry run goes without");
+    sync.resume = false;
+    return std::unique_ptr<Journal>();
+  }
+  auto opened = sync.dry_run ? Journal::open_read_only(opts.journal, source.describe(),
+                                                       target.describe(), shard)
+                             : Journal::open(opts.journal, source.describe(), target.describe(),
+                                             shard);
+  if (!opened.ok()) return opened.error();
+  Journal& journal = *opened.value();
+  RunOptions options = result_options(opts);
+  if (sync.resume) {
+    auto interrupted = journal.interrupted();
+    if (!interrupted.ok()) return interrupted.error();
+    if (!interrupted.value()) {
+      log::info("the previous run completed, nothing to resume");
+      sync.resume = false;
+    } else {
+      auto differing = journal.differing_options(options);
+      if (!differing.ok()) return differing.error();
+      if (!differing.value().empty()) {
+        std::string names;
+        for (const std::string& name : differing.value())
+          names += (names.empty() ? "" : ", ") + name;
+        return Error{ErrorKind::Other,
+                     "--resume needs the options of the interrupted run, which had other " + names};
+      }
+    }
+  }
+  if (!sync.dry_run) {
+    if (Status s = journal.begin_run(sync.resume, options); !s.ok()) return s.error();
+  }
+  return opened;
+}
+
 // Creates the target's missing ancestors, like mkdir -p; the engine creates
 // the target directory itself.
 Status ensure_parents(const std::string& spec, const EndpointSettings& settings, bool dry_run) {
@@ -157,36 +225,43 @@ int sync(const CliOptions& opts) {
     log::error(s.error().describe());
     return kFatal;
   }
+  if (!opts.journal.empty()) {
+    if (Status s = check_journal_outside(opts.journal, *source.value(), *target.value()); !s.ok()) {
+      log::error(s.error().describe());
+      return kFatal;
+    }
+  }
   if (Status s = ensure_parents(target_spec.value(), opts.endpoints, opts.sync.dry_run); !s.ok()) {
     log::error(s.error().describe());
     return kFatal;
   }
 
-  // A dry run reads the journal (for --retry-failed) but records nothing.
+  SyncOptions sync = opts.sync;
   std::unique_ptr<Journal> journal;
   if (!opts.journal.empty()) {
-    std::string shard = std::to_string(opts.sync.shard_index) + "/" +
-                        std::to_string(opts.sync.shard_count);
-    auto opened = Journal::open(opts.journal, source.value()->describe(),
-                                target.value()->describe(), shard);
+    auto opened = open_journal(opts, *source.value(), *target.value(), sync);
     if (!opened.ok()) {
       log::error(opened.error().describe());
       return kFatal;
     }
     journal = std::move(opened).value();
-    if (!opts.sync.dry_run) {
-      if (Status s = journal->begin_run(opts.sync.resume); !s.ok()) {
-        log::error(s.error().describe());
-        return kFatal;
-      }
+  }
+  // What --retry-failed retries; nothing without a journal (a dry run's).
+  std::vector<Failure> retried;
+  if (opts.retry_failed && journal) {
+    auto failures = journal->failures();
+    if (!failures.ok()) {
+      log::error(failures.error().describe());
+      return kFatal;
     }
+    retried = std::move(failures).value();
   }
 
   std::signal(SIGINT, on_signal);
   std::signal(SIGTERM, on_signal);
 
   Report report;
-  Engine engine(*source.value(), *target.value(), opts.sync, report, journal.get(), g_cancel);
+  Engine engine(*source.value(), *target.value(), sync, report, journal.get(), g_cancel);
 
   std::atomic<bool> finished{false};
   std::thread progress;
@@ -204,7 +279,7 @@ int sync(const CliOptions& opts) {
     });
   }
 
-  std::string title = std::string("eosmirror ") + (opts.sync.dry_run ? "dry run: " : "") +
+  std::string title = std::string("eosmirror ") + (sync.dry_run ? "dry run: " : "") +
                       source.value()->describe() + " -> " + target.value()->describe();
   log::info(title);
   // Live bars on a terminal, unless plain progress lines were asked for or
@@ -215,22 +290,23 @@ int sync(const CliOptions& opts) {
     display = std::make_unique<ProgressDisplay>(report, title);
     display->start();
   }
-  Status status = opts.retry_failed ? engine.run(journal->failures()) : engine.run();
+  Status status = opts.retry_failed ? engine.run(retried) : engine.run();
   finished = true;
   if (progress.joinable()) progress.join();
   if (display) display->stop();
 
-  if (journal && !opts.sync.dry_run) {
-    if (Status s = journal->end_run(status.ok()); !s.ok()) log::error(s.error().describe());
-  }
+  Status journaled;
+  if (journal && !sync.dry_run) journaled = journal->end_run(status.ok());
 
-  std::fputs(report.summary(opts.sync.dry_run).c_str(), stdout);
+  std::fputs(report.summary(sync.dry_run).c_str(), stdout);
+  if (!journaled.ok()) log::error(journaled.error().describe());
   if (!status.ok()) {
     log::error(status.error().describe());
     if (status.error().kind != ErrorKind::Cancelled) return kFatal;
     // Without a signal, the engine stopped the run after failures in a row.
     return g_cancel.requested() ? kInterrupted : kStopped;
   }
+  if (!journaled.ok()) return kFatal;
   return report.failure_count() > 0 ? kFailures : kOk;
 }
 

@@ -134,7 +134,7 @@ sharding a tree over several hosts (`--shard K/N`) and symlink rewriting.
 The exit status is 0 when everything succeeded, 1 when some entries failed
 after retries, 2 for usage errors, 3 when the run could not start (or found
 the source empty but not the target, with `--delete`, or source and target
-overlapping), 4 when it stopped
+overlapping) or its journal failed, 4 when it stopped
 after too many failures in a row (try again later with `--resume`) and 130
 when interrupted.
 

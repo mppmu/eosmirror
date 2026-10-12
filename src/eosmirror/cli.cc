@@ -41,6 +41,22 @@ Result<uint64_t> parse_size(const std::string& text) {
   return static_cast<uint64_t>(value) * factor;
 }
 
+RunOptions result_options(const CliOptions& opts) {
+  auto yes = [](bool on) { return std::string(on ? "yes" : "no"); };
+  // Lengths first, so that no two lists of rewrites read the same.
+  std::string rewrites;
+  for (const auto& [from, to] : opts.sync.link_rewrites)
+    rewrites += std::to_string(from.size()) + ":" + from + std::to_string(to.size()) + ":" + to;
+  return {{"--delete", yes(opts.sync.delete_extra)},
+          {"--delete-emptied", yes(opts.sync.delete_emptied)},
+          {"--no-owner", yes(!opts.sync.preserve_owner)},
+          {"--no-mode", yes(!opts.sync.preserve_mode)},
+          {"--no-verify", yes(!opts.sync.verify)},
+          {"--require-checksum", yes(opts.sync.require_checksum)},
+          {"--verify-readback", yes(opts.endpoints.posix.verify_readback)},
+          {"--rewrite-links", rewrites}};
+}
+
 std::string usage() {
   return R"(Usage: eosmirror sync [options] SOURCE TARGET
        eosmirror selftest [--no-owner] [--mgm URL] TARGET
@@ -98,7 +114,8 @@ Options:
       --mgm URL            the EOS MGM for paths below /eos, root://host[:port]
                            (default: EOS_MGM_URL)
       --journal FILE       record failures and finalized directories in FILE
-      --resume             skip directories the journal records as finalized
+      --resume             continue an interrupted run, with its options: skip the
+                           directories the journal records as finalized
       --retry-failed       process only the failures recorded in the journal
       --shard K/N          handle only the directories of shard K of N (K from 0)
       --progress SEC       print a progress line every SEC seconds instead of the

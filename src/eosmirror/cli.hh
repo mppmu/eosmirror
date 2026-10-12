@@ -6,6 +6,7 @@
 
 #include "eosmirror/endpoints.hh"
 #include "eosmirror/error.hh"
+#include "eosmirror/journal.hh"
 #include "eosmirror/log.hh"
 #include "eosmirror/options.hh"
 
@@ -30,6 +31,10 @@ struct CliOptions {
 Result<CliOptions> parse_command_line(int argc, char** argv);
 
 std::string usage();
+
+// The options that decide what a run makes of the target, which a resumed
+// run must share with the run it resumes.
+RunOptions result_options(const CliOptions& opts);
 
 // Parses sizes like "64k", "8M", "1G" or plain bytes.
 Result<uint64_t> parse_size(const std::string& text);

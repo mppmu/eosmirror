@@ -405,7 +405,7 @@ Status sync(Endpoint& src, Endpoint& dst, const SyncOptions& options, Journal& j
   Cancellation cancel;
   REQUIRE(journal.begin_run(false).ok());
   Engine engine(src, dst, options, report, &journal, cancel);
-  Status s = retry_failed ? engine.run(journal.failures()) : engine.run();
+  Status s = retry_failed ? engine.run(journal.failures().value()) : engine.run();
   REQUIRE(journal.end_run(s.ok()).ok());
   return s;
 }
@@ -483,7 +483,7 @@ TEST_CASE("differential: fake endpoints with faults") {
       completed(sync(src, dst, clean, *journal.value(), r));
       CHECK(r.stats.failures == 0);
       compare(src, dst, "", true);
-      CHECK(journal.value()->failures().empty());
+      CHECK(journal.value()->failures().value().empty());
 
       completed(sync(src, dst, clean, *journal.value(), again));
       CHECK(again.stats.files_copied == 0);

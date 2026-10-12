@@ -270,15 +270,28 @@ struct Engine::Impl {
     if (!end_error) end_error = std::move(error);
   }
 
+  // A journal that cannot be read or written loses what this run and later
+  // ones need: the run stops with its error.
+  void journal_failed(const Error& error) {
+    end_run(error);
+    cancel.request();
+  }
+
+  void journal_write(const Status& written) {
+    if (!written.ok()) journal_failed(written.error());
+  }
+
   void fail(const RelPath& path, EntryType type, const Error& error) {
     if (error.kind == ErrorKind::Cancelled) return;
     Failure f{path, type, error};
-    if (journal && !options.dry_run) journal->record_failure(f);
+    if (journal && !options.dry_run) journal_write(journal->record_failure(f));
     // Each deletion that the cap withholds is recorded, for --retry-failed,
     // but told once, and none is a failure in a row.
     if (error.kind == ErrorKind::Withheld) {
       bool first = !delete_cap_reported.exchange(true);
-      if (first) log::warn(error.describe(), "; the deletions withheld after it are failures too, not logged");
+      if (first)
+        log::warn(error.describe(),
+                  "; the deletions withheld after it are failures too, not logged");
       report.add_failure(std::move(f), false);
       return;
     }
@@ -329,7 +342,7 @@ struct Engine::Impl {
     if (!journal || options.dry_run) return;
     auto rows = prior_failures.find(parent_path(path));
     if (rows != prior_failures.end() && rows->second.count(name_of(path)))
-      journal->clear_failure(path);
+      journal_write(journal->clear_failure(path));
   }
 
   // An entry that was listed on the source but is gone when it is handled:
@@ -362,12 +375,12 @@ struct Engine::Impl {
     };
     if (rows != prior_failures.end())
       for (const auto& [name, kind] : rows->second)
-        if (gone(name)) journal->clear_failure(join(dir, name));
+        if (gone(name)) journal_write(journal->clear_failure(join(dir, name)));
     for (; below != prior_failures.end() && below->first.starts_with(prefix); ++below) {
       std::string_view rest = std::string_view(below->first).substr(prefix.size());
       if (!gone(rest.substr(0, rest.find('/')))) continue;
       for (const auto& [name, kind] : below->second)
-        journal->clear_failure(join(below->first, name));
+        journal_write(journal->clear_failure(join(below->first, name)));
     }
   }
 
@@ -464,7 +477,7 @@ struct Engine::Impl {
     }
     if (!node->failed && !cancel.requested()) succeeded(node->path);
     if (journal && !options.dry_run && !node->failed && !node->only && !cancel.requested())
-      journal->record_done_dir(node->path);
+      journal_write(journal->record_done_dir(node->path));
     if (node->parent) {
       entry_done(node->parent);
     } else {
@@ -489,12 +502,15 @@ struct Engine::Impl {
       entry_done(node);
       return;
     }
-    if (journal && options.resume && !node->created && !node->only &&
-        journal->is_done_dir(node->path)) {
-      log::debug("skipping finalized directory ", node->path);
-      node->owned = false;  // already finalized, leave its metadata alone
-      entry_done(node);
-      return;
+    if (journal && options.resume && !node->created && !node->only) {
+      auto done = journal->is_done_dir(node->path);
+      if (!done.ok()) journal_failed(done.error());
+      if (!done.ok() || done.value()) {
+        log::debug("skipping finalized directory ", node->path);
+        node->owned = false;  // already finalized, leave its metadata alone
+        entry_done(node);
+        return;
+      }
     }
 
     auto listed = retry([&] { return source.list(node->path); });
@@ -1150,11 +1166,13 @@ struct Engine::Impl {
   }
 
   Status run_nodes(std::vector<std::shared_ptr<DirNode>> roots) {
-    adapt_to_capabilities();
     if (journal) {
-      for (const Failure& f : journal->failures())
+      auto failures = journal->failures();
+      if (!failures.ok()) return failures.error();
+      for (const Failure& f : failures.value())
         prior_failures[parent_path(f.path)][name_of(f.path)] = f.error.kind;
     }
+    adapt_to_capabilities();
     {
       std::lock_guard lock(done_mutex);
       roots_pending = roots.size();
@@ -1228,7 +1246,9 @@ Status Engine::run(const std::vector<Failure>& entries) {
     if (!src.ok() && src.error().kind == ErrorKind::NotFound) {
       // Gone from the source: nothing left to retry.
       if (impl_->journal && !impl_->options.dry_run)
-        for (const auto& name : names) impl_->journal->clear_failure(join(dir, name));
+        for (const auto& name : names) {
+          if (Status s = impl_->journal->clear_failure(join(dir, name)); !s.ok()) return s;
+        }
       continue;
     }
     auto node = src.ok() ? impl_->make_node(dir, src.value())

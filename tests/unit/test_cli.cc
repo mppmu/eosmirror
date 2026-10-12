@@ -161,6 +161,27 @@ TEST_CASE("displayed URLs carry no credentials") {
   }
 }
 
+TEST_CASE("the options that decide what a run makes of the target") {
+  auto names = [](const CliOptions& a, const CliOptions& b) {
+    std::vector<std::string> differing;
+    RunOptions x = result_options(a), y = result_options(b);
+    REQUIRE(x.size() == y.size());
+    for (size_t i = 0; i < x.size(); ++i)
+      if (x[i] != y[i]) differing.push_back(x[i].first);
+    return differing;
+  };
+  auto plain = parse({"sync", "a", "b"}).value();
+  auto tuned = parse({"sync", "--checkers", "3", "--max-delete", "5", "a", "b"});
+  CHECK(names(plain, tuned.value()).empty());
+  CHECK(names(plain, parse({"sync", "--delete", "--no-owner", "a", "b"}).value()) ==
+        std::vector<std::string>{"--delete", "--no-owner"});
+  auto rewritten = parse({"sync", "--rewrite-links", "/a=/b", "a", "b"}).value();
+  CHECK(names(rewritten, parse({"sync", "--rewrite-links", "/a=/c", "a", "b"}).value()) ==
+        std::vector<std::string>{"--rewrite-links"});
+  CHECK(names(rewritten, parse({"sync", "--rewrite-links", "/a=/b", "--rewrite-links", "x=y", "a",
+                                "b"}).value()) == std::vector<std::string>{"--rewrite-links"});
+}
+
 TEST_CASE("paths below /eos name the EOS instance of the MGM") {
   CHECK(parse({"sync", "--mgm", "root://mgm.example.org", "/eos/a", "/local"}).value().endpoints.mgm ==
         "root://mgm.example.org");
