@@ -734,6 +734,23 @@ TEST_CASE("eos endpoint: roots reached through symlinks") {
 
   auto loop = EosEndpoint::create(dir.url + "/loop/x");
   REQUIRE_FALSE(loop.ok());
+
+  // Trees are compared by real path: through symlinks, also for roots that
+  // do not exist yet, and with the port spelled out.
+  std::string url = dir.url;
+  auto path = url.find('/', url.find("://") + 3);
+  auto real = EosEndpoint::create(url.substr(0, path) + ":1094" + url.substr(path) + "/real");
+  REQUIRE(real.ok());
+  for (const char* other : {"rel", "abs", "rel/new/deeper", "chain/../../real"}) {
+    INFO("other ", other);
+    auto linked = EosEndpoint::create(dir.url + "/" + other);
+    REQUIRE(linked.ok());
+    CHECK_FALSE(check_disjoint(*real.value(), *linked.value()).ok());
+    CHECK_FALSE(check_disjoint(*linked.value(), *real.value()).ok());
+  }
+  auto beside = EosEndpoint::create(dir.url + "/really");
+  REQUIRE(beside.ok());
+  CHECK(check_disjoint(*real.value(), *beside.value()).ok());
 }
 
 TEST_CASE("eos endpoint: listings for an identity with find limits") {
@@ -842,6 +859,9 @@ TEST_CASE("eos endpoint: endpoint URLs") {
   REQUIRE(ep.ok());
   CHECK(ep.value()->describe() == url);
   CHECK(ep.value()->capabilities().has_symlinks);
+  auto below = EosEndpoint::create(url + "/replica2");
+  REQUIRE(below.ok());
+  CHECK_FALSE(check_disjoint(*below.value(), *ep.value()).ok());
   // Opaque parameters go with every request: as nobody, owners cannot be set.
   auto nobody = make_endpoint(url + "?eos.ruid=65534&eos.rgid=65534", settings);
   REQUIRE(nobody.ok());

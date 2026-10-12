@@ -21,7 +21,12 @@ A run walks the source tree directory by directory and makes the target match:
   directory is empty, against a target that is not, is more likely an
   unmounted file system or a broken server than a tree to delete: such a run
   stops without deleting anything. A missing source stops a run before it
-  starts.
+  starts, and so do a source and target that overlap (the same tree, or
+  one inside the other): the run would copy the target into itself, or
+  delete what is around the source. Trees are compared by real path, for a
+  target that does not exist yet through its deepest existing ancestor, and
+  remote ones by server (host and port) and path, the root of EOS endpoints
+  resolved like realpath(3) and that of plain XRootD normalized.
 - Files and directories that vanish from the source between the listing of
   their directory and their copy or walk are counted as such, and are no
   failures: the source changed, and the next run finds them gone. They do
@@ -213,8 +218,9 @@ retries) go to a summary at the end
 and optionally to a periodic progress line. Exit status: 0 when everything succeeded, 1 when
 something failed after retries (also the metadata of the top directory), 2
 for usage errors, 3 when the run could not start (unreadable source,
-unusable journal, failed preflight, a top directory that cannot be listed,
-an empty source against a target that is not), 4 when it stopped after
+unusable journal, failed preflight, overlapping source and target, a top
+directory that cannot be listed, an empty source against a target that is
+not), 4 when it stopped after
 failures in a row, 130 when interrupted.
 
 ## XRootD endpoint

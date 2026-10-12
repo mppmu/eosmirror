@@ -31,6 +31,31 @@ void log_server(const std::string& url, std::string_view kind) {
 }  // namespace
 #endif
 
+std::string to_string(const Location& location) {
+  return location.server.empty() ? location.path : location.path + " on " + location.server;
+}
+
+bool contains(const Location& outer, const Location& inner) {
+  if (outer.server != inner.server) return false;
+  const std::string& o = outer.path;
+  const std::string& i = inner.path;
+  return i == o || o == "/" || (i.starts_with(o) && i[o.size()] == '/');
+}
+
+Status check_disjoint(const Endpoint& source, const Endpoint& target) {
+  Location src = source.location();
+  Location dst = target.location();
+  std::string problem;
+  if (contains(src, dst) && contains(dst, src))
+    problem = "source and target are the same, " + to_string(src);
+  else if (contains(src, dst))
+    problem = "the target " + to_string(dst) + " is inside the source " + to_string(src);
+  else if (contains(dst, src))
+    problem = "the source " + to_string(src) + " is inside the target " + to_string(dst);
+  if (problem.empty()) return {};
+  return Error{ErrorKind::Other, problem + ": refusing to run"};
+}
+
 Result<std::string> eos_path_url(const std::string& spec, const std::string& mgm,
                                  const char* env_mgm) {
   if (spec != "/eos" && !spec.starts_with("/eos/")) return spec;

@@ -9,6 +9,7 @@
 #include <filesystem>
 
 #include "doctest/doctest.h"
+#include "eosmirror/endpoints.hh"
 #include "temp_dir.hh"
 
 using namespace eosmirror;
@@ -244,6 +245,41 @@ TEST_CASE("posix roots have their canonical path, also before they exist") {
   CHECK(PosixEndpoint(tmp.sub("link/./missing/")).describe() == real + "/missing");
   CHECK(PosixEndpoint(tmp.sub("link/missing/deeper")).describe() == real + "/missing/deeper");
   CHECK(PosixEndpoint("/").describe() == "/");
+}
+
+TEST_CASE("trees that overlap are found by whole path components") {
+  auto at = [](std::string server, std::string path) { return Location{server, path}; };
+  CHECK(contains(at("", "/data"), at("", "/data")));
+  CHECK(contains(at("", "/data"), at("", "/data/proj")));
+  CHECK(contains(at("", "/"), at("", "/data")));
+  CHECK_FALSE(contains(at("", "/data/proj"), at("", "/data")));
+  CHECK_FALSE(contains(at("", "/data/proj"), at("", "/data/project")));
+  CHECK_FALSE(contains(at("h:1094", "/data"), at("", "/data/proj")));
+  CHECK_FALSE(contains(at("h:1094", "/data"), at("g:1094", "/data")));
+  CHECK(contains(at("h:1094", "/eos/a"), at("h:1094", "/eos/a/b")));
+
+  TempDir tmp;
+  tmp.write_file("data/proj/f", "x");
+  tmp.write_file("data/other", "y");
+  REQUIRE(symlink("data/proj", tmp.sub("link").c_str()) == 0);
+  auto disjoint = [&](const std::string& src, const std::string& dst) {
+    return check_disjoint(PosixEndpoint(tmp.sub(src)), PosixEndpoint(tmp.sub(dst)));
+  };
+  CHECK(disjoint("data/proj", "data/project").ok());
+  CHECK(disjoint("data/proj", "mirror/proj").ok());
+  // A target around the source, inside it (not there yet), or the same tree
+  // under another name.
+  auto around = disjoint("data/proj", "data");
+  REQUIRE_FALSE(around.ok());
+  CHECK(around.error().message.find("source " + fs::canonical(tmp.sub("data/proj")).string() +
+                                    " is inside the target") != std::string::npos);
+  auto inside = disjoint("data/proj", "data/proj/mirror/new");
+  REQUIRE_FALSE(inside.ok());
+  CHECK(inside.error().message.find("target") != std::string::npos);
+  CHECK_FALSE(fs::exists(tmp.sub("data/proj/mirror")));
+  CHECK_FALSE(disjoint("link", "data/proj").ok());
+  CHECK_FALSE(disjoint("link/../proj/", "data/proj/./x/../").ok());
+  CHECK_FALSE(disjoint("data/proj", "link/sub").ok());
 }
 
 TEST_CASE("posix mkdir, symlink, metadata and remove") {

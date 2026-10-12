@@ -142,13 +142,19 @@ int sync(const CliOptions& opts) {
     log::error(target_spec.error().describe());
     return kFatal;
   }
-  if (Status s = ensure_parents(target_spec.value(), opts.endpoints, opts.sync.dry_run); !s.ok()) {
-    log::error(s.error().describe());
-    return kFatal;
-  }
+  // The target's location is known before it exists: overlapping trees are
+  // refused before anything is created.
   auto target = make_endpoint(target_spec.value(), opts.endpoints);
   if (!target.ok()) {
     log::error(target.error().describe());
+    return kFatal;
+  }
+  if (Status s = check_disjoint(*source.value(), *target.value()); !s.ok()) {
+    log::error(s.error().describe());
+    return kFatal;
+  }
+  if (Status s = ensure_parents(target_spec.value(), opts.endpoints, opts.sync.dry_run); !s.ok()) {
+    log::error(s.error().describe());
     return kFatal;
   }
 

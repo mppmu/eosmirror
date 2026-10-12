@@ -15,6 +15,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -181,6 +182,8 @@ Result<EndpointUrl> parse_endpoint_url(const std::string& url) {
     return Error{ErrorKind::Other, "invalid URL: " + display_url(url)};
   EndpointUrl parts;
   parts.server = parsed.GetProtocol() + "://" + parsed.GetHostId();
+  parts.host = parsed.GetHostName() + ":" + std::to_string(parsed.GetPort());
+  for (auto& c : parts.host) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
   parts.path = parsed.GetPath();
   while (parts.path.size() > 1 && parts.path.back() == '/') parts.path.pop_back();
   if (parts.path.empty() || parts.path[0] != '/')
@@ -411,6 +414,7 @@ Result<std::unique_ptr<XrdEndpoint>> XrdEndpoint::create(const std::string& url,
 XrdEndpoint::XrdEndpoint(const std::string& url, EndpointUrl parts, XrdOptions options)
     : url_(display_url(url)),
       server_(std::move(parts.server)),
+      host_(std::move(parts.host)),
       root_(std::move(parts.path)),
       cgi_(std::move(parts.cgi)),
       options_(options),
@@ -437,6 +441,12 @@ std::string XrdEndpoint::open_url(const std::string& request_path) const {
   static std::atomic<int> threads{0};
   thread_local int thread = threads++;
   return with_cgi(std::move(url), "xrdcl.intent=eosmirror" + std::to_string(thread));
+}
+
+Location XrdEndpoint::location() const {
+  std::string path = std::filesystem::path(root_).lexically_normal().string();
+  while (path.size() > 1 && path.back() == '/') path.pop_back();
+  return {host_, path};
 }
 
 bool XrdEndpoint::is_temporary(std::string_view name) const {

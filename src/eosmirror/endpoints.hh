@@ -31,4 +31,9 @@ Result<std::string> eos_path_url(const std::string& spec, const std::string& mgm
 Result<std::unique_ptr<Endpoint>> make_endpoint(const std::string& spec,
                                                 const EndpointSettings& settings);
 
+// An error if the trees of source and target overlap, being the same or one
+// inside the other: a run would copy the target into itself, or delete what
+// is around the source.
+Status check_disjoint(const Endpoint& source, const Endpoint& target);
+
 }  // namespace eosmirror

@@ -223,8 +223,10 @@ PosixEndpoint::PosixEndpoint(std::string root, PosixOptions options)
   // deepest existing ancestor, which is what it will have once created.
   std::error_code ec;
   std::filesystem::path absolute = std::filesystem::absolute(root_, ec);
-  if (!ec) absolute = std::filesystem::weakly_canonical(absolute, ec);
-  if (!ec) root_ = absolute.string();
+  if (!ec) {
+    std::filesystem::path canonical = std::filesystem::weakly_canonical(absolute, ec);
+    root_ = (ec ? absolute.lexically_normal() : canonical).string();
+  }
   while (root_.size() > 1 && root_.back() == '/') root_.pop_back();
   mode_t mask = umask(0);
   umask(mask);

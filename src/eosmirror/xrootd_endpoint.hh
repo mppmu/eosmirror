@@ -36,6 +36,7 @@ std::string display_url(std::string_view url);
 // The parts of an endpoint URL, proto://[user@]host[:port]//path[?cgi].
 struct EndpointUrl {
   std::string server;  // proto://[user@]host:port
+  std::string host;    // host:port, the host in lower case
   std::string path;    // absolute, without trailing slash
   std::string cgi;     // the opaque parameters, without '?'
 };
@@ -65,6 +66,8 @@ class XrdEndpoint : public Endpoint {
   ~XrdEndpoint() override;
 
   std::string describe() const override { return url_; }
+  // The root normalized; EOS resolves it on creation.
+  Location location() const override;
   Capabilities capabilities() const override { return caps_; }
   bool is_temporary(std::string_view name) const override;
 
@@ -115,6 +118,7 @@ class XrdEndpoint : public Endpoint {
 
   std::string url_;     // as given, for display (display_url)
   std::string server_;  // root://[user[:password]@]host:port
+  std::string host_;    // host:port
   std::string root_;    // the path part, without trailing slash
   std::string cgi_;     // the URL's opaque parameters
   XrdOptions options_;

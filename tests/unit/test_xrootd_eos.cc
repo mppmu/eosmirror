@@ -57,13 +57,15 @@ TEST_CASE("endpoint URLs keep their protocol and opaque parameters") {
   auto parts = parse_endpoint_url("roots://user@host:1095//eos/dir/?authz=a%3Db&xrd.wantprot=krb5");
   REQUIRE(parts.ok());
   CHECK(parts.value().server == "roots://user@host:1095");
+  CHECK(parts.value().host == "host:1095");
   CHECK(parts.value().path == "/eos/dir");
   CHECK(parts.value().cgi == "authz=a%3Db&xrd.wantprot=krb5");
   CHECK(display_url("roots://user@host:1095//eos/dir/?authz=a%3Db") == "roots://user@host:1095//eos/dir/");
 
-  parts = parse_endpoint_url("root://host//data");
+  parts = parse_endpoint_url("root://Host.Example.org//data");
   REQUIRE(parts.ok());
-  CHECK(parts.value().server == "root://host:1094");
+  CHECK(parts.value().server == "root://Host.Example.org:1094");
+  CHECK(parts.value().host == "host.example.org:1094");
   CHECK(parts.value().path == "/data");
   CHECK(parts.value().cgi.empty());
   CHECK_FALSE(parse_endpoint_url("root://host/relative").ok());

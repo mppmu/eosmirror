@@ -32,6 +32,7 @@ class PosixEndpoint : public Endpoint {
   explicit PosixEndpoint(std::string root, PosixOptions options = PosixOptions());
 
   std::string describe() const override { return root_; }
+  Location location() const override { return {"", root_}; }
   Capabilities capabilities() const override;
   bool is_temporary(std::string_view name) const override;
   // Warns about EOS FUSE mounts.

@@ -41,6 +41,22 @@ struct Capabilities {
   ChecksumType checksum = ChecksumType::None;
 };
 
+// Where the tree of an endpoint is, for comparing endpoints: the server
+// ("host:port", empty for a local file system) and the absolute path of the
+// root, resolved like realpath(3) where the endpoint can (local paths and
+// EOS), else normalized.
+struct Location {
+  std::string server;
+  std::string path;
+};
+
+// The location as "<path>", or "<path> on <server>".
+std::string to_string(const Location& location);
+
+// Whether the tree at inner is the one at outer or inside it, comparing
+// whole path components.
+bool contains(const Location& outer, const Location& inner);
+
 // Sequential reader of one file.
 class FileReader {
  public:
@@ -114,6 +130,7 @@ class Endpoint {
 
   // The endpoint for messages, e.g. the URL or path it was created from.
   virtual std::string describe() const = 0;
+  virtual Location location() const = 0;
   virtual Capabilities capabilities() const = 0;
 
   // Whether an entry name is one of the endpoint's own temporary files, so

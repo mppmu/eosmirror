@@ -100,6 +100,21 @@ rc=0; "$bin" sync -q "${owner_opt[@]}" --delete "$work/missing" "$work/dst" > /d
 [[ $rc == 3 ]] || fail "missing source should exit 3, got $rc"
 [[ -f $work/dst/a ]] || fail "target emptied"
 
+# Trees that overlap are refused before anything is created or deleted:
+# a target around the source, inside it, the same tree by another name.
+mkdir -p "$work/data/proj" "$work/data/unrelated"
+echo p > "$work/data/proj/f"
+echo u > "$work/data/unrelated/g"
+ln -s data/proj "$work/projlink"
+for args in "--delete --dry-run $work/data/proj $work/data" "--delete $work/data/proj $work/data" \
+  "$work/data/proj $work/data/proj/mirror/deeper" "$work/projlink file://$work/data/proj/" \
+  "$work/data/proj/ $work/projlink/../proj"; do
+  rc=0; "$bin" sync -q "${owner_opt[@]}" $args > /dev/null 2> "$work/overlap.err" || rc=$?
+  [[ $rc == 3 ]] && grep -Eq 'same|inside' "$work/overlap.err" || fail "overlap $args: $rc $(cat "$work/overlap.err")"
+done
+[[ -f $work/data/unrelated/g && ! -e $work/data/proj/mirror ]] || fail "an overlapping run changed something"
+"$bin" sync -q "${owner_opt[@]}" "$work/data/proj" "$work/data/project" > /dev/null || fail "proj -> project"
+
 # Failures in a row stop the run with exit 4.
 mkdir -p "$work/conflicts/src" "$work/conflicts/dst"
 for i in 1 2 3 4 5 6; do
