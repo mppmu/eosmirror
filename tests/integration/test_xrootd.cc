@@ -336,7 +336,7 @@ TEST_CASE("xrootd endpoint: detection, and servers that cannot be asked") {
 
   // Trees on the same server overlap by their normalized paths.
   auto parts0 = parse_endpoint_url(base_url()).value();
-  auto inside = make_endpoint(parts0.server + "/" + parts0.path + "/./sub/../sub/deeper/", settings);
+  auto inside = make_endpoint(parts0.server + "/" + parts0.path + "//sub/deeper/", settings);
   REQUIRE(inside.ok());
   CHECK_FALSE(check_disjoint(*ep.value(), *inside.value()).ok());
   auto beside = make_endpoint(parts0.server + "/" + parts0.path + "-other", settings);

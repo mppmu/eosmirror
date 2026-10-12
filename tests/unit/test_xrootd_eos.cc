@@ -70,6 +70,11 @@ TEST_CASE("endpoint URLs keep their protocol and opaque parameters") {
   CHECK(parts.value().path == "/data");
   CHECK(parts.value().cgi.empty());
   CHECK_FALSE(parse_endpoint_url("root://host/relative").ok());
+  // Servers resolve . and .. after symlinks, which comparing roots cannot.
+  for (const char* url : {"root://host//eos/missing/../alias/p", "root://host//data/./x",
+                          "root://host//data/..", "root://host//data/x/.?authz=a"})
+    CHECK_FALSE(parse_endpoint_url(url).ok());
+  CHECK(parse_endpoint_url("root://host//data/.hidden/..x/...").ok());
 
   // The parameters go after those of the request itself.
   std::string cgi = "authz=token&xrd.wantprot=krb5";

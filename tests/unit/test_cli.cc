@@ -156,6 +156,10 @@ TEST_CASE("paths below /eos name the EOS instance of the MGM") {
   REQUIRE_FALSE(unset.ok());
   CHECK(unset.error().message.find("EOS_MGM_URL") != std::string::npos);
   CHECK_FALSE(eos_path_url("/eos/x", "", "").ok());
+  // A '?' would make the rest of the path opaque parameters of the URL.
+  auto cut = eos_path_url("/eos/project?archive", "", "root://env");
+  REQUIRE_FALSE(cut.ok());
+  CHECK(cut.error().message.find("'?'") != std::string::npos);
   // Other paths, and the explicit local form, stay as they are.
   for (const char* spec : {"/eosuser/x", "/data/eos/x", "file:///eos/x", "root://h//eos/x", "eos"})
     CHECK(eos_path_url(spec, "", "root://env").value() == spec);

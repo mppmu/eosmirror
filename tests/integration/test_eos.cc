@@ -783,6 +783,9 @@ TEST_CASE("eos endpoint: roots reached through symlinks") {
 
   auto loop = EosEndpoint::create(dir.url + "/loop/x");
   REQUIRE_FALSE(loop.ok());
+  // A root with a .. component would be resolved by the server after its
+  // symlinks: refused.
+  CHECK_FALSE(EosEndpoint::create(dir.url + "/missing/../rel/new").ok());
 
   // Trees are compared by real path: through symlinks, also for roots that
   // do not exist yet, and with the port spelled out.
@@ -790,7 +793,7 @@ TEST_CASE("eos endpoint: roots reached through symlinks") {
   auto path = url.find('/', url.find("://") + 3);
   auto real = EosEndpoint::create(url.substr(0, path) + ":1094" + url.substr(path) + "/real");
   REQUIRE(real.ok());
-  for (const char* other : {"rel", "abs", "rel/new/deeper", "chain/../../real"}) {
+  for (const char* other : {"rel", "abs", "rel/new/deeper", "chain"}) {
     INFO("other ", other);
     auto linked = EosEndpoint::create(dir.url + "/" + other);
     REQUIRE(linked.ok());

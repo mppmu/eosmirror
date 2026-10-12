@@ -46,6 +46,7 @@ struct EndpointUrl {
   std::string cgi;     // the opaque parameters, without '?'
 };
 
+// An error for paths that are not absolute or have '.' or '..' components.
 Result<EndpointUrl> parse_endpoint_url(const std::string& url);
 
 // A request path or URL with opaque parameters added after its own.

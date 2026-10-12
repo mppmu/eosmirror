@@ -30,9 +30,11 @@ A run walks the source tree directory by directory and makes the target match:
   delete what is around the source. Trees are compared by real path, for a
   target that does not exist yet through its deepest existing ancestor, and
   remote ones by server and path, the root of EOS endpoints resolved like
-  realpath(3) and that of plain XRootD normalized. Servers are the same
-  with the same port and name or an address in common, which catches
-  aliases; an EOS FUSE mount and the instance behind it are not compared.
+  realpath(3) and that of plain XRootD normalized (remote roots with `.` or
+  `..` components are refused, since servers resolve them after symlinks).
+  Servers are the same with the same port and name or an address in
+  common, which catches aliases; an EOS FUSE mount and the instance behind
+  it are not compared.
 - Files and directories that vanish from the source between the listing of
   their directory and their copy or walk are counted as such, and are no
   failures: the source changed, and the next run finds them gone. They do
@@ -350,7 +352,8 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
 - Endpoints are `root://mgm//eos/...` URLs, or paths below `/eos` on the
   command line, which name the instance of `--mgm` or `EOS_MGM_URL` (the eos
   client's convention) and never a local FUSE mount; `file:///eos/...` names
-  the mount explicitly. A run logs both endpoints as resolved, with the
+  the mount explicitly. Such a path with a `?` is refused: in the URL, the
+  rest of it would be opaque parameters. A run logs both endpoints as resolved, with the
   server, the real path and for such paths where the MGM came from, so that
   a stale `EOS_MGM_URL` does not go unnoticed.
 - Paths are sent percent-encoded behind `/#curl#` (`/#curl#/eos/a%20b`),

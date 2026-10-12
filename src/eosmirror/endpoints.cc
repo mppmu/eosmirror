@@ -113,6 +113,11 @@ std::string describe_resolved(const std::string& spec, const Endpoint& endpoint,
 Result<std::string> eos_path_url(const std::string& spec, const std::string& mgm,
                                  const char* env_mgm) {
   if (!is_eos_path(spec)) return spec;
+  // XRootD takes what follows a '?' for opaque parameters: another
+  // directory would be synchronized.
+  if (spec.find('?') != std::string::npos)
+    return Error{ErrorKind::Other, spec + " contains a '?', which would end the path and start "
+                                          "the opaque parameters of its URL"};
   std::string server = !mgm.empty() ? mgm : env_mgm ? env_mgm : "";
   while (!server.empty() && server.back() == '/') server.pop_back();
   if (server.empty())

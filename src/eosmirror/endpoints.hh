@@ -24,8 +24,9 @@ struct EndpointSettings {
 bool is_eos_path(const std::string& spec);
 
 // The URL of a command line path below /eos, "<mgm>//eos/...", with the MGM
-// from mgm or else env_mgm (EOS_MGM_URL, as for the eos client). Other specs
-// come back unchanged; a local EOS FUSE mount is named as file:///eos/....
+// from mgm or else env_mgm (EOS_MGM_URL, as for the eos client); an error
+// for a path with a '?'. Other specs come back unchanged; a local EOS FUSE
+// mount is named as file:///eos/....
 Result<std::string> eos_path_url(const std::string& spec, const std::string& mgm,
                                  const char* env_mgm);
 

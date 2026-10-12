@@ -205,6 +205,14 @@ Result<EndpointUrl> parse_endpoint_url(const std::string& url) {
   while (parts.path.size() > 1 && parts.path.back() == '/') parts.path.pop_back();
   if (parts.path.empty() || parts.path[0] != '/')
     return Error{ErrorKind::Other, "the URL needs an absolute path: " + display_url(url)};
+  // Servers resolve them after symlinks, which comparing roots cannot.
+  for (std::string_view rest = parts.path; !rest.empty();) {
+    std::string_view part = rest.substr(0, rest.find('/'));
+    rest.remove_prefix(std::min(rest.size(), part.size() + 1));
+    if (part == "." || part == "..")
+      return Error{ErrorKind::Other, "the URL's path must not contain '.' or '..': " +
+                                         display_url(url)};
+  }
   if (auto query = url.find('?'); query != std::string::npos) parts.cgi = url.substr(query + 1);
   return parts;
 }
