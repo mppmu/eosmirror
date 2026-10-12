@@ -573,7 +573,9 @@ struct Engine::Impl {
       bool removable = std::any_of(dst_entries.begin(), dst_entries.end(), [&](const auto& e) {
         return !target.is_temporary(e.second) || stale(e.second);
       });
-      handle_extras(node, dst_entries, options.delete_extra && removable && may_delete(node, emptied));
+      handle_extras(node, dst_entries,
+                    options.delete_extra && removable && may_delete(node, emptied) &&
+                        absent_on_source(node, dst_entries));
     }
     entry_done(node);
   }
@@ -610,6 +612,26 @@ struct Engine::Impl {
       hold_deletions(node, std::to_string(node->unlisted) +
                                " entries could not be listed safely, on one side or the other");
     return !node->deletions_held;
+  }
+
+  // Whether the source lacks the extras that would be deleted, as its
+  // listing says, by a stat of each: a listing cut short without saying so
+  // would otherwise delete what it left out. Holds back the deletions if not.
+  bool absent_on_source(const std::shared_ptr<DirNode>& node,
+                        const std::unordered_map<std::string, Entry>& extras) {
+    for (const auto& [name, e] : extras) {
+      if (cancel.requested()) return false;
+      if (target.is_temporary(e) && !stale(e)) continue;
+      RelPath path = join(node->path, name);
+      auto src = retry([&] { return source.stat(path); });
+      if (src.ok() ? source.is_temporary(src.value()) : src.error().kind == ErrorKind::NotFound)
+        continue;
+      hold_deletions(node, src.ok() ? path + " is on the source, though its listing lacks it"
+                                    : "cannot tell whether " + path + " is on the source: " +
+                                          src.error().describe());
+      return false;
+    }
+    return true;
   }
 
   // Deletes nothing more in a directory whose listings may be incomplete;
@@ -678,6 +700,24 @@ struct Engine::Impl {
            Error{ErrorKind::Exists, "target is a " + std::string(to_string(existing.type)) +
                                         ", not replaced while deletions in its directory are "
                                         "held back"});
+      return false;
+    }
+    // A listing that shows the source's entry with another type than it has
+    // is wrong, and so would be the deletion.
+    auto src = retry([&] { return source.stat(path); });
+    if (!src.ok() && src.error().kind == ErrorKind::NotFound) {
+      vanished(path, wanted);
+      return false;
+    }
+    if (!src.ok() || src.value().type != wanted) {
+      Error e = src.ok() ? Error{ErrorKind::Changed,
+                                 "listed as a " + std::string(to_string(wanted)) +
+                                     " on the source, but a " +
+                                     std::string(to_string(src.value().type)) + " there now"}
+                         : src.error();
+      hold_deletions(node, "cannot confirm the type of " + path + " on the source: " +
+                               e.describe());
+      fail(path, wanted, e);
       return false;
     }
     ensure_writable(node);

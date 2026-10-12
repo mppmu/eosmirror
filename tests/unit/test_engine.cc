@@ -1452,6 +1452,60 @@ TEST_CASE("fake: no type conflict is resolved and no tree deleted where a listin
   }
 }
 
+TEST_CASE("fake: the source confirms what it lacks before anything is deleted") {
+  FakeEndpoint src, dst;
+  populate(src);
+  src.add_file("c", "file");
+  Report mirror;
+  REQUIRE(run_sync(src, dst, fake_options(), mirror).ok());
+  // The source's listing of d1 leaves out f1 without saying so.
+  src.unlisted.insert("d1/f1");
+  dst.add_file("d1/extra", "x");
+  SyncOptions o = fake_options();
+  o.delete_extra = true;
+  for (bool dry_run : {true, false}) {
+    o.dry_run = dry_run;
+    Report r;
+    REQUIRE(run_sync(src, dst, o, r).ok());
+    CHECK(r.stats.incomplete_dirs == 1);
+    CHECK(r.stats.deleted == 0);
+  }
+  CHECK(dst.get("d1/f1"));
+  CHECK(dst.get("d1/extra"));
+
+  // Nor where the source cannot tell.
+  src.unlisted.clear();
+  src.fail("stat", "d1/extra", Error{ErrorKind::IO, "no answer"}, o.retry.attempts);
+  Report r2;
+  REQUIRE(run_sync(src, dst, o, r2).ok());
+  CHECK(r2.stats.incomplete_dirs == 1);
+  CHECK(dst.get("d1/extra"));
+  Report r3;
+  REQUIRE(run_sync(src, dst, o, r3).ok());
+  CHECK(r3.stats.incomplete_dirs == 0);
+  CHECK(r3.stats.deleted == 1);
+  CHECK_FALSE(dst.get("d1/extra"));
+
+  // An entry in the way of another type is replaced only while the source's
+  // entry has the type listed.
+  dst.erase("c");
+  dst.add_dir("c");
+  dst.add_file("c/inner", "kept");
+  dst.add_file("extra", "x");
+  src.hook = [&](std::string_view op, const RelPath& path) {
+    if (op == "stat" && path == "c")
+      src.modify("c", [](FakeEndpoint::Node& n) { n.entry.type = EntryType::Directory; });
+  };
+  Report r4;
+  REQUIRE(run_sync(src, dst, o, r4).ok());
+  CHECK(r4.stats.incomplete_dirs == 1);
+  CHECK(r4.stats.deleted == 0);
+  REQUIRE(r4.failures().size() == 1);
+  CHECK(r4.failures()[0].error.kind == ErrorKind::Changed);
+  CHECK(dst.get("c/inner"));
+  CHECK(dst.get("extra"));
+}
+
 TEST_CASE("fake: slow source reads are logged") {
   FakeEndpoint src, dst;
   src.add_file("f", std::string(10000, 'x'));

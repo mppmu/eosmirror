@@ -73,6 +73,9 @@ class FakeEndpoint : public eosmirror::Endpoint {
   // Entries that listings leave out as unsafe, and count, like lines of an
   // EOS listing that cannot be parsed.
   std::set<RelPath> unlistable;
+  // Entries that listings leave out without saying so, like a plain XRootD
+  // server's listing that ends at an entry it cannot stat.
+  std::set<RelPath> unlisted;
 
   // ---- test setup -----------------------------------------------------------
 
@@ -175,7 +178,7 @@ class FakeEndpoint : public eosmirror::Endpoint {
       return Error{ErrorKind::NotADirectory, "list " + dir};
     eosmirror::Listing result;
     for (const auto& [p, n] : nodes_) {
-      if (p.empty() || parent_of(p) != dir) continue;
+      if (p.empty() || parent_of(p) != dir || unlisted.count(p)) continue;
       if (unlistable.count(p))
         ++result.skipped;
       else

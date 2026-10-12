@@ -96,9 +96,15 @@ neither extras nor entries of another type than the source's, since the
 other side may list one of them as an entry the source lacks; such
 directories are counted and warned about. A tree being deleted is not
 deleted further where the listing of one of its directories missed
-entries, which is a failure. Log lines,
-the progress display and the summary replace control characters and invalid
-UTF-8 in names with `?`.
+entries, which is a failure. Listings can also miss entries without
+saying so (a server's listing that ends early), so before `--delete`
+deletes the extras of a directory, the source is asked by a stat for
+each: one that it has after all, or cannot answer for, holds back the
+deletions in that directory in the same way. An entry of another type
+than the source's is replaced only while a stat finds the source's entry
+with the type listed. Dry runs do the same. Log lines, the progress
+display and the summary replace control characters and invalid UTF-8 in
+names with `?`.
 
 Each endpoint describes its capabilities: mtime resolution (POSIX probes
 it on the target, by writing a file there, so never on a source or in a dry
