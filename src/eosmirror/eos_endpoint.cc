@@ -532,7 +532,7 @@ Result<EosEndpoint::ProcResult> EosEndpoint::proc(const std::string& query) {
 }
 
 Result<EosEndpoint::ProcResult> EosEndpoint::run_proc(const std::string& query, bool* answered) {
-  std::string url = with_cgi(server_ + "//proc/user/?" + query + std::string(kApp), cgi_);
+  std::string url = open_url(with_cgi("/proc/user/?" + query + std::string(kApp), cgi_));
   auto failed = [&](const XrdCl::XRootDStatus& st, const std::string& context) {
     if (answered) *answered = st.code == XrdCl::errErrorResponse;
     return xrd_error(st, context + display_url(server_));
@@ -581,7 +581,7 @@ Result<Entry> EosEndpoint::stat_abs(const std::string& abs) {
   XrdCl::Buffer arg;
   arg.FromString(request + "&mgm.pcmd=stat");
   XrdCl::Buffer* response = nullptr;
-  XrdCl::XRootDStatus st = fs_->Query(XrdCl::QueryCode::OpaqueFile, arg, response);
+  XrdCl::XRootDStatus st = fs().Query(XrdCl::QueryCode::OpaqueFile, arg, response);
   if (!st.IsOK()) return xrd_error(st, "stat " + url_of(abs));
   std::unique_ptr<XrdCl::Buffer> owned(response);
   std::string text = response ? response->ToString() : "";
@@ -614,7 +614,7 @@ Result<Entry> EosEndpoint::stat_abs(const std::string& abs) {
     XrdCl::Buffer link_arg;
     link_arg.FromString(request + "&mgm.pcmd=readlink");
     XrdCl::Buffer* link_response = nullptr;
-    st = fs_->Query(XrdCl::QueryCode::OpaqueFile, link_arg, link_response);
+    st = fs().Query(XrdCl::QueryCode::OpaqueFile, link_arg, link_response);
     if (!st.IsOK()) return xrd_error(st, "readlink " + url_of(abs));
     std::unique_ptr<XrdCl::Buffer> owned_link(link_response);
     std::string link = link_response ? link_response->ToString() : "";
@@ -757,7 +757,7 @@ Result<size_t> EosEndpoint::complete_listing(const std::string& abs, std::vector
               describe(), " are listed entry by entry, which is slow");
   auto request = request_path(abs);
   XrdCl::DirectoryList* listing = nullptr;
-  XrdCl::XRootDStatus st = fs_->DirList(request.value(), XrdCl::DirListFlags::None, listing);
+  XrdCl::XRootDStatus st = fs().DirList(request.value(), XrdCl::DirListFlags::None, listing);
   if (!st.IsOK()) return xrd_error(st, "list " + url_of(abs));
   std::unique_ptr<XrdCl::DirectoryList> owned(listing);
   std::unordered_set<std::string> names;
@@ -841,7 +841,7 @@ Status EosEndpoint::fsctl(const std::string& abs, const std::string& command,
   XrdCl::Buffer arg;
   arg.FromString(request_path(abs).value() + "&mgm.pcmd=" + command + args);
   XrdCl::Buffer* response = nullptr;
-  XrdCl::XRootDStatus st = fs_->Query(XrdCl::QueryCode::OpaqueFile, arg, response);
+  XrdCl::XRootDStatus st = fs().Query(XrdCl::QueryCode::OpaqueFile, arg, response);
   if (!st.IsOK()) return xrd_error(st, command + " " + url_of(abs));
   std::unique_ptr<XrdCl::Buffer> owned(response);
   std::string text = response ? response->ToString() : "";

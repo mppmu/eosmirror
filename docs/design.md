@@ -269,12 +269,25 @@ server that computes checksums is verified by a checksum query after the
 read when the target computes none; the server may have to read the file
 once more to answer it.
 
-XrdCl shares one connection per server (user, host and port) among all
-files. With `--connection-per-transfer`, every transfer thread opens its
-files over connections of its own, told apart by the `xrdcl.intent`
-parameter, which XrdCl keys connections by, keeps across redirections and
-does not send to servers. Each file still goes over one connection per
-server.
+A server executes the requests that come over one connection one after
+the other (`Xrd/XrdLinkXeq.cc`: the link's protocol processes a request
+before the next is read), and EOS runs a whole find inside the open of its
+proc file (`mgm/proc/IProcCommand.cc`). XrdCl would share one connection
+per server (user, host and port) among all requests of a process, so each
+thread of eosmirror sends its requests (file opens with their reads and
+writes, stats, checksum queries, directory operations, listings and MGM
+commands) over connections of its own, told apart by the `xrdcl.intent`
+parameter, which XrdCl keys connections by (`XrdClURL.cc`,
+`GetChannelId`), keeps across redirections and does not send to servers.
+Each file still goes over one connection per server. A run thus holds up
+to one connection per thread to the MGM and to each storage node it
+reads from or writes to, which XrdCl closes after some minutes without
+use. `--shared-connection` goes back to one connection per server. On the
+single-host test instance, a download of 20,000 small files at 64
+transfers took 1.3 s instead of 5.4-5.9 s over one connection (2.1 s with
+connections of their own for the file opens only), and listing its 446
+directories with 8 checkers 0.32 s instead of 2.4-2.6 s; uploads, bound
+by the instance's namespace, took about as long either way.
 
 XRootD has no escaping for paths: the server takes everything after the
 first `?` as opaque parameters, in opens as in all other requests. Paths

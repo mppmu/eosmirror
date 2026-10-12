@@ -3,7 +3,9 @@
 
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 
 #include "eosmirror/endpoint.hh"
 #include "eosmirror/pipeline.hh"
@@ -23,11 +25,13 @@ struct XrdOptions {
   // docs/design.md).
   int write_window = 4;
   int read_window = 4;
-  // Files opened by a thread go over connections of the thread's own, to
-  // the redirector and to the storage nodes, rather than over the one
-  // connection per server that XrdCl otherwise shares among all files. Each
-  // file still uses one connection per server.
-  bool connection_per_thread = false;
+  // Each thread sends its requests (file opens and their reads and writes,
+  // stats, listings, MGM commands) over connections of its own, to the
+  // redirector and to the storage nodes, since a server executes the
+  // requests of one connection one after the other. Shared, XrdCl uses one
+  // connection per server for all of them. A file always goes over one
+  // connection per server.
+  bool shared_connection = false;
 };
 
 // The URL without what may carry credentials: a password before the host and
@@ -119,9 +123,13 @@ class XrdEndpoint : public Endpoint {
  protected:
   XrdEndpoint(const std::string& url, EndpointUrl parts, XrdOptions options);
 
-  // The URL for File::Open of a request path, with the calling thread's
-  // own connection where asked for.
+  // The URL for File::Open of a request path, over the calling thread's
+  // own connection unless shared.
   std::string open_url(const std::string& request_path) const;
+
+  // The file system for the calling thread's requests, over its own
+  // connection unless shared.
+  XrdCl::FileSystem& fs();
 
   // Opens a file for reading.
   Result<std::unique_ptr<XrdCl::File>> open_file(const std::string& abs_path);
@@ -133,7 +141,10 @@ class XrdEndpoint : public Endpoint {
   std::string cgi_;     // the URL's opaque parameters
   XrdOptions options_;
   Capabilities caps_;
-  std::unique_ptr<XrdCl::FileSystem> fs_;
+
+ private:
+  std::mutex fs_mutex_;
+  std::unordered_map<int, std::unique_ptr<XrdCl::FileSystem>> fs_;  // by thread
 };
 
 // A file read through one XrdCl::File with up to `window` chunk reads in

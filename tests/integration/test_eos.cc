@@ -1275,14 +1275,14 @@ TEST_CASE("FS to EOS: pipelined writes give erasure-coded files their parity") {
   }
 }
 
-TEST_CASE("FS to EOS and back with connections of each transfer's own") {
+TEST_CASE("FS to EOS and back over one shared connection") {
   if (!base_url()) return;
   TempDir tmp;
   for (int i = 0; i < 6; ++i) tmp.write_file("src/f" + std::to_string(i), pattern(300000 + i));
   PosixEndpoint src(tmp.sub("src"));
   RemoteDir dir("connections");
   XrdOptions xo;
-  xo.connection_per_thread = true;
+  xo.shared_connection = true;
   auto dst = EosEndpoint::create(dir.url, xo);
   REQUIRE(dst.ok());
   SyncOptions options = test_options();

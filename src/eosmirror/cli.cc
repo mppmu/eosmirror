@@ -84,9 +84,9 @@ Options:
                            --write-window 1 opts out
       --read-window N      reads per file in flight from XRootD and EOS sources
                            (default 4)
-      --connection-per-transfer
-                           give every transfer its own connections to XRootD and
-                           EOS servers instead of sharing one per server
+      --shared-connection  send the requests of all transfers and directory workers
+                           over one connection per XRootD or EOS server, instead
+                           of over connections of each one's own
       --max-backlog N      queued copies before directory workers wait (default 10000)
       --buffer-size SIZE   size of the chunks read and written, e.g. 8M (default);
                            a transfer holds at most both windows plus one
@@ -220,7 +220,7 @@ Result<CliOptions> parse_command_line(int argc, char** argv) {
           [&](long long n) { opts.endpoints.xrootd.write_window = static_cast<int>(n); });
   integer("--read-window",
           [&](long long n) { opts.endpoints.xrootd.read_window = static_cast<int>(n); });
-  flag("--connection-per-transfer", [&] { opts.endpoints.xrootd.connection_per_thread = true; });
+  flag("--shared-connection", [&] { opts.endpoints.xrootd.shared_connection = true; });
   integer("--max-backlog", [&](long long n) { sync.max_backlog = static_cast<size_t>(n); });
   value("--buffer-size", [&](const std::string& v) -> Status {
     auto n = parse_size(v);

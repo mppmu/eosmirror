@@ -97,11 +97,14 @@ XRootD servers store no mtimes and have no symlinks, so against them files
 are compared by size only and symlinks are skipped (both are reported).
 
 Each file is copied in chunks of `--buffer-size` (8 MiB) with up to 4 reads
-and 4 writes in flight (`--read-window`, `--write-window`), over one
-connection per server. Writes go out in order, each where the previous one
-ended, which erasure-coded EOS files take only under a condition (see
-below). Files read from EOS or from an XRootD server that computes checksums
-are verified against the stored checksum when the target computes none.
+and 4 writes in flight (`--read-window`, `--write-window`). Writes go out in
+order, each where the previous one ended, which erasure-coded EOS files
+take only under a condition (see below). Every thread talks to XRootD and
+EOS servers over connections of its own, since a server handles the
+requests of a connection one at a time (`--shared-connection` shares one
+per server). Files read from EOS or from an XRootD server that computes
+checksums are verified against the stored checksum when the target
+computes none.
 Files read from EOS take their metadata and checksum from the directory
 listing, so the MGM sees one open per file, as with xrdcp; a file that
 changed since the listing is stated before and after reading.

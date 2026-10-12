@@ -83,6 +83,13 @@ Result<Checksum> parse_checksum(const std::string& text, const std::string& cont
   return Checksum{*parsed, value};
 }
 
+// The calling thread's number, which names its own connections.
+int thread_number() {
+  static std::atomic<int> threads{0};
+  thread_local int number = threads++;
+  return number;
+}
+
 // An XrdCl response handler that passes the status and response to a
 // function, from XrdCl's thread, and deletes itself.
 class Callback : public XrdCl::ResponseHandler {
@@ -421,7 +428,7 @@ Result<std::unique_ptr<XrdEndpoint>> XrdEndpoint::create(const std::string& url,
   XrdCl::Buffer arg;
   arg.FromString("chksum");
   XrdCl::Buffer* response = nullptr;
-  XrdCl::XRootDStatus st = ep->fs_->Query(XrdCl::QueryCode::Config, arg, response);
+  XrdCl::XRootDStatus st = ep->fs().Query(XrdCl::QueryCode::Config, arg, response);
   std::unique_ptr<XrdCl::Buffer> owned(response);
   if (!st.IsOK() && st.code != XrdCl::errErrorResponse)
     return xrd_error(st, "query the configuration of " + ep->describe());
@@ -445,9 +452,7 @@ XrdEndpoint::XrdEndpoint(const std::string& url, EndpointUrl parts, XrdOptions o
       host_(std::move(parts.host)),
       root_(std::move(parts.path)),
       cgi_(std::move(parts.cgi)),
-      options_(options),
-      // The URL's parameters with the login, such as xrd.wantprot.
-      fs_(std::make_unique<XrdCl::FileSystem>(XrdCl::URL(with_cgi(server_ + "/", cgi_)))) {
+      options_(options) {
   caps_.mtime_resolution = 1000000000;
   caps_.has_owners = false;
   caps_.can_set_owner = false;
@@ -463,12 +468,19 @@ XrdEndpoint::~XrdEndpoint() = default;
 
 std::string XrdEndpoint::open_url(const std::string& request_path) const {
   std::string url = server_ + "/" + request_path;
-  if (!options_.connection_per_thread) return url;
-  // XrdCl keys its connections by host and this parameter (URL::GetChannelId),
-  // keeps it for redirections and does not send it to servers.
-  static std::atomic<int> threads{0};
-  thread_local int thread = threads++;
-  return with_cgi(std::move(url), "xrdcl.intent=eosmirror" + std::to_string(thread));
+  if (options_.shared_connection) return url;
+  // XrdCl keys its connections by host and this parameter (URL::GetChannelId,
+  // XrdClURL.cc), keeps it for redirections and does not send it to servers.
+  return with_cgi(std::move(url), "xrdcl.intent=eosmirror" + std::to_string(thread_number()));
+}
+
+XrdCl::FileSystem& XrdEndpoint::fs() {
+  int thread = options_.shared_connection ? -1 : thread_number();
+  std::lock_guard lock(fs_mutex_);
+  std::unique_ptr<XrdCl::FileSystem>& slot = fs_[thread];
+  // The URL's parameters go with the login, such as xrd.wantprot.
+  if (!slot) slot = std::make_unique<XrdCl::FileSystem>(XrdCl::URL(with_cgi(open_url(""), cgi_)));
+  return *slot;
 }
 
 Location XrdEndpoint::location() const {
@@ -502,7 +514,7 @@ Result<Entry> XrdEndpoint::stat_abs(const std::string& abs) {
   auto request = request_path(abs);
   if (!request.ok()) return request.error();
   XrdCl::StatInfo* info = nullptr;
-  XrdCl::XRootDStatus st = fs_->Stat(request.value(), info);
+  XrdCl::XRootDStatus st = fs().Stat(request.value(), info);
   if (!st.IsOK()) return xrd_error(st, "stat " + url_of(abs));
   std::unique_ptr<XrdCl::StatInfo> owned(info);
   return entry_from_stat(name_of(abs), *info);
@@ -513,7 +525,7 @@ Result<Listing> XrdEndpoint::list(const RelPath& dir) {
   auto request = request_path(abs);
   if (!request.ok()) return request.error();
   XrdCl::DirectoryList* listing = nullptr;
-  XrdCl::XRootDStatus st = fs_->DirList(request.value(), XrdCl::DirListFlags::Stat, listing);
+  XrdCl::XRootDStatus st = fs().DirList(request.value(), XrdCl::DirListFlags::Stat, listing);
   if (!st.IsOK()) return xrd_error(st, "list " + url_of(abs));
   std::unique_ptr<XrdCl::DirectoryList> owned(listing);
   Listing result;
@@ -545,7 +557,7 @@ Status XrdEndpoint::mkdir(const RelPath& path, ModeBits mode) {
   auto request = request_path(abs);
   if (!request.ok()) return request.error();
   XrdCl::XRootDStatus st =
-      fs_->MkDir(request.value(), XrdCl::MkDirFlags::None, access_mode(mode | 0700));
+      fs().MkDir(request.value(), XrdCl::MkDirFlags::None, access_mode(mode | 0700));
   if (!st.IsOK()) return xrd_error(st, "mkdir " + url_of(abs));
   return {};
 }
@@ -563,7 +575,7 @@ Status XrdEndpoint::set_metadata(const RelPath& path, const Entry& md, MetaField
   if (has(fields, MetaFields::Mode) && md.type != EntryType::Symlink) {
     auto request = request_path(abs);
     if (!request.ok()) return request.error();
-    XrdCl::XRootDStatus st = fs_->ChMod(request.value(), access_mode(md.mode));
+    XrdCl::XRootDStatus st = fs().ChMod(request.value(), access_mode(md.mode));
     if (!st.IsOK()) return xrd_error(st, "chmod " + url_of(abs));
   }
   return {};
@@ -574,7 +586,7 @@ Status XrdEndpoint::remove(const RelPath& path, EntryType type) {
   if (type == EntryType::Directory) {
     auto request = request_path(abs);
     if (!request.ok()) return request.error();
-    XrdCl::XRootDStatus st = fs_->RmDir(request.value());
+    XrdCl::XRootDStatus st = fs().RmDir(request.value());
     if (!st.IsOK()) return xrd_error(st, "rmdir " + url_of(abs));
     return {};
   }
@@ -584,7 +596,7 @@ Status XrdEndpoint::remove(const RelPath& path, EntryType type) {
 Status XrdEndpoint::remove_abs(const std::string& abs) {
   auto request = request_path(abs);
   if (!request.ok()) return request.error();
-  XrdCl::XRootDStatus st = fs_->Rm(request.value());
+  XrdCl::XRootDStatus st = fs().Rm(request.value());
   if (!st.IsOK()) return xrd_error(st, "remove " + url_of(abs));
   return {};
 }
@@ -595,7 +607,7 @@ Status XrdEndpoint::rename_abs(const std::string& from, const std::string& to) {
     if (!request_a.ok()) return request_a.error();
     auto request_b = request_path(b);
     if (!request_b.ok()) return request_b.error();
-    XrdCl::XRootDStatus st = fs_->Mv(request_a.value(), request_b.value());
+    XrdCl::XRootDStatus st = fs().Mv(request_a.value(), request_b.value());
     if (!st.IsOK()) return xrd_error(st, "rename " + url_of(a) + " to " + url_of(b));
     return {};
   };
@@ -608,7 +620,7 @@ Result<Checksum> XrdEndpoint::query_checksum(const std::string& abs) {
   XrdCl::Buffer arg;
   arg.FromString(request.value());
   XrdCl::Buffer* response = nullptr;
-  XrdCl::XRootDStatus st = fs_->Query(XrdCl::QueryCode::Checksum, arg, response);
+  XrdCl::XRootDStatus st = fs().Query(XrdCl::QueryCode::Checksum, arg, response);
   if (!st.IsOK()) return xrd_error(st, "checksum of " + url_of(abs));
   std::unique_ptr<XrdCl::Buffer> owned(response);
   return parse_checksum(response ? response->ToString() : "", url_of(abs));
