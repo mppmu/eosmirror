@@ -17,10 +17,12 @@ A run walks the source tree directory by directory and makes the target match:
   all its entries have been processed, since changing entries changes mtimes.
 - Special files (devices, sockets, fifos) are skipped and counted.
 - Entries that exist only on the target are counted, and deleted only with
-  `--delete`, up to `--max-delete` deletions per run. A source whose top
-  directory is empty, against a target that is not, is more likely an
-  unmounted file system or a broken server than a tree to delete: such a run
-  stops without deleting anything. A missing source stops a run before it
+  `--delete`, up to `--max-delete` deletions per run. A source directory
+  that is empty, against a target directory that is not, is more likely an
+  unmounted file system (an automount, say) or a broken server than a tree
+  to delete: for the top directory such a run stops without deleting
+  anything, below it nothing is deleted in that directory (counted and
+  warned about) unless `--delete-emptied` says otherwise. A missing source stops a run before it
   starts, and so do a source and target that overlap (the same tree, or
   one inside the other): the run would copy the target into itself, or
   delete what is around the source. Trees are compared by real path, for a

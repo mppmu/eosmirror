@@ -514,10 +514,11 @@ struct Engine::Impl {
     stats.dirs_listed.fetch_add(1);
     healthy();
 
-    if (options.delete_extra && !node->parent && !node->only && empty_source(src_entries) &&
-        !empty_target(dst_entries)) {
-      // More likely an unmounted file system or a broken server than a tree
-      // whose whole copy is to be deleted.
+    // A source directory that is empty where the target's is not is more
+    // likely an unmounted file system or a broken server than emptied. At
+    // the top, that stops a run with --delete; below, see may_delete().
+    bool emptied = empty_source(src_entries) && !empty_target(dst_entries);
+    if (options.delete_extra && emptied && !node->parent && !node->only) {
       node->failed = true;
       end_run(Error{ErrorKind::Other, source.describe() + " is empty, but " + target.describe() +
                                           " is not: refusing to delete everything there"});
@@ -558,9 +559,20 @@ struct Engine::Impl {
       // A retry handles only its own names, among them failed deletions.
       if (node->only)
         std::erase_if(dst_entries, [&](const auto& e) { return !node->only->count(e.first); });
-      handle_extras(node, dst_entries);
+      handle_extras(node, dst_entries, options.delete_extra && may_delete(node, emptied));
     }
     entry_done(node);
+  }
+
+  // Whether --delete may delete the extras of a directory: not those of a
+  // directory emptied on the source, unless --delete-emptied says so.
+  bool may_delete(const std::shared_ptr<DirNode>& node, bool emptied) {
+    if (!emptied || options.delete_emptied) return true;
+    stats.emptied_dirs.fetch_add(1);
+    log::warn("deleting nothing in ", node->path.empty() ? "." : node->path,
+              ": the source's directory is empty, the target's is not (--delete-emptied "
+              "deletes there)");
+    return false;
   }
 
   bool empty_source(const std::vector<Entry>& entries) const {
@@ -733,8 +745,10 @@ struct Engine::Impl {
     if (apply_metadata(path, e, fields)) succeeded(path);
   }
 
+  // Counts the target's entries that the source lacks, and deletes them,
+  // stale temporaries included, if deleting.
   void handle_extras(const std::shared_ptr<DirNode>& node,
-                     const std::unordered_map<std::string, Entry>& extras) {
+                     const std::unordered_map<std::string, Entry>& extras, bool deleting) {
     int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
                       std::chrono::system_clock::now().time_since_epoch())
                       .count();
@@ -744,13 +758,13 @@ struct Engine::Impl {
       if (target.is_temporary(name)) {
         bool stale = e.mtime.sec + options.stale_temp_age.count() < now;
         if (!stale) continue;
-        if (!options.delete_extra) {
+        if (!deleting) {
           stats.stale_temps.fetch_add(1);
           continue;
         }
       } else {
         stats.extras.fetch_add(1);
-        if (!options.delete_extra) {
+        if (!deleting) {
           log::debug("extra entry on target: ", path);
           continue;
         }

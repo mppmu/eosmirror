@@ -57,7 +57,9 @@ EOS_MGM_URL, not on a local FUSE mount (name that as file:///eos/...).
 
 Options:
   -n, --dry-run            report what would be done, change nothing
-      --delete             delete entries on the target that the source lacks
+      --delete             delete entries on the target that the source lacks,
+                           except in directories that are empty on the source
+      --delete-emptied     with --delete, delete there too
       --max-delete N       stop deleting after N entries (default 1000, or "unlimited")
       --no-owner           do not set owners and groups
       --no-mode            do not set modes
@@ -178,6 +180,7 @@ Result<CliOptions> parse_command_line(int argc, char** argv) {
   flag("-n", [&] { sync.dry_run = true; });
   flag("--dry-run", [&] { sync.dry_run = true; });
   flag("--delete", [&] { sync.delete_extra = true; });
+  flag("--delete-emptied", [&] { sync.delete_emptied = true; });
   // An option that takes a count, or "unlimited" for the given value.
   auto limit = [&](const std::string& name, uint64_t& out, uint64_t unlimited) {
     value(name, [name, &out, unlimited](const std::string& v) -> Status {
@@ -319,6 +322,8 @@ Result<CliOptions> parse_command_line(int argc, char** argv) {
     return usage_error("--write-window and --read-window must be at least 1");
   if (sync.shard_count < 1 || sync.shard_index < 0 || sync.shard_index >= sync.shard_count)
     return usage_error("--shard K/N needs 0 <= K < N");
+  if (sync.delete_emptied && !sync.delete_extra)
+    return usage_error("--delete-emptied needs --delete");
   if ((sync.resume || opts.retry_failed) && opts.journal.empty())
     return usage_error("--resume and --retry-failed need --journal");
   if (sync.resume && opts.retry_failed) return usage_error("--resume and --retry-failed exclude each other");

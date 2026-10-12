@@ -38,6 +38,10 @@ struct SyncOptions {
 
   bool dry_run = false;
   bool delete_extra = false;
+  // Also delete the extras of directories that are empty on the source but
+  // not on the target, which delete_extra alone leaves (the top directory
+  // of a run never: an empty source stops the run).
+  bool delete_emptied = false;
   uint64_t max_delete = 1000;
   bool preserve_owner = true;
   bool preserve_mode = true;

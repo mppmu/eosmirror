@@ -99,6 +99,9 @@ std::string Report::summary(bool dry_run) const {
     << "deleted: " << stats.deleted.load() << ", stale temporaries: " << stats.stale_temps.load()
     << "\n"
     << "  retries: " << stats.retries.load() << ", failures: " << stats.failures.load() << "\n";
+  if (stats.emptied_dirs.load() > 0)
+    s << "  directories empty on the source whose target entries were kept: "
+      << stats.emptied_dirs.load() << " (--delete-emptied deletes them)\n";
   if (stats.invalid_names.load() > 0)
     s << "  entries with invalid names skipped: " << stats.invalid_names.load() << "\n";
   auto failures = this->failures();

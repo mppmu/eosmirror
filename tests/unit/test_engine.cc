@@ -1939,6 +1939,48 @@ TEST_CASE("fake: an empty source does not empty the target") {
   CHECK(fs::exists(tmp.sub("dst/keep")));
 }
 
+TEST_CASE("fake: directories emptied on the source keep their target entries unless asked") {
+  FakeEndpoint src, dst;
+  populate(src);
+  // An empty directory, as an unmounted automount looks, and an emptied
+  // one deeper down, whose copies are full.
+  src.add_dir("mnt");
+  src.add_dir("d1/d2/sub");
+  src.add_file("d1/d2/sub/.tmp-partial", "x");
+  Report mirror;
+  REQUIRE(run_sync(src, dst, fake_options(), mirror).ok());
+  for (int i = 0; i < 50; ++i) dst.add_file("mnt/f" + std::to_string(i), "data");
+  dst.add_file("d1/d2/sub/g", "data");
+  dst.add_file("d1/extra", "x");
+
+  SyncOptions o = fake_options();
+  o.delete_extra = true;
+  Report r;
+  REQUIRE(run_sync(src, dst, o, r).ok());
+  CHECK(r.stats.failures == 0);
+  CHECK(r.stats.deleted == 1);  // d1/extra
+  CHECK(r.stats.extras == 52);
+  CHECK(r.stats.emptied_dirs == 2);
+  CHECK(dst.get("mnt/f49"));
+  CHECK(dst.get("d1/d2/sub/g"));
+  CHECK(r.summary(false).find("empty on the source whose target entries were kept: 2") !=
+        std::string::npos);
+
+  // Without --delete, nothing would be deleted anyway.
+  Report r2;
+  REQUIRE(run_sync(src, dst, fake_options(), r2).ok());
+  CHECK(r2.stats.emptied_dirs == 0);
+
+  o.delete_emptied = true;
+  Report r3;
+  REQUIRE(run_sync(src, dst, o, r3).ok());
+  CHECK(r3.stats.deleted == 51);
+  CHECK(r3.stats.emptied_dirs == 0);
+  CHECK_FALSE(dst.get("mnt/f0"));
+  src.erase("d1/d2/sub/.tmp-partial");
+  expect_mirrored(src, dst);
+}
+
 TEST_CASE("fake: a run stops after too many failures in a row") {
   FakeEndpoint src, dst;
   for (int i = 0; i < 40; ++i) {

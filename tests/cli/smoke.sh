@@ -95,6 +95,18 @@ rc=0; "$bin" sync -q "${owner_opt[@]}" --delete --max-delete 1 "$work/src" "$wor
 "$bin" sync -q "${owner_opt[@]}" --delete "$work/src" "$work/dst" > /dev/null
 [[ $(ls "$work/dst" | grep -c extra) == 0 ]] || fail "extra not deleted"
 
+# A source directory that is empty, as an unmounted automount looks, keeps
+# the entries of its copy unless --delete-emptied says otherwise.
+mkdir "$work/src/automount" "$work/dst/automount"
+touch "$work/dst/automount/f1" "$work/dst/automount/f2"
+"$bin" sync -q "${owner_opt[@]}" --delete "$work/src" "$work/dst" > "$work/emptied.out" 2> "$work/emptied.err" \
+  || fail "emptied directory: $(cat "$work/emptied.err")"
+[[ -f $work/dst/automount/f2 ]] && grep -q 'deleting nothing in automount' "$work/emptied.err" \
+  || fail "emptied directory deleted: $(cat "$work/emptied.err")"
+grep -q 'empty on the source whose target entries were kept: 1' "$work/emptied.out" || fail "emptied summary"
+"$bin" sync -q "${owner_opt[@]}" --delete --delete-emptied "$work/src" "$work/dst" > /dev/null
+[[ -z $(ls -A "$work/dst/automount") ]] || fail "--delete-emptied"
+
 # An empty or missing source does not empty the target.
 mkdir "$work/empty"
 rc=0; "$bin" sync -q "${owner_opt[@]}" --delete "$work/empty" "$work/dst" > /dev/null 2> "$work/empty.err" || rc=$?
