@@ -28,7 +28,8 @@ client for now. See [docs/design.md](docs/design.md).
   (`--delete`), with a dry run and a cap on the number of deletions, and
   never because the source is empty: not in directories that are empty on
   the source (as an unmounted automount looks) unless `--delete-emptied` is
-  given, and a run whose source is empty as a whole stops. A source and
+  given, and a run whose source is empty as a whole stops. Nothing is
+  deleted in directories where a listing had to skip entries. A source and
   target that overlap (one inside the other) are refused.
 - Files and directories that disappear from the source during a run are
   counted as vanished, not as failures; the next run finds them gone.

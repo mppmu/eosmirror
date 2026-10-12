@@ -79,7 +79,12 @@ checksum and renames into place; `abort()` removes the temporary file.
 
 Names from listings are checked before they are joined into paths: empty
 names, `.`, `..` and names containing `/`, NUL or a line break are skipped
-with a warning and counted, on both sides and when deleting trees. Log lines,
+with a warning and counted, on both sides and when deleting trees. Listings
+report the entries they left out themselves (lines of an EOS listing that
+cannot be told apart, names a plain XRootD server cannot address). In a
+directory where either listing missed entries, `--delete` deletes nothing,
+since the other side may list one of them as an entry the source lacks;
+such directories are counted and warned about. Log lines,
 the progress display and the summary replace control characters and invalid
 UTF-8 in names with `?`.
 

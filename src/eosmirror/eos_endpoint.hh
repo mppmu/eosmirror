@@ -32,7 +32,7 @@ class EosEndpoint : public XrdEndpoint {
   bool is_temporary(std::string_view name) const override;
   Result<std::string> request_path(const std::string& abs_path) const override;
   Result<Entry> stat(const RelPath& path) override;
-  Result<std::vector<Entry>> list(const RelPath& dir) override;
+  Result<Listing> list(const RelPath& dir) override;
   Status symlink(const RelPath& path, const std::string& target) override;
   Status set_metadata(const RelPath& path, const Entry& metadata, MetaFields fields) override;
   Result<std::unique_ptr<FileReader>> open_read(const RelPath& path) override;
@@ -72,8 +72,9 @@ class EosEndpoint : public XrdEndpoint {
   Result<std::string> resolve(const std::string& abs_path);
 
   // Completes a listing that find cut short with the names of a plain
-  // directory listing, each stated on its own.
-  Status complete_listing(const std::string& abs_dir, std::vector<Entry>& entries);
+  // directory listing, each stated on its own. The number of names that
+  // cannot be stated (invalid ones).
+  Result<size_t> complete_listing(const std::string& abs_dir, std::vector<Entry>& entries);
 
   std::atomic<bool> truncation_warned_{false};
 };

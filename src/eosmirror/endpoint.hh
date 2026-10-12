@@ -41,6 +41,13 @@ struct Capabilities {
   ChecksumType checksum = ChecksumType::None;
 };
 
+// A directory listing. Entries that cannot be listed safely (such as lines
+// of a listing that cannot be told apart) are left out and counted.
+struct Listing {
+  std::vector<Entry> entries;
+  size_t skipped = 0;
+};
+
 // Where the tree of an endpoint is, for comparing endpoints: the server
 // ("host:port", empty for a local file system) and the absolute path of the
 // root, resolved like realpath(3) where the endpoint can (local paths and
@@ -151,7 +158,7 @@ class Endpoint {
   virtual Result<Entry> stat(const RelPath& path) = 0;
 
   // Lists a directory with full metadata per entry, in no particular order.
-  virtual Result<std::vector<Entry>> list(const RelPath& dir) = 0;
+  virtual Result<Listing> list(const RelPath& dir) = 0;
 
   virtual Status mkdir(const RelPath& path, ModeBits mode) = 0;
 

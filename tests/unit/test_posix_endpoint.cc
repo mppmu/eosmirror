@@ -46,7 +46,7 @@ TEST_CASE("posix listing reports every entry type with metadata") {
   PosixEndpoint ep(tmp.sub("src"));
   auto listed = ep.list("");
   REQUIRE(listed.ok());
-  const auto& entries = listed.value();
+  const auto& entries = listed.value().entries;
   CHECK(entries.size() == 4);
 
   const Entry* file = find(entries, "file.txt");
@@ -116,8 +116,8 @@ TEST_CASE("posix writer commits atomically with metadata") {
   CHECK_FALSE(fs::exists(tmp.sub("out.bin")));
   auto during = ep.list("");
   REQUIRE(during.ok());
-  REQUIRE(during.value().size() == 1);
-  CHECK(ep.is_temporary(during.value()[0].name));
+  REQUIRE(during.value().entries.size() == 1);
+  CHECK(ep.is_temporary(during.value().entries[0].name));
   CHECK_FALSE(ep.is_temporary("out.bin"));
 
   REQUIRE(writer.value()->write(6, bytes("world")).ok());
@@ -132,7 +132,7 @@ TEST_CASE("posix writer commits atomically with metadata") {
   REQUIRE(st.ok());
   CHECK(st.value().mode == 0600);
   CHECK(st.value().mtime == Timespec{1600000000, 42});
-  CHECK(ep.list("").value().size() == 1);  // the temporary is gone
+  CHECK(ep.list("").value().entries.size() == 1);  // the temporary is gone
 
   SUBCASE("a size mismatch is rejected and leaves no trace") {
     auto w = ep.open_write("short.bin", spec);
@@ -142,7 +142,7 @@ TEST_CASE("posix writer commits atomically with metadata") {
     REQUIRE_FALSE(s.ok());
     CHECK(s.error().kind == ErrorKind::Changed);
     CHECK_FALSE(fs::exists(tmp.sub("short.bin")));
-    CHECK(ep.list("").value().size() == 1);
+    CHECK(ep.list("").value().entries.size() == 1);
   }
 
   SUBCASE("non-sequential writes are rejected") {
@@ -150,7 +150,7 @@ TEST_CASE("posix writer commits atomically with metadata") {
     REQUIRE(w.ok());
     CHECK_FALSE(w.value()->write(5, bytes("x")).ok());
     w.value()->abort();
-    CHECK(ep.list("").value().size() == 1);
+    CHECK(ep.list("").value().entries.size() == 1);
   }
 
   SUBCASE("a dropped writer cleans up") {
@@ -159,7 +159,7 @@ TEST_CASE("posix writer commits atomically with metadata") {
       REQUIRE(w.ok());
       REQUIRE(w.value()->write(0, bytes("x")).ok());
     }
-    CHECK(ep.list("").value().size() == 1);
+    CHECK(ep.list("").value().entries.size() == 1);
   }
 
   SUBCASE("commit replaces an existing file") {
@@ -295,7 +295,7 @@ TEST_CASE("posix mkdir, symlink, metadata and remove") {
   CHECK(ep.stat("d/l").value().link_target == "target1");
   REQUIRE(ep.symlink("d/l", "target2").ok());  // replaced atomically
   CHECK(ep.stat("d/l").value().link_target == "target2");
-  CHECK(ep.list("d").value().size() == 1);
+  CHECK(ep.list("d").value().entries.size() == 1);
 
   Entry md;
   md.type = EntryType::Directory;

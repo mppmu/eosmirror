@@ -140,13 +140,14 @@ class Selftest {
   void list_directory() {
     auto listed = target_.list(dir_);
     if (!check("list the directory", listed.ok() ? Status() : Status(listed.error()))) return;
-    bool found = std::any_of(listed.value().begin(), listed.value().end(), [&](const Entry& e) {
+    const std::vector<Entry>& entries = listed.value().entries;
+    bool found = std::any_of(entries.begin(), entries.end(), [&](const Entry& e) {
       return e.name == "file" && e.type == EntryType::File;
     });
     if (found)
       pass("find the file in the listing");
     else
-      fail("find the file in the listing", std::to_string(listed.value().size()) + " entries, none is the file");
+      fail("find the file in the listing", std::to_string(entries.size()) + " entries, none is the file");
   }
 
   void replace_file() {
@@ -209,7 +210,7 @@ class Selftest {
     // temporaries); remove whatever is still there.
     auto left = target_.list(dir_);
     if (left.ok()) {
-      for (const Entry& e : left.value()) {
+      for (const Entry& e : left.value().entries) {
         if (!valid_entry_name(e.name)) continue;
         Status s = target_.remove(join(dir_, e.name), e.type);
         if (!s.ok()) fail("remove leftover " + e.name, s.error().describe());

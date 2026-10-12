@@ -292,16 +292,17 @@ struct Engine::Impl {
       failures_in_a_row.store(0, std::memory_order_relaxed);
   }
 
-  // Drops listed entries whose names cannot be joined into paths.
-  void drop_invalid_names(const Endpoint& endpoint, const RelPath& dir,
-                          std::vector<Entry>& entries) {
-    std::erase_if(entries, [&](const Entry& e) {
+  // Drops listed entries whose names cannot be joined into paths. The number
+  // of entries missing from the listing: those and the ones it skipped.
+  size_t drop_invalid_names(const Endpoint& endpoint, const RelPath& dir, Listing& listing) {
+    size_t dropped = std::erase_if(listing.entries, [&](const Entry& e) {
       if (valid_entry_name(e.name)) return false;
       stats.invalid_names.fetch_add(1);
       log::warn("skipping an entry with the invalid name \"", e.name, "\" in ", endpoint.describe(),
                 "/", dir);
       return true;
     });
+    return listing.skipped + dropped;
   }
 
   // Drops the journal's record of an earlier failure of the path.
@@ -488,15 +489,17 @@ struct Engine::Impl {
       dir_failed(node, listed.error());
       return;
     }
-    std::vector<Entry>& src_entries = listed.value();
-    drop_invalid_names(source, node->path, src_entries);
+    std::vector<Entry>& src_entries = listed.value().entries;
+    // Entries missing from either listing, whose names the other side may
+    // list as entries it lacks.
+    size_t skipped = drop_invalid_names(source, node->path, listed.value());
 
     std::unordered_map<std::string, Entry> dst_entries;
     if (!node->created) {
       auto dst_listed = retry([&] { return target.list(node->path); });
       if (dst_listed.ok()) {
-        drop_invalid_names(target, node->path, dst_listed.value());
-        for (Entry& e : dst_listed.value()) {
+        skipped += drop_invalid_names(target, node->path, dst_listed.value());
+        for (Entry& e : dst_listed.value().entries) {
           std::string name = e.name;
           dst_entries.emplace(std::move(name), std::move(e));
         }
@@ -559,17 +562,27 @@ struct Engine::Impl {
       // A retry handles only its own names, among them failed deletions.
       if (node->only)
         std::erase_if(dst_entries, [&](const auto& e) { return !node->only->count(e.first); });
-      handle_extras(node, dst_entries, options.delete_extra && may_delete(node, emptied));
+      handle_extras(node, dst_entries,
+                    options.delete_extra &&
+                        (dst_entries.empty() || may_delete(node, emptied, skipped)));
     }
     entry_done(node);
   }
 
-  // Whether --delete may delete the extras of a directory: not those of a
-  // directory emptied on the source, unless --delete-emptied says so.
-  bool may_delete(const std::shared_ptr<DirNode>& node, bool emptied) {
+  // Whether --delete may delete the extras of a directory: not where a
+  // listing missed entries, and not in a directory emptied on the source
+  // unless --delete-emptied says so.
+  bool may_delete(const std::shared_ptr<DirNode>& node, bool emptied, size_t skipped) {
+    std::string dir = node->path.empty() ? "." : node->path;
+    if (skipped > 0) {
+      stats.incomplete_dirs.fetch_add(1);
+      log::warn("deleting nothing in ", dir, ": ", skipped,
+                " entries could not be listed safely, on one side or the other");
+      return false;
+    }
     if (!emptied || options.delete_emptied) return true;
     stats.emptied_dirs.fetch_add(1);
-    log::warn("deleting nothing in ", node->path.empty() ? "." : node->path,
+    log::warn("deleting nothing in ", dir,
               ": the source's directory is empty, the target's is not (--delete-emptied "
               "deletes there)");
     return false;
@@ -794,7 +807,7 @@ struct Engine::Impl {
       auto listed = retry([&] { return target.list(path); });
       if (!listed.ok()) return listed.error();
       drop_invalid_names(target, path, listed.value());
-      for (const Entry& child : listed.value()) {
+      for (const Entry& child : listed.value().entries) {
         if (cancel.requested()) return Error{ErrorKind::Cancelled, "cancelled"};
         Status s = delete_tree(join(path, child.name), child);
         if (!s.ok()) return s;

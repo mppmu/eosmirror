@@ -42,7 +42,7 @@ class PosixEndpoint : public Endpoint {
   void probe_target() override;
 
   Result<Entry> stat(const RelPath& path) override;
-  Result<std::vector<Entry>> list(const RelPath& dir) override;
+  Result<Listing> list(const RelPath& dir) override;
   Status mkdir(const RelPath& path, ModeBits mode) override;
   Status symlink(const RelPath& path, const std::string& target) override;
   Status set_metadata(const RelPath& path, const Entry& metadata, MetaFields fields) override;

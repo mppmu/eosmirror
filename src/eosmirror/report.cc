@@ -102,6 +102,9 @@ std::string Report::summary(bool dry_run) const {
   if (stats.emptied_dirs.load() > 0)
     s << "  directories empty on the source whose target entries were kept: "
       << stats.emptied_dirs.load() << " (--delete-emptied deletes them)\n";
+  if (stats.incomplete_dirs.load() > 0)
+    s << "  directories with entries that could not be listed, whose target entries were kept: "
+      << stats.incomplete_dirs.load() << "\n";
   if (stats.invalid_names.load() > 0)
     s << "  entries with invalid names skipped: " << stats.invalid_names.load() << "\n";
   auto failures = this->failures();

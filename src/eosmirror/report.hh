@@ -42,6 +42,7 @@ struct Stats {
   Counter deleted{0};
   Counter stale_temps{0};
   Counter emptied_dirs{0};  // directories empty on the source, whose extras --delete kept
+  Counter incomplete_dirs{0};  // directories listed incompletely, whose extras --delete kept
   Counter invalid_names{0};  // listed names that cannot be joined into paths
   Counter retries{0};
   Counter failures{0};

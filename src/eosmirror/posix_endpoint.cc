@@ -361,7 +361,7 @@ Result<Entry> PosixEndpoint::stat(const RelPath& path) {
   return e;
 }
 
-Result<std::vector<Entry>> PosixEndpoint::list(const RelPath& dir) {
+Result<Listing> PosixEndpoint::list(const RelPath& dir) {
   std::string abs = absolute(dir);
   DIR* d = opendir(abs.c_str());
   if (!d) return errno_error(errno, "open directory " + abs);
@@ -400,7 +400,7 @@ Result<std::vector<Entry>> PosixEndpoint::list(const RelPath& dir) {
     entries.push_back(std::move(e));
   }
   closedir(d);
-  return entries;
+  return Listing{std::move(entries)};
 }
 
 Status PosixEndpoint::mkdir(const RelPath& path, ModeBits mode) {

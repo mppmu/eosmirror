@@ -32,7 +32,7 @@ TEST_CASE("selftest passes on a local directory and leaves nothing behind") {
   REQUIRE(find(r, "verify the stored checksum"));
   CHECK(find(r, "verify the stored checksum")->skipped);  // no readback asked for
   CHECK(find(r, "symlink target"));
-  CHECK(target.list("").value().empty());
+  CHECK(target.list("").value().entries.empty());
 }
 
 TEST_CASE("selftest reports what an endpoint cannot do and what fails") {

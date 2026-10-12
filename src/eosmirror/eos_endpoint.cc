@@ -652,7 +652,7 @@ Result<std::string> EosEndpoint::resolve(const std::string& abs_path) {
   return resolved.empty() ? std::string("/") : resolved;
 }
 
-Result<std::vector<Entry>> EosEndpoint::list(const RelPath& dir) {
+Result<Listing> EosEndpoint::list(const RelPath& dir) {
   std::string abs = absolute(dir);
   // The link target comes last: parse_find_line takes it to the end of the line.
   std::string request =
@@ -709,8 +709,10 @@ Result<std::vector<Entry>> EosEndpoint::list(const RelPath& dir) {
     log::warn("skipping ", skipped, " entries of ", url_of(abs),
               " that cannot be listed safely, the first: ", first_problem);
   if (truncated) {
-    Status completed = complete_listing(abs, entries);
+    // The plain listing decides which entries exist.
+    auto completed = complete_listing(abs, entries);
     if (!completed.ok()) return completed.error();
+    skipped = completed.value();
   }
   // Subdirectories left out for lack of permission are listed all the same,
   // so that walking into them fails for them alone.
@@ -726,10 +728,10 @@ Result<std::vector<Entry>> EosEndpoint::list(const RelPath& dir) {
     }
     entries.push_back(std::move(e).value());
   }
-  return entries;
+  return Listing{std::move(entries), skipped};
 }
 
-Status EosEndpoint::complete_listing(const std::string& abs, std::vector<Entry>& entries) {
+Result<size_t> EosEndpoint::complete_listing(const std::string& abs, std::vector<Entry>& entries) {
   if (!truncation_warned_.exchange(true))
     log::warn("EOS cuts find results short for this identity: large directories of ",
               describe(), " are listed entry by entry, which is slow");
@@ -744,9 +746,15 @@ Status EosEndpoint::complete_listing(const std::string& abs, std::vector<Entry>&
   std::erase_if(entries, [&](const Entry& e) { return !names.count(e.name); });
   std::unordered_set<std::string> listed;
   for (const Entry& e : entries) listed.insert(e.name);
+  size_t skipped = 0;
   for (const std::string& name : names) {
     // find skips version directories, and so does this.
-    if (listed.count(name) || !valid_entry_name(name) || name.starts_with(".sys.v#.")) continue;
+    if (listed.count(name) || name.starts_with(".sys.v#.")) continue;
+    if (!valid_entry_name(name)) {
+      log::warn("skipping an entry with the invalid name \"", name, "\" in ", url_of(abs));
+      ++skipped;
+      continue;
+    }
     auto e = stat_abs(abs == "/" ? "/" + name : abs + "/" + name);
     if (!e.ok()) {
       if (e.error().kind == ErrorKind::NotFound) continue;
@@ -754,7 +762,7 @@ Status EosEndpoint::complete_listing(const std::string& abs, std::vector<Entry>&
     }
     entries.push_back(std::move(e).value());
   }
-  return {};
+  return skipped;
 }
 
 Status EosEndpoint::symlink(const RelPath& path, const std::string& target) {

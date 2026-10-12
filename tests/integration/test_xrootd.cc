@@ -92,7 +92,7 @@ TEST_CASE("xrootd endpoint: stat, list, mkdir, write, checksum, rename, remove")
   auto root = ep.stat("");
   REQUIRE(root.ok());
   CHECK(root.value().type == EntryType::Directory);
-  CHECK(ep.list("").value().empty());
+  CHECK(ep.list("").value().entries.empty());
   CHECK(ep.stat("missing").error().kind == ErrorKind::NotFound);
 
   REQUIRE(ep.mkdir("d", 0750).ok());
@@ -118,16 +118,16 @@ TEST_CASE("xrootd endpoint: stat, list, mkdir, write, checksum, rename, remove")
   // Only the temporary is visible until the commit.
   auto during = ep.list("d");
   REQUIRE(during.ok());
-  REQUIRE(during.value().size() == 1);
-  CHECK(ep.is_temporary(during.value()[0].name));
+  REQUIRE(during.value().entries.size() == 1);
+  CHECK(ep.is_temporary(during.value().entries[0].name));
   REQUIRE(writer.value()->commit(spec).ok());
 
   auto listed = ep.list("d");
   REQUIRE(listed.ok());
-  REQUIRE(listed.value().size() == 1);
-  CHECK(listed.value()[0].name == "f");
-  CHECK(listed.value()[0].type == EntryType::File);
-  CHECK(listed.value()[0].size == content.size());
+  REQUIRE(listed.value().entries.size() == 1);
+  CHECK(listed.value().entries[0].name == "f");
+  CHECK(listed.value().entries[0].type == EntryType::File);
+  CHECK(listed.value().entries[0].size == content.size());
   CHECK((ep.query_checksum(ep.absolute("d/f")).value() == spec.checksum));
 
   // Reading back.
@@ -149,7 +149,7 @@ TEST_CASE("xrootd endpoint: stat, list, mkdir, write, checksum, rename, remove")
   auto s = w2.value()->commit(bad);
   REQUIRE_FALSE(s.ok());
   CHECK(s.error().kind == ErrorKind::Checksum);
-  CHECK(ep.list("d").value().size() == 1);
+  CHECK(ep.list("d").value().entries.size() == 1);
 
   // Committing over an existing file replaces it.
   std::string other = "replacement";
@@ -169,7 +169,7 @@ TEST_CASE("xrootd endpoint: stat, list, mkdir, write, checksum, rename, remove")
   CHECK((not_empty == ErrorKind::NotEmpty || not_empty == ErrorKind::Exists));  // EEXIST is POSIX too
   REQUIRE(ep.remove("d/f", EntryType::File).ok());
   REQUIRE(ep.remove("d", EntryType::Directory).ok());
-  CHECK(ep.list("").value().empty());
+  CHECK(ep.list("").value().entries.empty());
 }
 
 TEST_CASE("FS to xrootd and back") {
@@ -273,7 +273,7 @@ TEST_CASE("xrootd to FS: pipelined reads of many chunks, and a file cut short me
   REQUIRE_FALSE(cut.ok());
   CHECK(cut.error().kind == ErrorKind::Changed);
   CHECK(cut.error().message.find("shrank") != std::string::npos);
-  CHECK(dst.list("").value().empty());
+  CHECK(dst.list("").value().entries.empty());
   CHECK(pool.available() == pool.allocated());
 }
 
@@ -286,7 +286,7 @@ TEST_CASE("selftest against xrootd") {
     CHECK(c.ok);
   }
   CHECK(r.ok());
-  CHECK(dir.endpoint->list("").value().empty());
+  CHECK(dir.endpoint->list("").value().entries.empty());
 }
 
 TEST_CASE("xrootd endpoint: detection, and servers that cannot be asked") {

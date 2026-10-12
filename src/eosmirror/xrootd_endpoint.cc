@@ -475,7 +475,7 @@ Result<Entry> XrdEndpoint::stat(const RelPath& path) {
   return entry_from_stat(path.empty() ? "" : name_of(path), *info);
 }
 
-Result<std::vector<Entry>> XrdEndpoint::list(const RelPath& dir) {
+Result<Listing> XrdEndpoint::list(const RelPath& dir) {
   std::string abs = absolute(dir);
   auto request = request_path(abs);
   if (!request.ok()) return request.error();
@@ -483,8 +483,8 @@ Result<std::vector<Entry>> XrdEndpoint::list(const RelPath& dir) {
   XrdCl::XRootDStatus st = fs_->DirList(request.value(), XrdCl::DirListFlags::Stat, listing);
   if (!st.IsOK()) return xrd_error(st, "list " + url_of(abs));
   std::unique_ptr<XrdCl::DirectoryList> owned(listing);
-  std::vector<Entry> entries;
-  entries.reserve(listing->GetSize());
+  Listing result;
+  result.entries.reserve(listing->GetSize());
   for (auto it = listing->Begin(); it != listing->End(); ++it) {
     XrdCl::DirectoryList::ListEntry* item = *it;
     if (!item->GetStatInfo()) {
@@ -494,16 +494,17 @@ Result<std::vector<Entry>> XrdEndpoint::list(const RelPath& dir) {
         if (e.error().kind == ErrorKind::NotFound) continue;
         if (e.error().kind == ErrorKind::Unsupported) {
           log::warn("skipping ", e.error().describe());
+          ++result.skipped;
           continue;
         }
         return e.error();
       }
-      entries.push_back(std::move(e).value());
+      result.entries.push_back(std::move(e).value());
       continue;
     }
-    entries.push_back(entry_from_stat(item->GetName(), *item->GetStatInfo()));
+    result.entries.push_back(entry_from_stat(item->GetName(), *item->GetStatInfo()));
   }
-  return entries;
+  return result;
 }
 
 Status XrdEndpoint::mkdir(const RelPath& path, ModeBits mode) {

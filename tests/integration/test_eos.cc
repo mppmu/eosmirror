@@ -155,7 +155,7 @@ TEST_CASE("eos endpoint: identity, listing, symlinks, metadata and atomic writes
   auto root = ep.stat("");
   REQUIRE(root.ok());
   CHECK(root.value().type == EntryType::Directory);
-  CHECK(ep.list("").value().empty());
+  CHECK(ep.list("").value().entries.empty());
   CHECK(ep.stat("missing").error().kind == ErrorKind::NotFound);
 
   REQUIRE(ep.mkdir("d", 0750).ok());
@@ -183,8 +183,8 @@ TEST_CASE("eos endpoint: identity, listing, symlinks, metadata and atomic writes
 
   auto listed = ep.list("d");
   REQUIRE(listed.ok());
-  REQUIRE(listed.value().size() == 1);
-  const Entry& f = listed.value()[0];
+  REQUIRE(listed.value().entries.size() == 1);
+  const Entry& f = listed.value().entries[0];
   CHECK(f.name == "f");
   CHECK(f.type == EntryType::File);
   CHECK(f.size == content.size());
@@ -226,7 +226,7 @@ TEST_CASE("eos endpoint: identity, listing, symlinks, metadata and atomic writes
   REQUIRE(st.ok());
   CHECK(st.value().size == other.size());
   CHECK(st.value().mtime == Timespec{1600000001, 7});
-  CHECK(ep.list("d").value().size() == 1);  // no leftovers
+  CHECK(ep.list("d").value().entries.size() == 1);  // no leftovers
 
   // Reading back.
   auto reader = ep.open_read("d/f");
@@ -252,8 +252,8 @@ TEST_CASE("eos endpoint: identity, listing, symlinks, metadata and atomic writes
   REQUIRE(ep.set_metadata("d/l", lmd, MetaFields::Mtime | MetaFields::Owner).ok());
   listed = ep.list("d");
   REQUIRE(listed.ok());
-  REQUIRE(listed.value().size() == 2);
-  for (const Entry& e : listed.value()) {
+  REQUIRE(listed.value().entries.size() == 2);
+  for (const Entry& e : listed.value().entries) {
     if (e.name == "l") {
       CHECK(e.type == EntryType::Symlink);
       CHECK(e.link_target == "../other target with spaces");
@@ -282,7 +282,7 @@ TEST_CASE("eos endpoint: identity, listing, symlinks, metadata and atomic writes
   REQUIRE(ep.remove("d/l", EntryType::Symlink).ok());
   REQUIRE(ep.remove("d/f", EntryType::File).ok());
   REQUIRE(ep.remove("d", EntryType::Directory).ok());
-  CHECK(ep.list("").value().empty());
+  CHECK(ep.list("").value().entries.empty());
 }
 
 TEST_CASE("eos endpoint: files in a directory without checksums") {
@@ -391,7 +391,7 @@ TEST_CASE("eos endpoint: aborted uploads leave the previous file as it was") {
     REQUIRE_FALSE(copied.ok());
     CHECK(copied.error().kind == ErrorKind::Cancelled);
     CHECK(get(ep, "f") == old);
-    CHECK(ep.list("").value().size() == 1);
+    CHECK(ep.list("").value().entries.size() == 1);
   }
 }
 
@@ -424,12 +424,12 @@ TEST_CASE("eos endpoint: pipelined uploads and downloads of many chunks") {
       // And back, verified against the checksum the listing gives.
       auto listed = ep.value()->list("");
       REQUIRE(listed.ok());
-      REQUIRE(find(listed.value(), "f"));
-      CHECK((find(listed.value(), "f")->checksum == adler(content)));
+      REQUIRE(find(listed.value().entries, "f"));
+      CHECK((find(listed.value().entries, "f")->checksum == adler(content)));
       std::string back_dir = std::string("back-") + layout + std::to_string(window);
       PosixEndpoint back(tmp.sub(back_dir));
       REQUIRE(back.mkdir("", 0755).ok());
-      const Entry& entry = *find(listed.value(), "f");
+      const Entry& entry = *find(listed.value().entries, "f");
       auto down = copy_file(*ep.value(), back, "f", entry, options, pool, cancel);
       REQUIRE(down.ok());
       CHECK(down.value().verified);
@@ -457,7 +457,7 @@ TEST_CASE("eos endpoint: an upload whose file disappears fails once and leaves n
     // The atomic upload's hidden file goes behind the writer's back.
     auto listed = ep.list("");
     REQUIRE(listed.ok());
-    for (const Entry& e : listed.value())
+    for (const Entry& e : listed.value().entries)
       if (e.name.starts_with(".sys.a#.")) removed = ep.remove(e.name, EntryType::File).ok();
   };
   BufferPool pool(256 * 1024);
@@ -469,7 +469,7 @@ TEST_CASE("eos endpoint: an upload whose file disappears fails once and leaves n
   INFO("error: ", copied.error().describe());
   CHECK(is_transient(copied.error().kind));
   CHECK(ep.stat("f").error().kind == ErrorKind::NotFound);
-  CHECK(ep.list("").value().empty());
+  CHECK(ep.list("").value().entries.empty());
   CHECK(pool.available() == pool.allocated());
 }
 
@@ -497,7 +497,7 @@ TEST_CASE("EOS to FS: downloads are verified, and a read that fails midway leave
   REQUIRE(relabel.value().retc == 0);
   auto listed = ep.list("crc");
   REQUIRE(listed.ok());
-  const Entry* bad = find(listed.value(), "bad");
+  const Entry* bad = find(listed.value().entries, "bad");
   REQUIRE(bad);
   REQUIRE(bad->checksum.type == ChecksumType::Adler32);
   REQUIRE(bad->checksum != adler(big));
@@ -517,7 +517,7 @@ TEST_CASE("EOS to FS: downloads are verified, and a read that fails midway leave
   INFO("error: ", failed.error().describe());
   CHECK(is_transient(failed.error().kind));
   CHECK(chunks > 0);  // midway
-  CHECK(dst.list("crc").value().empty());  // neither the file nor a temporary
+  CHECK(dst.list("crc").value().entries.empty());  // neither the file nor a temporary
   CHECK(pool.available() == pool.allocated());
 
   // A sync verifies what it downloads, and reports the broken file once.
@@ -532,7 +532,7 @@ TEST_CASE("EOS to FS: downloads are verified, and a read that fails midway leave
   CHECK(r.failures()[0].path == "crc/bad");
   CHECK(tmp.read_file("dst/a") == big);
   CHECK(tmp.read_file("dst/b") == "small");
-  CHECK(dst.list("crc").value().empty());
+  CHECK(dst.list("crc").value().entries.empty());
 }
 
 TEST_CASE("EOS to FS: files are read with the listing's metadata, without MGM stats") {
@@ -615,7 +615,7 @@ TEST_CASE("EOS to FS: files that changed since the listing or while they are rea
   auto listed = [&](EosEndpoint& from, const RelPath& name) {
     auto entries = from.list("");
     REQUIRE(entries.ok());
-    const Entry* e = find(entries.value(), name);
+    const Entry* e = find(entries.value().entries, name);
     REQUIRE(e);
     return *e;
   };
@@ -710,8 +710,8 @@ TEST_CASE("eos endpoint: roots reached through symlinks") {
     CHECK(linked.value()->absolute("") == ep.absolute("real/sub"));
     auto listed = linked.value()->list("");
     REQUIRE(listed.ok());
-    REQUIRE(listed.value().size() == 1);
-    CHECK(listed.value()[0].name == "f");
+    REQUIRE(listed.value().entries.size() == 1);
+    CHECK(listed.value().entries[0].name == "f");
     CHECK(get(*linked.value(), "f") == "below a symlink");
   }
 
@@ -784,10 +784,10 @@ TEST_CASE("eos endpoint: listings for an identity with find limits") {
     REQUIRE(expected.ok());
     auto listed = nobody->list(d);
     REQUIRE(listed.ok());
-    CHECK(listed.value().size() == expected.value().size());
-    for (const Entry& e : expected.value()) {
+    CHECK(listed.value().entries.size() == expected.value().entries.size());
+    for (const Entry& e : expected.value().entries) {
       INFO("entry ", e.name);
-      const Entry* got = find(listed.value(), e.name);
+      const Entry* got = find(listed.value().entries, e.name);
       REQUIRE(got);
       CHECK(got->type == e.type);
       CHECK(got->size == e.size);
@@ -808,9 +808,9 @@ TEST_CASE("eos endpoint: listings for an identity with find limits") {
   REQUIRE(ep.set_metadata("small/secret", secret, MetaFields::Mode).ok());
   auto listed = nobody->list("small");
   REQUIRE(listed.ok());
-  CHECK(listed.value().size() == 2);
-  REQUIRE(find(listed.value(), "secret"));
-  CHECK(find(listed.value(), "secret")->type == EntryType::Directory);
+  CHECK(listed.value().entries.size() == 2);
+  REQUIRE(find(listed.value().entries, "secret"));
+  CHECK(find(listed.value().entries, "secret")->type == EntryType::Directory);
   auto denied = nobody->list("small/secret");
   REQUIRE_FALSE(denied.ok());
   CHECK(denied.error().kind == ErrorKind::Permission);
@@ -909,8 +909,8 @@ TEST_CASE("eos endpoint: names that need encoding") {
     CHECK(st.mtime == spec.metadata.mtime);
     auto listed = ep.list(name);
     REQUIRE(listed.ok());
-    REQUIRE(listed.value().size() == 1);
-    CHECK(listed.value()[0].name == name);
+    REQUIRE(listed.value().entries.size() == 1);
+    CHECK(listed.value().entries[0].name == name);
     auto reader = ep.open_read(file);
     REQUIRE(reader.ok());
     std::string back(content.size(), '\0');
@@ -941,8 +941,8 @@ TEST_CASE("eos endpoint: names that need encoding") {
     CHECK(must(ep.stat(link)).link_target == target);
     auto listed = ep.list("");
     REQUIRE(listed.ok());
-    REQUIRE(find(listed.value(), link));
-    CHECK(find(listed.value(), link)->link_target == target);
+    REQUIRE(find(listed.value().entries, link));
+    CHECK(find(listed.value().entries, link)->link_target == target);
     REQUIRE(ep.remove(link, EntryType::Symlink).ok());
   }
   // What EOS would change or could not list back is refused.
@@ -952,7 +952,18 @@ TEST_CASE("eos endpoint: names that need encoding") {
     REQUIRE_FALSE(refused.ok());
     CHECK(refused.error().kind == ErrorKind::Unsupported);
   }
-  CHECK(ep.list("").value().empty());
+  // Names that make a listing line ambiguous, or have control characters,
+  // are left out of listings and counted.
+  for (std::string name : {"amb\" type=file size=1", "tab\there"}) {
+    INFO("name ", name);
+    put(ep, name, "x");
+    auto listed = ep.list("");
+    REQUIRE(listed.ok());
+    CHECK(listed.value().entries.empty());
+    CHECK(listed.value().skipped == 1);
+    REQUIRE(ep.remove(name, EntryType::File).ok());
+  }
+  CHECK(ep.list("").value().entries.empty());
 }
 
 TEST_CASE("eos endpoint: symlinks are replaced in place") {
@@ -982,7 +993,7 @@ TEST_CASE("eos endpoint: symlinks are replaced in place") {
   CHECK(must(ep.stat("l")).gid == 5555);
   CHECK(must(ep.stat("d")).uid == before.uid);
   CHECK(must(ep.stat("d")).gid == before.gid);
-  CHECK(ep.list("").value().size() == 2);
+  CHECK(ep.list("").value().entries.size() == 2);
 }
 
 TEST_CASE("FS to EOS as a user other than root: read-only directories") {
@@ -1245,6 +1256,6 @@ TEST_CASE("selftest against EOS") {
       CHECK(c.ok);
     }
     CHECK(r.ok());
-    CHECK(dir.endpoint->list("").value().empty());
+    CHECK(dir.endpoint->list("").value().entries.empty());
   }
 }

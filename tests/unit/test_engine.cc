@@ -52,13 +52,13 @@ void compare_trees(PosixEndpoint& src, PosixEndpoint& dst, const RelPath& dir = 
   auto d = dst.list(dir);
   REQUIRE(s.ok());
   REQUIRE(d.ok());
-  for (const Entry& e : s.value()) {
+  for (const Entry& e : s.value().entries) {
     if (e.type == EntryType::Other) continue;
     RelPath path = join(dir, e.name);
     INFO("entry ", path);
-    auto it = std::find_if(d.value().begin(), d.value().end(),
+    auto it = std::find_if(d.value().entries.begin(), d.value().entries.end(),
                            [&](const Entry& x) { return x.name == e.name; });
-    REQUIRE(it != d.value().end());
+    REQUIRE(it != d.value().entries.end());
     CHECK(it->type == e.type);
     CHECK(it->mtime == e.mtime);
     if (e.type != EntryType::Symlink) CHECK(it->mode == e.mode);
@@ -1150,24 +1150,58 @@ TEST_CASE("fake: listed names that cannot be joined into paths are skipped and c
   CHECK(dst.paths() == std::vector<RelPath>{"d1", "d1/d2", "d1/d2/f2", "d1/f1", "d1/l", "f0"});
   CHECK(r.summary(false).find("entries with invalid names skipped: 7") != std::string::npos);
 
-  // On the target, such entries are neither deleted nor descended into.
+  // On the target, such entries are neither deleted nor descended into, and
+  // nothing else is deleted where a listing had them.
   dst.add_file("junk", "x");
   dst.modify("junk", [](FakeEndpoint::Node& n) { n.entry.name = ".."; });
-  dst.add_dir("extra");
-  dst.add_file("extra/inner", "x");
-  dst.modify("extra/inner", [](FakeEndpoint::Node& n) { n.entry.name = "../../d1"; });
+  dst.add_file("extra", "x");
+  dst.add_dir("d1/extra");
+  dst.add_file("d1/extra/inner", "x");
+  dst.modify("d1/extra/inner", [](FakeEndpoint::Node& n) { n.entry.name = "../../d1"; });
   SyncOptions o = fake_options();
   o.delete_extra = true;
   Report r2;
   REQUIRE(run_sync(src, dst, o, r2).ok());
   CHECK(r2.stats.invalid_names == bad.size() + 2);
+  CHECK(r2.stats.incomplete_dirs == 1);
   CHECK(r2.stats.deleted == 0);
   REQUIRE(r2.failures().size() == 1);
-  CHECK(r2.failures()[0].path == "extra");
+  CHECK(r2.failures()[0].path == "d1/extra");
   CHECK(r2.failures()[0].error.kind == ErrorKind::NotEmpty);
   CHECK(dst.get("junk"));
-  CHECK(dst.get("extra/inner"));
+  CHECK(dst.get("extra"));
+  CHECK(dst.get("d1/extra/inner"));
   CHECK(dst.get("d1"));
+}
+
+TEST_CASE("fake: nothing is deleted where a listing skipped entries") {
+  FakeEndpoint src, dst;
+  populate(src);
+  Report mirror;
+  REQUIRE(run_sync(src, dst, fake_options(), mirror).ok());
+  // The source's listing of d1 leaves out f1 as unsafe, like a line of an EOS
+  // listing that cannot be parsed, and the target's of d1/d2 an entry of its
+  // own: their names may be on the other side.
+  src.unlistable.insert("d1/f1");
+  dst.add_file("d1/extra", "x");
+  dst.add_file("d1/d2/extra", "x");
+  dst.add_file("d1/d2/hidden", "x");
+  dst.unlistable.insert("d1/d2/hidden");
+  dst.add_file("extra", "x");
+  SyncOptions o = fake_options();
+  o.delete_extra = true;
+  o.delete_emptied = true;
+  Report r;
+  REQUIRE(run_sync(src, dst, o, r).ok());
+  CHECK(r.stats.failures == 0);
+  CHECK(r.stats.deleted == 1);
+  CHECK(r.stats.incomplete_dirs == 2);
+  CHECK(dst.get("d1/f1"));
+  CHECK(dst.get("d1/extra"));
+  CHECK(dst.get("d1/d2/extra"));
+  CHECK_FALSE(dst.get("extra"));
+  CHECK(r.summary(false).find("could not be listed, whose target entries were kept: 2") !=
+        std::string::npos);
 }
 
 TEST_CASE("fake: slow source reads are logged") {

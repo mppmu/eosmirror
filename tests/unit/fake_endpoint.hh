@@ -5,6 +5,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -66,6 +67,9 @@ class FakeEndpoint : public eosmirror::Endpoint {
   // Like EOS: files are written in place and confirmed by AtomicUploadWriter,
   // against the checksum of `caps.checksum` where set.
   bool atomic_uploads = false;
+  // Entries that listings leave out as unsafe, and count, like lines of an
+  // EOS listing that cannot be parsed.
+  std::set<RelPath> unlistable;
 
   // ---- test setup -----------------------------------------------------------
 
@@ -150,16 +154,21 @@ class FakeEndpoint : public eosmirror::Endpoint {
     return it->second.entry;
   }
 
-  Result<std::vector<Entry>> list(const RelPath& dir) override {
+  Result<eosmirror::Listing> list(const RelPath& dir) override {
     if (auto err = check("list", dir)) return *err;
     std::lock_guard lock(mutex_);
     auto it = nodes_.find(dir);
     if (it == nodes_.end()) return not_found(dir);
     if (it->second.entry.type != eosmirror::EntryType::Directory)
       return Error{ErrorKind::NotADirectory, "list " + dir};
-    std::vector<Entry> result;
-    for (const auto& [p, n] : nodes_)
-      if (!p.empty() && parent_of(p) == dir) result.push_back(n.entry);
+    eosmirror::Listing result;
+    for (const auto& [p, n] : nodes_) {
+      if (p.empty() || parent_of(p) != dir) continue;
+      if (unlistable.count(p))
+        ++result.skipped;
+      else
+        result.entries.push_back(n.entry);
+    }
     return result;
   }
 
