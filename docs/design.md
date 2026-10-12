@@ -328,8 +328,8 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
   The start directory itself is listed too and skipped; a listing without it
   is an error. Paths and targets are printed raw: lines with more than one
   `" type=` (which a name or target can contain), names with control
-  characters, entries outside the directory and names listed twice are
-  skipped with a warning.
+  characters, entries outside the directory, names listed twice and fields
+  that are not numbers where numbers belong are skipped with a warning.
 - find limits identities other than root and sudoers (EOS 5.5
   `mgm/proc/user/NewfindCmd.cc`): it stops with `E2BIG` after 100000 files,
   counting the files of the listed subdirectories, or 50000 directories

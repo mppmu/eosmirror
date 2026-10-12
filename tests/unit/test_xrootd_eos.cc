@@ -177,6 +177,8 @@ TEST_CASE("find listing lines") {
   CHECK(f.gid == 1001);
   CHECK(f.mode == 0640);
   CHECK(f.mtime == Timespec{1700000000, 123456789});
+  CHECK(listed(R"(path="/eos/d/t" type=file  size=0 uid=0 gid=0 flags=0 mtime=17 ctime=18.000000042)")
+            .ctime == Timespec{18, 42});
 
   CHECK(f.checksum == Checksum{});
 
@@ -249,4 +251,16 @@ TEST_CASE("find listing lines that are refused") {
   CHECK(refused(R"(path="/eos/d/f" type=fifo  size=1 uid=1 gid=1 flags=644 mtime=1.0)"));
   CHECK(refused(R"(path="/eos/d/l" type=symlink  size=0 uid=1 gid=1 flags=0 mtime=1.0 target="x)"));
   CHECK(refused(""));
+  // Fields that cannot be parsed are no zeros.
+  for (const char* fields :
+       {"size=12x uid=1 gid=1 flags=644 mtime=1.0", "size=1 uid=-1 gid=1 flags=644 mtime=1.0",
+        "size=1 uid=1 gid= flags=644 mtime=1.0", "size=1 uid=1 gid=1 flags=648 mtime=1.0",
+        "size=99999999999999999999 uid=1 gid=1 flags=644 mtime=1.0",
+        "size=1 uid=1 gid=1 flags=644 mtime=1.2.3", "size=1 uid=1 gid=1 flags=644 mtime=x",
+        "size=1 uid=1 gid=1 flags=644 mtime=1600000000.1234567890",
+        "size=1 uid=1 gid=1 flags=644 mtime=1. ctime=1.0", "size=1 uid=1 gid=1 flags=644 mtime=+1",
+        "size=1 uid=1 gid=1 flags=644 mtime=1.0 ctime=-5.0"}) {
+    INFO(fields);
+    CHECK(refused(std::string(R"(path="/eos/d/f" type=file  )") + fields));
+  }
 }

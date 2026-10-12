@@ -129,23 +129,29 @@ std::string find_request(const std::string& path, const std::string& format) {
 
 // ---- parsing helpers ----------------------------------------------------------------
 
-Timespec parse_timespec(std::string_view text) {
-  Timespec t;
-  auto dot = text.find('.');
-  t.sec = std::strtoll(std::string(text.substr(0, dot)).c_str(), nullptr, 10);
-  if (dot != std::string_view::npos) {
-    std::string frac(text.substr(dot + 1));
-    while (frac.size() < 9) frac += '0';
-    t.nsec = static_cast<int32_t>(std::strtol(frac.substr(0, 9).c_str(), nullptr, 10));
-  }
-  return t;
+// A number that takes the whole text, digits only.
+template <class T>
+std::optional<T> parse_number(std::string_view text, int base = 10) {
+  T value = 0;
+  auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), value, base);
+  if (text.empty() || text.front() == '-' || ec != std::errc() || end != text.data() + text.size())
+    return std::nullopt;
+  return value;
 }
 
-template <class T>
-T parse_number(std::string_view text, int base = 10) {
-  T value = 0;
-  std::from_chars(text.data(), text.data() + text.size(), value, base);
-  return value;
+// "<sec>" or "<sec>.<nsec>" with up to 9 digits of the fraction.
+std::optional<Timespec> parse_timespec(std::string_view text) {
+  auto dot = text.find('.');
+  auto sec = parse_number<int64_t>(text.substr(0, dot));
+  if (!sec) return std::nullopt;
+  Timespec t{*sec, 0};
+  if (dot == std::string_view::npos) return t;
+  std::string_view frac = text.substr(dot + 1);
+  auto nsec = frac.size() <= 9 ? parse_number<int32_t>(frac) : std::nullopt;
+  if (!nsec) return std::nullopt;
+  t.nsec = *nsec;
+  for (size_t i = frac.size(); i < 9; ++i) t.nsec *= 10;
+  return t;
 }
 
 std::string name_of(const std::string& path) {
@@ -364,6 +370,13 @@ Result<std::optional<Entry>> parse_find_line(std::string_view line, std::string_
       value = rest.substr(0, rest.find(' '));
       rest.remove_prefix(value.size());
     }
+    // A field that cannot be parsed makes the line one that cannot be
+    // trusted, rather than a zero.
+    auto set = [&](auto& field, auto parsed) {
+      if (parsed) field = *parsed;
+      return parsed.has_value();
+    };
+    bool valid = true;
     if (key == "type") {
       if (value == "directory")
         e.type = EntryType::Directory;
@@ -374,17 +387,18 @@ Result<std::optional<Entry>> parse_find_line(std::string_view line, std::string_
       else
         return bad("unknown type in listing line");
     } else if (key == "size") {
-      e.size = parse_number<uint64_t>(value);
+      valid = set(e.size, parse_number<uint64_t>(value));
     } else if (key == "uid") {
-      e.uid = parse_number<uint32_t>(value);
+      valid = set(e.uid, parse_number<uint32_t>(value));
     } else if (key == "gid") {
-      e.gid = parse_number<uint32_t>(value);
+      valid = set(e.gid, parse_number<uint32_t>(value));
     } else if (key == "mode" || key == "flags") {
-      e.mode = parse_number<ModeBits>(value, 8) & 07777;
+      valid = set(e.mode, parse_number<ModeBits>(value, 8));
+      e.mode &= 07777;
     } else if (key == "mtime") {
-      e.mtime = parse_timespec(value);
+      valid = set(e.mtime, parse_timespec(value));
     } else if (key == "ctime") {
-      e.ctime = parse_timespec(value);
+      valid = set(e.ctime, parse_timespec(value));
     } else if (key == "checksum") {
       checksum = value;
     } else if (key == "checksumtype") {
@@ -392,6 +406,7 @@ Result<std::optional<Entry>> parse_find_line(std::string_view line, std::string_
     } else if (key == "target") {
       e.link_target = std::string(value);
     }
+    if (!valid) return bad("malformed " + std::string(key) + " in listing line");
   }
   if (e.type == EntryType::File) e.checksum = listed_checksum(checksum_type, checksum);
   if (e.type == EntryType::Symlink) {
