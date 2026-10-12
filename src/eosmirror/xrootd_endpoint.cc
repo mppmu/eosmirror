@@ -297,9 +297,13 @@ Error XrdEndpoint::xrd_error(const XrdCl::XRootDStatus& st, const std::string& c
 // writes, which can never complete an upload that the server verifies;
 // failing fast and copying the file again is the right recovery.
 std::unique_ptr<XrdCl::File> XrdEndpoint::new_write_file() {
-  auto file = std::make_unique<XrdCl::File>();
+  auto file = new_file();
   file->SetProperty("WriteRecovery", "false");
   return file;
+}
+
+std::unique_ptr<XrdCl::File> XrdEndpoint::new_file() {
+  return std::make_unique<XrdCl::File>(XrdCl::File::DisableVirtRedirect);
 }
 
 // ---- XrdFileWriter -------------------------------------------------------------------
@@ -685,7 +689,7 @@ Result<Checksum> XrdEndpoint::stored_checksum(const RelPath& path, const Entry&)
 Result<std::unique_ptr<XrdCl::File>> XrdEndpoint::open_file(const std::string& abs) {
   auto request = request_path(abs);
   if (!request.ok()) return request.error();
-  auto file = std::make_unique<XrdCl::File>();
+  auto file = new_file();
   XrdCl::XRootDStatus st = file->Open(open_url(request.value()), XrdCl::OpenFlags::Read);
   if (!st.IsOK()) return xrd_error(st, "open " + url_of(abs));
   return file;

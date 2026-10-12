@@ -933,8 +933,10 @@ TEST_CASE("eos endpoint: names that need encoding") {
   if (!base_url()) return;
   RemoteDir dir("names");
   EosEndpoint& ep = *dir.endpoint;
-  // Unencoded, these would cut the path short and add opaque parameters.
-  for (std::string name : {"a b", "q?eos.atomic=0&x=1", "100%25 #1", "Gr\xc3\xb6\xc3\x9f" "e"}) {
+  // Unencoded, these would cut the path short and add opaque parameters;
+  // and XrdCl takes x.meta4 for a Metalink document unless told not to.
+  for (std::string name :
+       {"a b", "q?eos.atomic=0&x=1", "100%25 #1", "Gr\xc3\xb6\xc3\x9f" "e", "x.meta4"}) {
     INFO("name ", name);
     REQUIRE(ep.mkdir(name, 0755).ok());
     std::string file = name + "/" + name;

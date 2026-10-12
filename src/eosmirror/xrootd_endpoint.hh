@@ -117,7 +117,11 @@ class XrdEndpoint : public Endpoint {
   // Converts an XrdCl status into an error with the given context.
   static Error xrd_error(const XrdCl::XRootDStatus& status, const std::string& context);
 
-  // A file object for an upload, with write recovery turned off.
+  // A file object that opens files as they are: by default, XrdCl takes
+  // files named *.meta4 or *.metalink for Metalink documents and opens the
+  // files they list instead (URL::IsMetalink).
+  static std::unique_ptr<XrdCl::File> new_file();
+  // One for an upload, with write recovery turned off.
   static std::unique_ptr<XrdCl::File> new_write_file();
 
  protected:

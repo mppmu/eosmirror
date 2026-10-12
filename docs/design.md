@@ -327,6 +327,10 @@ by the instance's namespace, took about as long either way.
 XRootD has no escaping for paths: the server takes everything after the
 first `?` as opaque parameters, in opens as in all other requests. Paths
 containing `?` are therefore refused with an error instead of being sent.
+XrdCl takes files named `*.meta4` or `*.metalink` for Metalink documents
+and opens the files they list instead (`XrdClURL.cc`, IsMetalink), unless
+a file object is made without that (`File::DisableVirtRedirect`), as
+eosmirror makes all of them.
 
 Server errors that mean a busy or failing server (`kXR_Overloaded`,
 `kXR_ServerError`, `kXR_noReplicas`, `kXR_inProgress` and `kXR_FSError`,

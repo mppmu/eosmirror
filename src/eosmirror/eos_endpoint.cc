@@ -540,17 +540,17 @@ Result<EosEndpoint::ProcResult> EosEndpoint::run_proc(const std::string& query, 
     if (answered) *answered = st.code == XrdCl::errErrorResponse;
     return xrd_error(st, context + display_url(server_));
   };
-  XrdCl::File file;
-  XrdCl::XRootDStatus st = file.Open(url, XrdCl::OpenFlags::Read);
+  auto file = new_file();
+  XrdCl::XRootDStatus st = file->Open(url, XrdCl::OpenFlags::Read);
   if (!st.IsOK()) return failed(st, "command on ");
   std::string response;
   std::vector<char> buf(1 << 20);
   uint64_t offset = 0;
   for (;;) {
     uint32_t got = 0;
-    st = file.Read(offset, static_cast<uint32_t>(buf.size()), buf.data(), got);
+    st = file->Read(offset, static_cast<uint32_t>(buf.size()), buf.data(), got);
     if (!st.IsOK()) {
-      XrdCl::XRootDStatus closed = file.Close();
+      XrdCl::XRootDStatus closed = file->Close();
       (void)closed;
       return failed(st, "command response from ");
     }
@@ -558,7 +558,7 @@ Result<EosEndpoint::ProcResult> EosEndpoint::run_proc(const std::string& query, 
     response.append(buf.data(), got);
     offset += got;
   }
-  st = file.Close();
+  st = file->Close();
   (void)st;
   return parse_proc_reply(response);
 }

@@ -286,6 +286,34 @@ TEST_CASE("xrootd to FS: pipelined reads of many chunks, and a file cut short me
   CHECK(pool.available() == pool.allocated());
 }
 
+TEST_CASE("FS to xrootd and back: files named like Metalink documents") {
+  if (!base_url()) return;
+  RemoteDir dir("metalink");
+  // XrdCl would open the file that a Metalink document lists instead.
+  std::string metalink = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                         "<metalink xmlns=\"urn:ietf:params:xml:ns:metalink\">\n"
+                         "  <file name=\"other\"><url>" + dir.url + "/other</url></file>\n"
+                         "</metalink>\n";
+  TempDir tmp;
+  tmp.write_file("src/x.meta4", metalink);
+  tmp.write_file("src/y.metalink", metalink);
+  tmp.write_file("src/other", "the other file");
+  PosixEndpoint src(tmp.sub("src"));
+  Cancellation cancel;
+  Report r;
+  Engine engine(src, *dir.endpoint, test_options(), r, nullptr, cancel);
+  REQUIRE(engine.run().ok());
+  CHECK(r.stats.failures == 0);
+
+  PosixEndpoint back(tmp.sub("back"));
+  Report r2;
+  Engine restore(*dir.endpoint, back, test_options(), r2, nullptr, cancel);
+  REQUIRE(restore.run().ok());
+  CHECK(r2.stats.failures == 0);
+  CHECK(tmp.read_file("back/x.meta4") == metalink);
+  CHECK(tmp.read_file("back/y.metalink") == metalink);
+}
+
 TEST_CASE("selftest against xrootd") {
   if (!base_url()) return;
   RemoteDir dir("selftest");
