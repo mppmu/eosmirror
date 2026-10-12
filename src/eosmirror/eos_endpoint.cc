@@ -139,12 +139,15 @@ std::optional<T> parse_number(std::string_view text, int base = 10) {
   return value;
 }
 
-// "<sec>" or "<sec>.<nsec>" with up to 9 digits of the fraction.
+// "<sec>" or "<sec>.<nsec>" with up to 9 digits of the fraction; the seconds
+// are negative before 1970 (common/Timing.hh, TimespecToString).
 std::optional<Timespec> parse_timespec(std::string_view text) {
   auto dot = text.find('.');
-  auto sec = parse_number<int64_t>(text.substr(0, dot));
+  std::string_view seconds = text.substr(0, dot);
+  bool before_1970 = seconds.starts_with('-');
+  auto sec = parse_number<int64_t>(before_1970 ? seconds.substr(1) : seconds);
   if (!sec) return std::nullopt;
-  Timespec t{*sec, 0};
+  Timespec t{before_1970 ? -*sec : *sec, 0};
   if (dot == std::string_view::npos) return t;
   std::string_view frac = text.substr(dot + 1);
   auto nsec = frac.size() <= 9 ? parse_number<int32_t>(frac) : std::nullopt;

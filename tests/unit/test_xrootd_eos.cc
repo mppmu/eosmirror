@@ -214,6 +214,9 @@ TEST_CASE("find listing lines") {
   CHECK(f.mtime == Timespec{1700000000, 123456789});
   CHECK(listed(R"(path="/eos/d/t" type=file  size=0 uid=0 gid=0 flags=0 mtime=17 ctime=18.000000042)")
             .ctime == Timespec{18, 42});
+  // Before 1970, as struct timespec: -1.5 s.
+  CHECK(listed(R"(path="/eos/d/t" type=file  size=0 uid=0 gid=0 flags=0 mtime=-2.500000000)")
+            .mtime == Timespec{-2, 500000000});
 
   CHECK(f.checksum == Checksum{});
 
@@ -294,7 +297,8 @@ TEST_CASE("find listing lines that are refused") {
         "size=1 uid=1 gid=1 flags=644 mtime=1.2.3", "size=1 uid=1 gid=1 flags=644 mtime=x",
         "size=1 uid=1 gid=1 flags=644 mtime=1600000000.1234567890",
         "size=1 uid=1 gid=1 flags=644 mtime=1. ctime=1.0", "size=1 uid=1 gid=1 flags=644 mtime=+1",
-        "size=1 uid=1 gid=1 flags=644 mtime=1.0 ctime=-5.0"}) {
+        "size=1 uid=1 gid=1 flags=644 mtime=--5.0", "size=1 uid=1 gid=1 flags=644 mtime=1.-5",
+        "size=-1 uid=1 gid=1 flags=644 mtime=1.0"}) {
     INFO(fields);
     CHECK(refused(std::string(R"(path="/eos/d/f" type=file  )") + fields));
   }
