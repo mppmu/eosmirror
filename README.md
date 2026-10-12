@@ -171,7 +171,15 @@ Ubuntu 22.04 and 24.04) and `scripts/check.sh` builds and tests in one of
 them, optionally under AddressSanitizer or ThreadSanitizer.
 `scripts/integration-test.sh` runs the integration tests against a plain
 xrootd server and a single-host EOS instance started in containers from
-CERN's public EOS image.
+CERN's public EOS image; CI does so nightly. The XRootD tests also run
+against an xrootd installed on the host, as in CI with Ubuntu's
+`xrootd-server`:
+
+```
+EOSMIRROR_XROOTD_LOCAL=1 tests/integration/xrootd-server.sh start
+EOSMIRROR_XROOTD_URL=root://localhost:1094//data ctest --test-dir build -R integration
+EOSMIRROR_XROOTD_LOCAL=1 tests/integration/xrootd-server.sh stop
+```
 
 ## Packaging
 

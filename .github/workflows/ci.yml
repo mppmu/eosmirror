@@ -3,28 +3,39 @@ name: CI
 on:
   push:
   pull_request:
+  schedule:
+    - cron: "23 2 * * *"  # the EOS integration tests
+  workflow_dispatch:
 
 jobs:
   ubuntu:
     name: ${{ matrix.os }} ${{ matrix.sanitizer }}
+    if: github.event_name != 'schedule'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         # Ubuntu 22.04's XRootD (5.3) is too old, so those builds leave the
         # XRootD and EOS endpoints out; the package jobs build them against
-        # eos-xrootd.
+        # eos-xrootd. On Ubuntu 24.04 (XRootD 5.6), the XRootD integration
+        # tests run against the distribution's xrootd server.
         include:
-          - { os: ubuntu-22.04, sanitizer: "", xrootd: "" }
-          - { os: ubuntu-22.04, sanitizer: address, xrootd: "" }
-          - { os: ubuntu-22.04, sanitizer: thread, xrootd: "" }
-          - { os: ubuntu-24.04, sanitizer: "", xrootd: libxrootd-client-dev }
+          - { os: ubuntu-22.04, sanitizer: "", xrootd: false }
+          - { os: ubuntu-22.04, sanitizer: address, xrootd: false }
+          - { os: ubuntu-22.04, sanitizer: thread, xrootd: false }
+          - { os: ubuntu-24.04, sanitizer: "", xrootd: true }
+          - { os: ubuntu-24.04, sanitizer: thread, xrootd: true }
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ninja-build libsqlite3-dev zlib1g-dev ${{ matrix.xrootd }}
+          sudo apt-get install -y --no-install-recommends ninja-build libsqlite3-dev zlib1g-dev
+      - name: Install XRootD
+        if: matrix.xrootd
+        run: >
+          sudo apt-get install -y --no-install-recommends libxrootd-client-dev
+          xrootd-client-plugins xrootd-client xrootd-server
       - name: Configure
         run: >
           cmake -S . -B build -G Ninja -DEOSMIRROR_SANITIZER=${{ matrix.sanitizer }}
@@ -32,10 +43,56 @@ jobs:
       - name: Build
         run: cmake --build build
       - name: Test
-        run: ctest --test-dir build --output-on-failure
+        run: ctest --test-dir build --output-on-failure -E integration
+      - name: Integration tests against a local xrootd server
+        if: matrix.xrootd
+        env:
+          EOSMIRROR_XROOTD_LOCAL: 1
+          EOSMIRROR_XROOTD_URL: root://localhost:1094//data
+        run: |
+          tests/integration/xrootd-server.sh start
+          ctest --test-dir build -R integration --output-on-failure
+          tests/integration/xrootd-server.sh stop
+
+  eos:
+    # A single-host EOS instance and an xrootd server in rootless podman
+    # containers from CERN's public EOS image, as scripts/integration-test.sh
+    # runs them, nightly and on demand.
+    name: EOS integration tests
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space for the EOS image
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - name: Build image
+        run: scripts/build-images.sh ubuntu22
+      - name: Build and unit tests
+        env:
+          EOSMIRROR_BUILD_ROOT: ${{ runner.temp }}/build
+        run: scripts/check.sh ubuntu22
+      - name: Integration tests
+        env:
+          EOSMIRROR_BUILD_ROOT: ${{ runner.temp }}/build
+          EOSMIRROR_EOS_STATE: ${{ runner.temp }}/eos
+        run: scripts/integration-test.sh ubuntu22
+      - name: Collect the EOS logs
+        if: failure()
+        # The daemons' files belong to their user in the containers' user
+        # namespace.
+        run: >
+          podman unshare bash -c 'cp -r "$1" "$2" && chown -R 0:0 "$2"'
+          _ "$RUNNER_TEMP/eos/log" "$RUNNER_TEMP/eos-logs"
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: eos-logs
+          path: ${{ runner.temp }}/eos-logs
 
   el9:
     name: EL9 ${{ matrix.sanitizer }}
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     container: almalinux:9
     strategy:
@@ -58,6 +115,7 @@ jobs:
 
   packages:
     name: Packages ${{ matrix.platform }}
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -76,6 +134,7 @@ jobs:
 
   distribution-packages:
     name: Packages ${{ matrix.name }}
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
