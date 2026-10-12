@@ -719,7 +719,6 @@ struct Engine::Impl {
       existing = nullptr;
     }
     bool in_doubt = existing && copy_in_doubt(path);
-    if (in_doubt) log::debug("copying ", path, " again: its last copy failed");
     if (existing && !in_doubt && existing->size == e.size &&
         (!use_mtimes || same_mtime(existing->mtime, e.mtime))) {
       stats.files_unchanged.fetch_add(1);
@@ -730,12 +729,31 @@ struct Engine::Impl {
       return;
     }
     ensure_writable(node);
+    if (in_doubt && !invalidate_in_doubt(path, e)) return;
     node->pending.fetch_add(1);
     stats.queued_copies.fetch_add(1);
     if (!copies.push(CopyJob{node, e, existing != nullptr})) {
       stats.queued_copies.fetch_sub(1);
       entry_done(node);
     }
+  }
+
+  // Gives a file whose last copy is in doubt mtime 0 before it is copied
+  // again, so that an upload that does not arrive (EOS confirms commits by
+  // size and mtime where it has no checksum) cannot be taken for it. Whether
+  // that worked.
+  bool invalidate_in_doubt(const RelPath& path, const Entry& e) {
+    log::debug("copying ", path, " again: its last copy failed");
+    if (!use_mtimes || options.dry_run) return true;
+    Entry md = e;
+    md.mtime = {0, 0};
+    Status reset = retry([&] { return target.set_metadata(path, md, MetaFields::Mtime); });
+    if (reset.ok()) return true;
+    // Still in doubt for the next run, whatever the error.
+    Error error = reset.error();
+    error.kind = ErrorKind::IO;
+    fail(path, EntryType::File, error);
+    return false;
   }
 
   void handle_symlink(const std::shared_ptr<DirNode>& node, const Entry& e,

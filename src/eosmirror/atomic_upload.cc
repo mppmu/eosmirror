@@ -21,10 +21,7 @@ Result<CommitInfo> AtomicUploadWriter::commit(const CommitSpec& spec) {
   upload_spec.checksum = Checksum{};  // compared below
   upload_spec.require_verification = false;
   auto closed = upload_->commit(upload_spec);
-  if (!closed.ok()) {
-    take_back(spec);
-    return closed.error();
-  }
+  if (!closed.ok()) return failed(take_back(spec), closed.error());
   bool verified = false;
   if (spec.checksum.type != ChecksumType::None) {
     auto stored = stored_checksum_();
@@ -75,22 +72,31 @@ Result<bool> AtomicUploadWriter::in_place(const CommitSpec& spec) {
 
 // Removes the upload, or else sets its mtime to 0 so that the next run copies
 // it again. A file in place that is not the upload is left alone.
-bool AtomicUploadWriter::take_back(const CommitSpec& spec) {
-  if (auto ours = in_place(spec); ours.ok() && !ours.value()) return false;
+AtomicUploadWriter::Gone AtomicUploadWriter::take_back(const CommitSpec& spec) {
+  if (auto ours = in_place(spec); ours.ok() && !ours.value()) return Gone::NotInPlace;
   Status removed = ep_.remove(path_, EntryType::File);
-  if (removed.ok() || removed.error().kind == ErrorKind::NotFound) return true;
+  if (removed.ok() || removed.error().kind == ErrorKind::NotFound) return Gone::TakenBack;
   Entry md = spec.metadata;
   md.type = EntryType::File;
   md.mtime = {0, 0};
   Status reset = ep_.set_metadata(path_, md, MetaFields::Mtime);
-  if (!reset.ok())
-    log::error("cannot remove ", name_, " after a failed upload, nor reset its mtime: ",
-               removed.error().describe(), "; ", reset.error().describe());
-  return true;
+  if (reset.ok()) return Gone::TakenBack;
+  log::error("cannot remove ", name_, " after a failed upload, nor reset its mtime: ",
+             removed.error().describe(), "; ", reset.error().describe());
+  return Gone::Stuck;
+}
+
+Error AtomicUploadWriter::failed(Gone gone, Error e) const {
+  if (gone == Gone::Stuck) {
+    e.kind = ErrorKind::IO;
+    e.message += "; " + name_ + " stays in place unverified";
+  }
+  return e;
 }
 
 Error AtomicUploadWriter::rejected(const CommitSpec& spec, Error e) {
-  return take_back(spec) ? e : not_committed();
+  Gone gone = take_back(spec);
+  return gone == Gone::NotInPlace ? not_committed() : failed(gone, std::move(e));
 }
 
 // XrdCl reports the close of a file whose connection is gone as done

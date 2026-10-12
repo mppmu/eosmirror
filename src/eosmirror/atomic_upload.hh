@@ -38,10 +38,14 @@ class AtomicUploadWriter : public FileWriter {
  private:
   // Whether the file in place is this upload, by size and mtime.
   Result<bool> in_place(const CommitSpec& spec);
-  // Takes the upload away if it is in place, or may be. Whether it was.
-  bool take_back(const CommitSpec& spec);
-  // The error of a failed verification: e if the upload was in place, else
-  // that it was not committed.
+  // Takes the upload away if it is in place, or may be.
+  enum class Gone { NotInPlace, TakenBack, Stuck };
+  Gone take_back(const CommitSpec& spec);
+  // The error e of a copy whose upload was taken back: an I/O error if it
+  // stays in place, so that a journal records the copy as one in doubt.
+  Error failed(Gone gone, Error e) const;
+  // The error of a failed verification: that of failed(), or that the
+  // upload was not committed if it is not in place.
   Error rejected(const CommitSpec& spec, Error e);
   Error not_committed() const;
 

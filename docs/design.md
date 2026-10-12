@@ -204,7 +204,9 @@ Modes:
   (I/O, timeout, checksum) are copied again by any run with the journal,
   whatever their size and mtime: such a copy may have failed its
   verification or close in place (EOS) and kept the source's size and mtime
-  when it could be neither removed nor given mtime 0.
+  when it could be neither removed nor given mtime 0, which then fails it as
+  an I/O error whatever went wrong. Before the new copy, the file gets
+  mtime 0, so that an upload that does not arrive cannot be taken for it.
 - `--resume` skips directories finalized by the previous run if that run
   was interrupted; after a completed run there is nothing to resume and
   everything is walked. Recorded failures are not retried by resuming.

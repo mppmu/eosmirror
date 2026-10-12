@@ -22,7 +22,8 @@
 // file systems do, so that tests can check that directory mtimes are fixed
 // after their entries. Writes verify the checksum when `caps.checksum` is set,
 // like EOS does. With `atomic_uploads`, they are confirmed afterwards like
-// EOS's; a "close" fault fails a commit after the file is in place.
+// EOS's; a "close" fault fails a commit after the file is in place, and a
+// "lost" fault makes it succeed without (a close whose connection is gone).
 class FakeEndpoint : public eosmirror::Endpoint {
  public:
   using Entry = eosmirror::Entry;
@@ -310,6 +311,7 @@ class FakeEndpoint : public eosmirror::Endpoint {
     }
     Result<eosmirror::CommitInfo> commit(const eosmirror::CommitSpec& spec) override {
       if (auto err = ep_.check("commit", path_)) return *err;
+      if (ep_.check("lost", path_)) return eosmirror::CommitInfo{};
       if (content_.size() != spec.size) return Error{ErrorKind::Changed, "size mismatch"};
       bool verified = false;
       if (ep_.caps.checksum != eosmirror::ChecksumType::None &&

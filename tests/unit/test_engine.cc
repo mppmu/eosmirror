@@ -564,6 +564,69 @@ TEST_CASE("fake: files whose last copy failed are copied again, whatever their s
   expect_mirrored(src, dst);
 }
 
+TEST_CASE("fake: a file in doubt is not taken for its new copy when that does not arrive") {
+  TempDir tmp;
+  auto journal = Journal::open(tmp.sub("j.sqlite"), "fake", "fake");
+  REQUIRE(journal.ok());
+  Journal& j = *journal.value();
+  FakeEndpoint src, dst;
+  dst.atomic_uploads = true;  // confirmed by size and mtime: no checksums
+  populate(src);
+  Report mirror;
+  REQUIRE(run_sync(src, dst, fake_options(), mirror).ok());
+  // A wrong upload stayed in place with the source's size and mtime.
+  dst.modify("f0", [](FakeEndpoint::Node& n) { n.content = "root fil3"; });
+  REQUIRE(j.begin_run(false).ok());
+  j.record_failure({"f0", EntryType::File, Error{ErrorKind::IO, "close failed"}});
+  REQUIRE(j.end_run(true).ok());
+
+  // The close of the new copy reports success, but its upload is lost.
+  dst.fail("lost", "f0", Error{ErrorKind::IO, "connection gone"});
+  REQUIRE(j.begin_run(false).ok());
+  Report r;
+  REQUIRE(run_sync(src, dst, fake_options(), r, &j).ok());
+  REQUIRE(j.end_run(true).ok());
+  CHECK(r.stats.failures == 0);
+  CHECK(r.stats.retries == 1);
+  CHECK(dst.get("f0")->content == "root file");
+  CHECK(j.failures().empty());
+}
+
+TEST_CASE("fake: an upload that cannot be taken back leaves its copy in doubt") {
+  TempDir tmp;
+  auto journal = Journal::open(tmp.sub("j.sqlite"), "fake", "fake");
+  REQUIRE(journal.ok());
+  Journal& j = *journal.value();
+  FakeEndpoint src, dst;
+  dst.atomic_uploads = true;
+  populate(src);
+  // No checksum to meet --require-checksum with, and f0 can be neither
+  // removed nor given mtime 0 afterwards.
+  SyncOptions o = fake_options();
+  o.require_checksum = true;
+  for (const char* op : {"remove", "set_metadata"})
+    dst.fail(op, "f0", Error{ErrorKind::Permission, "locked"}, o.retry.attempts);
+  REQUIRE(j.begin_run(false).ok());
+  Report r;
+  REQUIRE(run_sync(src, dst, o, r, &j).ok());
+  REQUIRE(j.end_run(true).ok());
+  CHECK(r.stats.failures == 3);
+  for (const Failure& f : j.failures())
+    CHECK(f.error.kind == (f.path == "f0" ? ErrorKind::IO : ErrorKind::Unsupported));
+  REQUIRE(dst.get("f0"));
+
+  // So the next run copies it again, also without --require-checksum.
+  o.require_checksum = false;
+  REQUIRE(j.begin_run(false).ok());
+  Report r2;
+  REQUIRE(run_sync(src, dst, o, r2, &j).ok());
+  REQUIRE(j.end_run(true).ok());
+  CHECK(r2.stats.files_copied == 3);
+  CHECK(r2.stats.files_unchanged == 0);
+  CHECK(j.failures().empty());
+  expect_mirrored(src, dst);
+}
+
 TEST_CASE("fake: the backlog stays bounded and the walk completes with many entries") {
   FakeEndpoint src, dst;
   for (int d = 0; d < 20; ++d) {
