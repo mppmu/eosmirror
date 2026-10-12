@@ -48,10 +48,12 @@ jobs:
         if: matrix.xrootd
         env:
           EOSMIRROR_XROOTD_LOCAL: 1
+          EOSMIRROR_XROOTD_DIR: ${{ runner.temp }}/xrootd
           EOSMIRROR_XROOTD_URL: root://localhost:1094//data
         run: |
           tests/integration/xrootd-server.sh start
-          ctest --test-dir build -R integration --output-on-failure
+          ctest --test-dir build -R integration --output-on-failure \
+            || { cat "$EOSMIRROR_XROOTD_DIR"/xrootd.log*; exit 1; }
           tests/integration/xrootd-server.sh stop
 
   nightly:
@@ -78,6 +80,7 @@ jobs:
           EOSMIRROR_BUILD_ROOT: ${{ runner.temp }}/build
         run: scripts/in-container.sh ubuntu22 ctest --test-dir /build/none -C long -L long --output-on-failure
       - name: Integration tests
+        if: ${{ !cancelled() }}
         env:
           EOSMIRROR_BUILD_ROOT: ${{ runner.temp }}/build
           EOSMIRROR_EOS_STATE: ${{ runner.temp }}/eos
@@ -88,7 +91,7 @@ jobs:
         # namespace.
         run: >
           podman unshare bash -c 'cp -r "$1" "$2" && chown -R 0:0 "$2"'
-          _ "$RUNNER_TEMP/eos/log" "$RUNNER_TEMP/eos-logs"
+          _ "$RUNNER_TEMP/eos/log" "$RUNNER_TEMP/eos-logs" || true
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

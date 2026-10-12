@@ -352,6 +352,7 @@ void compare(Endpoint& src, Endpoint& dst, const RelPath& dir, bool owners) {
     REQUIRE(t.type == e.type);
     CHECK(t.mtime == e.mtime);
     if (owners) CHECK(t.uid == e.uid);
+    if (owners) CHECK(t.gid == e.gid);
     if (e.type != EntryType::Symlink) CHECK(t.mode == e.mode);
     if (e.type == EntryType::Symlink) CHECK(t.link_target == e.link_target);
     if (e.type == EntryType::File) {

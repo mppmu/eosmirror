@@ -45,15 +45,19 @@ wait_until_up() {
   return 1
 }
 
-local_pid() { [[ -s $local_dir/xrootd.pid ]] && cat "$local_dir/xrootd.pid"; }
+# The local server's pid, if it still runs (xrootd writes xrootd.pid itself).
+local_pid() {
+  local pid
+  [[ -s $local_dir/server.pid ]] && pid=$(cat "$local_dir/server.pid") || return 1
+  [[ $(cat "/proc/$pid/comm" 2> /dev/null) == xrootd ]] && echo "$pid"
+}
 
 stop_local() {
   local pid
-  pid=$(local_pid) || return 0
-  if kill "$pid" 2> /dev/null; then
+  if pid=$(local_pid) && kill "$pid" 2> /dev/null; then
     for _ in $(seq 1 30); do kill -0 "$pid" 2> /dev/null || break; sleep 0.2; done
   fi
-  rm -f "$local_dir/xrootd.pid"
+  rm -f "$local_dir/server.pid"
 }
 
 start_local() {
@@ -75,7 +79,7 @@ start_local() {
   fi
   setsid xrootd "${user[@]}" -c "$local_dir/xrootd.cf" -l "$local_dir/xrootd.log" \
     < /dev/null > "$local_dir/xrootd.out" 2>&1 &
-  echo $! > "$local_dir/xrootd.pid"
+  echo $! > "$local_dir/server.pid"
   if wait_until_up "$!" xrdfs root://localhost:1094; then
     echo "xrootd server running locally (root://localhost:1094//data in $local_dir)"
     return 0

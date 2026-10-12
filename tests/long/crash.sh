@@ -5,8 +5,9 @@
 # must then equal the source in content and metadata. Several rounds change
 # the source in between (files rewritten with and without another size,
 # deleted, added, given other modes, replaced by directories). The seed
-# (printed; EOSMIRROR_SEED or the second argument) reproduces the trees,
-# the changes and the times of the kills.
+# (printed; EOSMIRROR_SEED or the second argument) reproduces the trees and
+# the changes, though not the contents of the files nor where in a run the
+# kills hit, which depends on its speed.
 #
 # Usage: crash.sh PATH_TO_EOSMIRROR [SEED]
 # Env:   EOSMIRROR_ROUNDS  rounds (default 60)
@@ -21,11 +22,21 @@ RANDOM=$seed
 work=$(mktemp -d "${TMPDIR:-/tmp}/eosmirror-crash-XXXXXX")
 src=$work/src
 dst=$work/dst
+round=0
+pid=
 
 fail() {
   echo "FAIL (seed $seed, round $round, kept $work): $*" >&2
   exit 1
 }
+
+# A run still going when the test ends (killed by a timeout) goes too.
+stop_run() {
+  if [[ -n $pid && $(cat "/proc/$pid/comm" 2> /dev/null) == eosmirror ]]; then
+    kill -9 "$pid" 2> /dev/null || true
+  fi
+}
+trap stop_run EXIT
 
 owner_opt=()
 [[ $(id -u) == 0 ]] || owner_opt=(--no-owner)
@@ -100,8 +111,15 @@ describe() {
 args=(sync -q "${owner_opt[@]}" --journal "$work/journal.db" --resume --delete --delete-emptied
   --checkers 4 --transfers 8 --buffer-size 64k "$src" "$dst")
 total_kills=0
-duration=100  # ms, of the last complete run, which the kills fall within
+# Kills fall within the time a run takes (ms): that of the last complete
+# one, but at least a quarter of the longest, since a round changes a
+# quarter of the files and the last complete run may only have finished
+# what killed ones left.
+duration=100
+longest=0
 for ((round = 0; round < rounds; round++)); do
+  # Each round from a seed of its own: the draws of the runs before differ.
+  RANDOM=$((seed * 1000 + round))
   ((round == 0)) || change_source
   # Directories get their mtimes once their changes are made.
   while read -r dir; do
@@ -111,7 +129,8 @@ for ((round = 0; round < rounds; round++)); do
 
   kills=0
   for ((attempt = 0; attempt < 30; attempt++)); do
-    delay=$((1 + RANDOM % duration))
+    window=$((duration > longest / 4 ? duration : longest / 4))
+    delay=$((1 + RANDOM % window))
     started=$(date +%s%N)
     "$bin" "${args[@]}" > "$work/run.out" 2>&1 &
     pid=$!
@@ -123,6 +142,7 @@ for ((round = 0; round < rounds; round++)); do
     wait "$pid" 2> /dev/null || rc=$?
     if ((rc == 0)); then
       duration=$(( ($(date +%s%N) - started) / 1000000 + 1 ))
+      ((duration > longest)) && longest=$duration
       break
     fi
     ((rc == 137)) || fail "a run exited with $rc: $(cat "$work/run.out")"
@@ -135,10 +155,13 @@ for ((round = 0; round < rounds; round++)); do
   diff -r --no-dereference -x '.*.eosmirror-*' "$src" "$dst" > "$work/content.diff" \
     || fail "content differs: $(head -20 "$work/content.diff")"
 done
-echo "$rounds rounds, $total_kills runs killed," \
-  "$(find "$dst" -name '.*.eosmirror-*' | wc -l) temporaries of killed runs left"
+temporaries=$(find "$dst" -name '.*.eosmirror-*' | wc -l)
+echo "$rounds rounds, $total_kills runs killed, $temporaries temporaries of killed runs left"
+# Those show that kills hit copies under way.
+((temporaries > 0)) || fail "no run was killed while it copied"
 
-"$bin" sync "${owner_opt[@]}" "$src" "$dst" > "$work/rerun.out" 2> /dev/null
+"$bin" sync "${owner_opt[@]}" "$src" "$dst" > "$work/rerun.out" 2> "$work/rerun.err" \
+  || fail "a further run failed: $(cat "$work/rerun.err")"
 grep -q 'files: 0 copied' "$work/rerun.out" && grep -q 'metadata fixed: 0' "$work/rerun.out" \
   || fail "a further run changed something: $(cat "$work/rerun.out")"
 
