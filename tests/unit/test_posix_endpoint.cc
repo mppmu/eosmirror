@@ -10,6 +10,7 @@
 
 #include "doctest/doctest.h"
 #include "eosmirror/endpoints.hh"
+#include "fake_endpoint.hh"
 #include "temp_dir.hh"
 
 using namespace eosmirror;
@@ -280,6 +281,11 @@ TEST_CASE("trees that overlap are found by whole path components") {
   CHECK_FALSE(disjoint("link", "data/proj").ok());
   CHECK_FALSE(disjoint("link/../proj/", "data/proj/./x/../").ok());
   CHECK_FALSE(disjoint("data/proj", "link/sub").ok());
+
+  // Servers are the same by name, or by port and address.
+  FakeEndpoint by_name("localhost:1094"), by_address("127.0.0.1:1094"), other_port("localhost:1095");
+  CHECK_FALSE(check_disjoint(by_name, by_address).ok());
+  CHECK(check_disjoint(by_name, other_port).ok());
 }
 
 TEST_CASE("posix mkdir, symlink, metadata and remove") {

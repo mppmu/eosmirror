@@ -27,8 +27,10 @@ A run walks the source tree directory by directory and makes the target match:
   one inside the other): the run would copy the target into itself, or
   delete what is around the source. Trees are compared by real path, for a
   target that does not exist yet through its deepest existing ancestor, and
-  remote ones by server (host and port) and path, the root of EOS endpoints
-  resolved like realpath(3) and that of plain XRootD normalized.
+  remote ones by server and path, the root of EOS endpoints resolved like
+  realpath(3) and that of plain XRootD normalized. Servers are the same
+  with the same port and name or an address in common, which catches
+  aliases; an EOS FUSE mount and the instance behind it are not compared.
 - Files and directories that vanish from the source between the listing of
   their directory and their copy or walk are counted as such, and are no
   failures: the source changed, and the next run finds them gone. They do
