@@ -179,6 +179,7 @@ std::string ProgressDisplay::lines(int terminal_width) const {
   if (s.deleted.load() > 0) counters.push_back(count("deleted ", s.deleted.load()));
   counters.push_back(count("failed ", s.failures.load()));
   if (s.retries.load() > 0) counters.push_back(count("retries ", s.retries.load()));
+  if (s.listing_bound.load() > 0) counters.push_back(count("listing-bound ", s.listing_bound.load()));
   out += flow(counters, width);
 
   size_t active = 0;

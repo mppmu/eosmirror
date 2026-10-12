@@ -231,7 +231,9 @@ Counters for everything that happened (directories, files copied with
 bytes, unchanged, metadata fixed, symlinks, skipped special files, entries
 vanished from the source, deleted, skipped invalid names, failed by kind,
 retries) go to a summary at the end
-and optionally to a periodic progress line. Exit status: 0 when everything succeeded, 1 when
+and optionally to a periodic progress line. So do the times a transfer
+found no copy to make while every checker was busy ("listing-bound"),
+which shows that listing bounds the run and more `--checkers` may help. Exit status: 0 when everything succeeded, 1 when
 something failed after retries (also the metadata of the top directory), 2
 for usage errors, 3 when the run could not start (unreadable source,
 unusable journal, failed preflight, overlapping source and target, a top

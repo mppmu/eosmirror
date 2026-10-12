@@ -3,6 +3,7 @@
 
 #include <condition_variable>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <utility>
@@ -29,8 +30,10 @@ class WorkQueue {
     return true;
   }
 
-  std::optional<T> pop() {
+  // on_wait is called, under the queue's lock, when pop() has to wait.
+  std::optional<T> pop(const std::function<void()>& on_wait = nullptr) {
     std::unique_lock lock(mutex_);
+    if (on_wait && items_.empty() && !closed_) on_wait();
     not_empty_.wait(lock, [&] { return closed_ || !items_.empty(); });
     if (items_.empty()) return std::nullopt;
     T item;

@@ -627,6 +627,25 @@ TEST_CASE("fake: what a target says about writing to it is shown at the start") 
   CHECK(err.text().find("INFO  pipelined writes") != std::string::npos);
 }
 
+TEST_CASE("fake: transfers that wait for listings are counted") {
+  FakeEndpoint src, dst;
+  for (int d = 0; d < 10; ++d) {
+    src.add_dir("d" + std::to_string(d));
+    src.add_file("d" + std::to_string(d) + "/f", "x");
+  }
+  src.hook = [](std::string_view op, const RelPath&) {
+    if (op == "list") std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  };
+  SyncOptions o = fake_options();
+  o.checkers = 1;
+  Report r;
+  REQUIRE(run_sync(src, dst, o, r).ok());
+  CHECK(r.stats.files_copied == 10);
+  CHECK(r.stats.listing_bound > 0);
+  CHECK(r.progress().find(", listing-bound ") != std::string::npos);
+  CHECK(r.summary(false).find("more --checkers may help") != std::string::npos);
+}
+
 TEST_CASE("fake: shards partition the files and together cover everything") {
   FakeEndpoint src;
   populate(src);

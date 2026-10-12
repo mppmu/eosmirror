@@ -47,6 +47,9 @@ struct Stats {
   Counter retries{0};
   Counter failures{0};
   Counter queued_copies{0};  // copies waiting in the backlog
+  // Transfers that found no copy to make while every checker was busy:
+  // listing bounds the run.
+  Counter listing_bound{0};
   Counter transfer_limit{0};  // copies allowed to run at once right now
 };
 

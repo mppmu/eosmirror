@@ -76,7 +76,9 @@ std::string Report::progress() const {
   s << "copied " << stats.files_copied.load() << " files, written " << format_bytes(bytes) << " ("
     << format_bytes(secs > 0 ? static_cast<uint64_t>(static_cast<double>(bytes) / secs) : 0)
     << "/s), unchanged " << stats.files_unchanged.load() << ", dirs " << stats.dirs_listed.load()
-    << ", failed " << stats.failures.load() << ", " << format_duration(elapsed());
+    << ", failed " << stats.failures.load();
+  if (uint64_t waits = stats.listing_bound.load(); waits > 0) s << ", listing-bound " << waits;
+  s << ", " << format_duration(elapsed());
   return s.str();
 }
 
@@ -99,6 +101,9 @@ std::string Report::summary(bool dry_run) const {
     << "deleted: " << stats.deleted.load() << ", stale temporaries: " << stats.stale_temps.load()
     << "\n"
     << "  retries: " << stats.retries.load() << ", failures: " << stats.failures.load() << "\n";
+  if (stats.listing_bound.load() > 0)
+    s << "  transfers that waited for listings, all checkers busy: " << stats.listing_bound.load()
+      << " (more --checkers may help)\n";
   if (stats.emptied_dirs.load() > 0)
     s << "  directories empty on the source whose target entries were kept: "
       << stats.emptied_dirs.load() << " (--delete-emptied deletes them)\n";

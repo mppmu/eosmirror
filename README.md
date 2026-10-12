@@ -119,7 +119,9 @@ local file system).
 
 On a terminal, `sync` shows a live display: counters, the write rate, bars
 for the transfer slots in use and the backlog, and one bar per file being
-copied. `--progress SEC` prints plain progress lines instead (for logs) and
+copied. A "listing-bound" count there and in the summary says how often
+transfers had nothing to copy while every directory worker was busy: more
+`--checkers` may help. `--progress SEC` prints plain progress lines instead (for logs) and
 `-q` turns both off.
 
 `eosmirror sync --help` lists the options: dry runs, deletion of extra

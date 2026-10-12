@@ -212,6 +212,7 @@ struct Engine::Impl {
   bool ran = false;
 
   size_t max_transfers() const { return static_cast<size_t>(std::max(1, options.max_transfers)); }
+  int checkers() const { return std::max(1, options.checkers); }
   size_t initial_limit() const {
     return std::min(max_transfers(), static_cast<size_t>(std::max(1, options.min_transfers)));
   }
@@ -229,6 +230,7 @@ struct Engine::Impl {
   std::atomic<uint64_t> deletions{0};
   std::atomic<bool> delete_cap_reported{false};
   std::atomic<uint64_t> failures_in_a_row{0};
+  std::atomic<int> busy_checkers{0};  // checkers processing a directory
   // Transient errors of transfers on the target, which is how an overloaded
   // target shows.
   std::atomic<uint64_t> target_errors{0};
@@ -463,7 +465,11 @@ struct Engine::Impl {
   // ---- the directory walk -----------------------------------------------------
 
   void checker_loop() {
-    while (auto node = dirs.pop()) process_dir(*node);
+    while (auto node = dirs.pop()) {
+      busy_checkers.fetch_add(1);
+      process_dir(*node);
+      busy_checkers.fetch_sub(1);
+    }
   }
 
   void process_dir(const std::shared_ptr<DirNode>& node) {
@@ -838,7 +844,12 @@ struct Engine::Impl {
   void transfer_loop(size_t index) {
     BufferPool pool(std::max<size_t>(options.buffer_size, 4096));
     TransferSlot& slot = *report.slots[index];
-    while (auto job = copies.pop()) {
+    // Waiting for copies while every checker is busy means that listing
+    // bounds the run: more checkers may help.
+    auto listing_bound = [&] {
+      if (busy_checkers.load() == checkers()) stats.listing_bound.fetch_add(1);
+    };
+    while (auto job = copies.pop(listing_bound)) {
       stats.queued_copies.fetch_sub(1);
       if (gate.acquire()) {
         run_copy(*job, pool, slot);
@@ -1035,8 +1046,7 @@ struct Engine::Impl {
       roots_pending = roots.size();
     }
     size_t transfers = max_transfers();
-    for (int i = 0; i < std::max(1, options.checkers); ++i)
-      threads.emplace_back([this] { checker_loop(); });
+    for (int i = 0; i < checkers(); ++i) threads.emplace_back([this] { checker_loop(); });
     for (size_t i = 0; i < transfers; ++i)
       threads.emplace_back([this, i] { transfer_loop(i); });
     if (initial_limit() < transfers) controller = std::thread([this] { controller_loop(); });
