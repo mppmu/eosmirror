@@ -37,6 +37,9 @@ struct Error {
   ErrorKind kind = ErrorKind::Other;
   std::string message;
   int errnum = 0;  // the errno, where one is known
+  // The copy that failed may have left its data in place unverified, with
+  // the source's size and mtime (see AtomicUploadWriter).
+  bool in_doubt = false;
 
   // A message of the form "<message>: <strerror>" when an errno is known.
   std::string describe() const;

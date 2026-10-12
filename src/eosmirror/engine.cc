@@ -946,10 +946,14 @@ struct Engine::Impl {
         target_failed = true;
         if (is_transient(e.kind)) target_errors.fetch_add(1);
       };
+      // The error of an attempt that may have left its copy in place.
+      std::optional<Error> doubt;
       auto result = retry([&] {
         slot.written = 0;
         target_failed = false;
-        return copy_file(source, target, path, job.source, job_options, pool, cancel);
+        auto copied = copy_file(source, target, path, job.source, job_options, pool, cancel);
+        if (!copied.ok() && copied.error().in_doubt) doubt = copied.error();
+        return copied;
       });
       slot.active = false;
       if (result.ok()) {
@@ -965,6 +969,15 @@ struct Engine::Impl {
                       job.dir->path.empty() ? "." : job.dir->path);
         }
         succeeded(path);
+      } else if (doubt) {
+        // The journal keeps the copy in doubt, however its last attempt
+        // ended, also when cancelled.
+        Error e = result.error();
+        if (e.kind == ErrorKind::Cancelled)
+          e = *doubt;
+        else if (!e.in_doubt)
+          e = Error{ErrorKind::IO, e.describe() + "; an attempt before: " + doubt->describe()};
+        fail(path, EntryType::File, e);
       } else if (result.error().kind == ErrorKind::NotFound && !target_failed) {
         vanished(path, EntryType::File);
       } else {

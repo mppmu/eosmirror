@@ -209,6 +209,9 @@ Modes:
   when it could be neither removed nor given mtime 0, which then fails it as
   an I/O error whatever went wrong. Before the new copy, the file gets
   mtime 0, so that an upload that does not arrive cannot be taken for it.
+  Once an attempt has left a copy in doubt, its row is such an I/O error
+  however the later attempts end, also when the run is cancelled before
+  the next one.
 - `--resume` skips directories finalized by the previous run if that run
   was interrupted; after a completed run there is nothing to resume and
   everything is walked. Recorded failures are not retried by resuming.

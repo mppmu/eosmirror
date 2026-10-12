@@ -646,6 +646,48 @@ TEST_CASE("fake: an upload that cannot be taken back leaves its copy in doubt") 
   expect_mirrored(src, dst);
 }
 
+TEST_CASE("fake: a copy stays in doubt however its later attempts end") {
+  TempDir tmp;
+  auto journal = Journal::open(tmp.sub("j.sqlite"), "fake", "fake");
+  REQUIRE(journal.ok());
+  Journal& j = *journal.value();
+  FakeEndpoint src, dst;
+  dst.atomic_uploads = true;
+  populate(src);
+  // The first attempt's close fails after the upload is in place, which can
+  // be neither removed nor given mtime 0.
+  dst.fail("close", "f0", Error{ErrorKind::IO, "close failed"});
+  dst.fail("remove", "f0", Error{ErrorKind::Permission, "locked"});
+  dst.fail("set_metadata", "f0", Error{ErrorKind::Permission, "locked"});
+  Cancellation cancel;
+  SUBCASE("the next attempt fails otherwise") {
+    dst.hook = [&](std::string_view op, const RelPath& path) {
+      if (op == "set_metadata" && path == "f0")
+        dst.fail("open_write", "f0", Error{ErrorKind::Permission, "denied"});
+    };
+    REQUIRE(j.begin_run(false).ok());
+    Report r;
+    Engine engine(src, dst, fake_options(), r, &j, cancel);
+    REQUIRE(engine.run().ok());
+    CHECK(r.stats.failures == 1);
+  }
+  SUBCASE("the run is cancelled before the next attempt") {
+    dst.hook = [&](std::string_view op, const RelPath& path) {
+      if (op == "set_metadata" && path == "f0") cancel.request();
+    };
+    REQUIRE(j.begin_run(false).ok());
+    Report r;
+    Engine engine(src, dst, fake_options(), r, &j, cancel);
+    Status s = engine.run();
+    REQUIRE_FALSE(s.ok());
+    CHECK(s.error().kind == ErrorKind::Cancelled);
+  }
+  auto rows = j.failures();
+  REQUIRE(rows.size() == 1);
+  CHECK(rows[0].path == "f0");
+  CHECK(rows[0].error.kind == ErrorKind::IO);
+}
+
 TEST_CASE("fake: the backlog stays bounded and the walk completes with many entries") {
   FakeEndpoint src, dst;
   for (int d = 0; d < 20; ++d) {

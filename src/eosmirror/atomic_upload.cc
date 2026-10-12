@@ -96,6 +96,7 @@ Error AtomicUploadWriter::failed(Gone gone, Error e) const {
   if (gone == Gone::Stuck) {
     e.kind = ErrorKind::IO;
     e.message += "; " + name_ + " may stay in place unverified";
+    e.in_doubt = true;
   }
   return e;
 }
