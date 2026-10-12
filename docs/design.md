@@ -364,7 +364,9 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
   policy) are counted as unverified, and refused with `--require-checksum`.
   A file that does not match, cannot be queried or is refused is removed
   again, or else gets mtime 0, since it already carries the size and mtime
-  of the source and would pass for a good copy. Owner and mode are applied
+  of the source and would pass for a good copy. So is the upload after a
+  close that failed, if a file with its size and mtime is in place: the
+  storage node may have committed it all the same. Owner and mode are applied
   after the close, since an upload runs under the client's identity: the
   file is briefly visible with the uploader's owner. The mode is passed in
   the open, which gives a new file that mode plus the owner's read and

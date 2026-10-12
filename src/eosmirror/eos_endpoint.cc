@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "eosmirror/atomic_upload.hh"
 #include "eosmirror/log.hh"
 
 namespace eosmirror {
@@ -221,110 +222,13 @@ class EosReader : public XrdReader {
   std::optional<Entry> replica_;  // the replica at the open, when the listing was taken
 };
 
-// Writes through EOS's atomic upload: the file is created under its final
-// name with eos.atomic=1 and eos.mtime=..., EOS stores it under a hidden
-// name and renames it at close. The stored checksum is then compared where
-// EOS computed one of the type that was computed here, and owner and mode
-// are set.
-class EosWriter : public FileWriter {
- public:
-  EosWriter(EosEndpoint& ep, std::unique_ptr<FileWriter> inner, std::string abs, std::string url)
-      : ep_(ep), inner_(std::move(inner)), abs_(std::move(abs)), url_(std::move(url)) {}
-
-  Status write(Chunk chunk) override { return inner_->write(std::move(chunk)); }
-
-  Result<CommitInfo> commit(const CommitSpec& spec) override {
-    CommitSpec inner_spec = spec;
-    inner_spec.checksum = Checksum{};  // compared below
-    auto committed = inner_->commit(inner_spec);
-    if (!committed.ok()) return committed.error();
-    // The file is in place now, with the source's size and mtime: what fails
-    // from here on has to take it away again. Unless the close did not
-    // commit it after all: XrdCl reports the close of a file whose
-    // connection is gone as done (XrdClFileStateHandler.cc, Close), and the
-    // storage node then discards the upload, leaving the previous file or
-    // none in place.
-    bool verified = false;
-    if (spec.checksum.type != ChecksumType::None) {
-      auto stored = ep_.query_checksum(abs_);
-      if (!stored.ok())
-        return stored.error().kind == ErrorKind::NotFound ? not_committed()
-                                                          : discard(spec, stored.error());
-      if (stored.value().type == spec.checksum.type) {
-        if (!(stored.value() == spec.checksum))
-          return discard(spec, Error{ErrorKind::Checksum, url_ + " has checksum " +
-                                                              stored.value().hex + " instead of " +
-                                                              spec.checksum.hex});
-        verified = true;
-      }
-    }
-    if (!verified) {
-      // Nothing compared, so the file in place must be told by its size and
-      // mtime.
-      auto ours = in_place(spec);
-      if (!ours.ok()) return ours.error();
-      if (!ours.value()) return not_committed();
-    }
-    if (spec.require_verification && !verified)
-      return discard(spec, Error{ErrorKind::Unsupported,
-                                 "EOS stores no " + std::string(to_string(spec.checksum.type)) +
-                                     " checksum to verify " + url_ + " against"});
-    MetaFields fields = spec.fields & (MetaFields::Owner | MetaFields::Mode);
-    // A new file has the mode of the open, plus the owner's read and write
-    // bits that XRootD adds. One that replaced a file may have been given
-    // the old file's mode by EOS's versioning.
-    if (!spec.replaces && (spec.metadata.mode & 0600) == 0600) fields = fields & ~MetaFields::Mode;
-    Status md = ep_.set_metadata_abs(abs_, spec.metadata, fields, false);
-    if (!md.ok()) return md.error();
-    return CommitInfo{verified};
-  }
-
-  void abort() override { inner_->abort(); }
-
- private:
-  // Whether the file in place is this upload, by size and mtime.
-  Result<bool> in_place(const CommitSpec& spec) {
-    auto st = ep_.stat_abs(abs_);
-    if (!st.ok()) {
-      if (st.error().kind == ErrorKind::NotFound) return false;
-      return st.error();
-    }
-    return st.value().type == EntryType::File && st.value().size == spec.size &&
-           (!has(spec.fields, MetaFields::Mtime) || st.value().mtime == spec.metadata.mtime);
-  }
-
-  Error not_committed() const {
-    return Error{ErrorKind::IO, "the upload of " + url_ +
-                                    " was not committed (the connection to the storage node "
-                                    "was lost before the close)"};
-  }
-
-  // Removes the committed file, or else sets its mtime to 0 so that the next
-  // run copies it again. A file in place that is not this upload is left.
-  Error discard(const CommitSpec& spec, Error e) {
-    if (auto ours = in_place(spec); ours.ok() && !ours.value()) return not_committed();
-    Status removed = ep_.remove_abs(abs_);
-    if (removed.ok() || removed.error().kind == ErrorKind::NotFound) return e;
-    Entry md;
-    md.mtime = {0, 0};
-    Status reset = ep_.set_metadata_abs(abs_, md, MetaFields::Mtime, false);
-    if (!reset.ok())
-      log::error("cannot remove ", url_, " after a failed verification, nor reset its mtime: ",
-                 removed.error().describe(), "; ", reset.error().describe());
-    return e;
-  }
-
-  EosEndpoint& ep_;
-  std::unique_ptr<FileWriter> inner_;
-  std::string abs_;
-  std::string url_;
-};
-
-// The XRootD writer that EosWriter wraps: writes to the final URL with the
-// atomic upload parameters and does nothing at commit beyond closing. Up to
-// `window` writes are in flight, sent in offset order over the file's one
-// connection, each at the end of the previous one, as erasure-coded layouts
-// need (see docs/design.md).
+// An upload through EOS's atomic upload: the file is created under its final
+// name with eos.atomic=1 and eos.mtime=..., and EOS stores it under a hidden
+// name and renames it at close. Its commit only closes it; the
+// AtomicUploadWriter around it confirms what is in place. Up to `window`
+// writes are in flight, sent in offset order over the file's one connection,
+// each at the end of the previous one, as erasure-coded layouts need (see
+// docs/design.md).
 class EosUploadWriter : public XrdFileWriter {
  public:
   EosUploadWriter(std::unique_ptr<XrdCl::File> file, std::string url, int window)
@@ -868,11 +772,8 @@ Status EosEndpoint::symlink(const RelPath& path, const std::string& target) {
 }
 
 Status EosEndpoint::set_metadata(const RelPath& path, const Entry& md, MetaFields fields) {
-  return set_metadata_abs(absolute(path), md, fields, md.type == EntryType::Symlink);
-}
-
-Status EosEndpoint::set_metadata_abs(const std::string& abs, const Entry& md, MetaFields fields,
-                                     bool is_symlink) {
+  std::string abs = absolute(path);
+  bool is_symlink = md.type == EntryType::Symlink;
   // The mtime first: utimes needs write access, which the mode may take away.
   if (has(fields, MetaFields::Mtime)) {
     char nsec[16];
@@ -950,7 +851,8 @@ Result<std::unique_ptr<FileWriter>> EosEndpoint::open_write(const RelPath& path,
   if (!st.IsOK()) return xrd_error(st, "create " + url_of(abs));
   std::unique_ptr<FileWriter> upload(
       new EosUploadWriter(std::move(file), url_of(abs), options_.write_window));
-  return std::unique_ptr<FileWriter>(new EosWriter(*this, std::move(upload), abs, url_of(abs)));
+  return std::unique_ptr<FileWriter>(new AtomicUploadWriter(
+      *this, path, url_of(abs), std::move(upload), [this, abs] { return query_checksum(abs); }));
 }
 
 }  // namespace eosmirror

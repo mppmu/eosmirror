@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "eosmirror/atomic_upload.hh"
 #include "eosmirror/endpoint.hh"
 
 // An in-memory endpoint for engine tests, with fault injection.
@@ -19,7 +20,8 @@
 // Creating or removing entries bumps the parent directory's mtime, as real
 // file systems do, so that tests can check that directory mtimes are fixed
 // after their entries. Writes verify the checksum when `caps.checksum` is set,
-// like EOS does.
+// like EOS does. With `atomic_uploads`, they are confirmed afterwards like
+// EOS's; a "close" fault fails a commit after the file is in place.
 class FakeEndpoint : public eosmirror::Endpoint {
  public:
   using Entry = eosmirror::Entry;
@@ -61,6 +63,9 @@ class FakeEndpoint : public eosmirror::Endpoint {
   // Like a user other than root: creating and removing entries requires
   // the owner's write bit on the directory.
   bool entries_need_write = false;
+  // Like EOS: files are written in place and confirmed by AtomicUploadWriter,
+  // against the checksum of `caps.checksum` where set.
+  bool atomic_uploads = false;
 
   // ---- test setup -----------------------------------------------------------
 
@@ -226,9 +231,14 @@ class FakeEndpoint : public eosmirror::Endpoint {
   Result<std::unique_ptr<eosmirror::FileWriter>> open_write(
       const RelPath& path, const eosmirror::CommitSpec& spec) override {
     if (auto err = check("open_write", path)) return *err;
-    std::lock_guard lock(mutex_);
-    if (Status s = require_parent(path, true); !s.ok()) return s.error();
-    return std::unique_ptr<eosmirror::FileWriter>(new Writer(*this, path, spec));
+    {
+      std::lock_guard lock(mutex_);
+      if (Status s = require_parent(path, true); !s.ok()) return s.error();
+    }
+    std::unique_ptr<eosmirror::FileWriter> writer(new Writer(*this, path, spec));
+    if (!atomic_uploads) return writer;
+    return std::unique_ptr<eosmirror::FileWriter>(new eosmirror::AtomicUploadWriter(
+        *this, path, path, std::move(writer), [this, path] { return checksum_in_place(path); }));
   }
 
  private:
@@ -294,16 +304,19 @@ class FakeEndpoint : public eosmirror::Endpoint {
       } else if (spec.require_verification) {
         return Error{ErrorKind::Unsupported, "no checksum on " + path_};
       }
-      std::lock_guard lock(ep_.mutex_);
-      if (Status s = ep_.require_parent(path_, true); !s.ok()) return s.error();
-      auto it = ep_.nodes_.find(path_);
-      if (it != ep_.nodes_.end() && it->second.entry.type == eosmirror::EntryType::Directory)
-        return Error{ErrorKind::IsADirectory, "commit " + path_};
-      Entry e = ep_.base(path_, eosmirror::EntryType::File, 0600, ep_.tick());
-      e.size = content_.size();
-      ep_.apply(e, spec.metadata, spec.fields);
-      ep_.nodes_[path_] = Node{e, content_};
-      ep_.touch_parent(path_);
+      {
+        std::lock_guard lock(ep_.mutex_);
+        if (Status s = ep_.require_parent(path_, true); !s.ok()) return s.error();
+        auto it = ep_.nodes_.find(path_);
+        if (it != ep_.nodes_.end() && it->second.entry.type == eosmirror::EntryType::Directory)
+          return Error{ErrorKind::IsADirectory, "commit " + path_};
+        Entry e = ep_.base(path_, eosmirror::EntryType::File, 0600, ep_.tick());
+        e.size = content_.size();
+        ep_.apply(e, spec.metadata, spec.fields);
+        ep_.nodes_[path_] = Node{e, content_};
+        ep_.touch_parent(path_);
+      }
+      if (auto err = ep_.check("close", path_)) return *err;
       return eosmirror::CommitInfo{verified};
     }
     void abort() override {}
@@ -326,6 +339,19 @@ class FakeEndpoint : public eosmirror::Endpoint {
   }
 
   static Error not_found(const RelPath& path) { return Error{ErrorKind::NotFound, "no " + path}; }
+
+  // The checksum of the file in place, of the type of `caps.checksum`.
+  Result<eosmirror::Checksum> checksum_in_place(const RelPath& path) {
+    if (auto err = check("checksum", path)) return *err;
+    std::lock_guard lock(mutex_);
+    auto it = nodes_.find(path);
+    if (it == nodes_.end()) return not_found(path);
+    if (caps.checksum == eosmirror::ChecksumType::None) return eosmirror::Checksum{};
+    eosmirror::Hasher h(caps.checksum);
+    const std::string& c = it->second.content;
+    h.update({reinterpret_cast<const std::byte*>(c.data()), c.size()});
+    return h.finish();
+  }
 
   Entry base(const RelPath& path, eosmirror::EntryType type, eosmirror::ModeBits mode,
              eosmirror::Timespec mtime) const {

@@ -45,10 +45,6 @@ class EosEndpoint : public XrdEndpoint {
   // named by the last path component.
   Result<Entry> stat_abs(const std::string& abs_path);
 
-  // Sets the metadata of an absolute path through MGM commands.
-  Status set_metadata_abs(const std::string& abs_path, const Entry& metadata, MetaFields fields,
-                          bool is_symlink);
-
   // Runs an MGM fsctl command (mgm.pcmd=<command><args>) on an absolute path,
   // as a single query; it replies "<command>: retc=<errno>".
   Status fsctl(const std::string& abs_path, const std::string& command, const std::string& args);

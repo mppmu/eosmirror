@@ -466,6 +466,64 @@ TEST_CASE("fake: a corrupted transfer fails the checksum and is retried") {
   expect_mirrored(src, dst);
 }
 
+TEST_CASE("fake: an upload whose close failed is taken back where it is in place") {
+  FakeEndpoint src, dst;
+  dst.atomic_uploads = true;
+  populate(src);
+  dst.add_dir("d1");
+  dst.add_dir("d1/d2");
+  dst.add_file("d1/d2/f2", "older", 0640, {2500, 0});
+  // EOS can commit an upload whose close fails: the file is then in place
+  // with the source's size and mtime. Every attempt fails like that; d1/f1
+  // cannot be removed either.
+  const int attempts = fake_options().retry.attempts;
+  for (const char* path : {"f0", "d1/f1"})
+    dst.fail("close", path, Error{ErrorKind::IO, "close failed"}, attempts);
+  dst.fail("remove", "d1/f1", Error{ErrorKind::Permission, "locked"}, attempts);
+  // A close that fails before the commit leaves the previous file alone.
+  dst.fail("commit", "d1/d2/f2", Error{ErrorKind::IO, "connection lost"}, attempts);
+  Report r;
+  REQUIRE(run_sync(src, dst, fake_options(), r).ok());
+  CHECK(r.stats.failures == 3);
+  CHECK_FALSE(dst.get("f0"));
+  REQUIRE(dst.get("d1/f1"));
+  CHECK(dst.get("d1/f1")->entry.mtime == Timespec{0, 0});
+  CHECK(dst.get("d1/d2/f2")->content == "older");
+
+  // So the next run copies all of them.
+  Report r2;
+  REQUIRE(run_sync(src, dst, fake_options(), r2).ok());
+  CHECK(r2.stats.files_copied == 3);
+  CHECK(r2.stats.failures == 0);
+  expect_mirrored(src, dst);
+}
+
+TEST_CASE("fake: uploads that fail their verification are taken back") {
+  FakeEndpoint src, dst;
+  dst.atomic_uploads = true;
+  dst.caps.checksum = ChecksumType::Adler32;
+  populate(src);
+  const int attempts = fake_options().retry.attempts;
+  // The data arrived corrupted; the checksum cannot be asked for; and
+  // neither can be removed.
+  dst.hook = [&](std::string_view op, const RelPath& path) {
+    if (op == "close" && path == "f0")
+      dst.modify("f0", [](FakeEndpoint::Node& n) { n.content[0] = 'R'; });
+  };
+  dst.fail("checksum", "d1/f1", Error{ErrorKind::IO, "no answer"}, attempts);
+  for (const char* path : {"f0", "d1/f1"})
+    dst.fail("remove", path, Error{ErrorKind::Permission, "locked"}, attempts);
+  Report r;
+  REQUIRE(run_sync(src, dst, fake_options(), r).ok());
+  CHECK(r.stats.failures == 2);
+  for (const char* path : {"f0", "d1/f1"}) CHECK(dst.get(path)->entry.mtime == Timespec{0, 0});
+  dst.hook = nullptr;
+  Report r2;
+  REQUIRE(run_sync(src, dst, fake_options(), r2).ok());
+  CHECK(r2.stats.files_copied == 2);
+  expect_mirrored(src, dst);
+}
+
 TEST_CASE("fake: the backlog stays bounded and the walk completes with many entries") {
   FakeEndpoint src, dst;
   for (int d = 0; d < 20; ++d) {
