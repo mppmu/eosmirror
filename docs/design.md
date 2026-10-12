@@ -189,6 +189,11 @@ Modes:
   metadata fixed, deleted, vanished from the source, or gone from both sides,
   also with the directory above them) drop out of the failure table, paths
   that fail replace their row.
+- Files whose row is a transient error other than a change of the source
+  (I/O, timeout, checksum) are copied again by any run with the journal,
+  whatever their size and mtime: such a copy may have failed its
+  verification or close in place (EOS) and kept the source's size and mtime
+  when it could be neither removed nor given mtime 0.
 - `--resume` skips directories finalized by the previous run if that run
   was interrupted; after a completed run there is nothing to resume and
   everything is walked. Recorded failures are not retried by resuming.

@@ -223,8 +223,9 @@ struct Engine::Impl {
   std::mutex end_mutex;
   std::optional<Error> end_error;  // the run ends with this error, set at most once
 
-  // The names of the journal's failures by directory, to clear on success.
-  std::map<RelPath, std::unordered_set<std::string>> prior_failures;
+  // The journal's failures by directory and name, with their kinds: to clear
+  // on success, and to copy files again whose copy may have failed in place.
+  std::map<RelPath, std::unordered_map<std::string, ErrorKind>> prior_failures;
   std::atomic<uint64_t> deletions{0};
   std::atomic<bool> delete_cap_reported{false};
   std::atomic<uint64_t> failures_in_a_row{0};
@@ -345,14 +346,26 @@ struct Engine::Impl {
       return !name.empty() && !in_source.count(name) && !dst_extras.count(std::string(name));
     };
     if (rows != prior_failures.end())
-      for (const std::string& name : rows->second)
+      for (const auto& [name, kind] : rows->second)
         if (gone(name)) journal->clear_failure(join(dir, name));
     for (; below != prior_failures.end() && below->first.starts_with(prefix); ++below) {
       std::string_view rest = std::string_view(below->first).substr(prefix.size());
       if (!gone(rest.substr(0, rest.find('/')))) continue;
-      for (const std::string& name : below->second)
+      for (const auto& [name, kind] : below->second)
         journal->clear_failure(join(below->first, name));
     }
+  }
+
+  // Whether the journal records a failed copy of the file that may have left
+  // it in place unverified, with the source's size and mtime: a transient
+  // error other than a change of the source, as a failed verification or
+  // close of an EOS upload whose file could not be taken back ends with.
+  bool copy_in_doubt(const RelPath& path) const {
+    auto rows = prior_failures.find(parent_path(path));
+    if (rows == prior_failures.end()) return false;
+    auto row = rows->second.find(name_of(path));
+    return row != rows->second.end() && is_transient(row->second) &&
+           row->second != ErrorKind::Changed;
   }
 
   // The metadata fields of the target entry that differ from the source.
@@ -661,7 +674,9 @@ struct Engine::Impl {
       if (!resolve_conflict(node, path, *existing, EntryType::File)) return;
       existing = nullptr;
     }
-    if (existing && existing->size == e.size &&
+    bool in_doubt = existing && copy_in_doubt(path);
+    if (in_doubt) log::debug("copying ", path, " again: its last copy failed");
+    if (existing && !in_doubt && existing->size == e.size &&
         (!use_mtimes || same_mtime(existing->mtime, e.mtime))) {
       stats.files_unchanged.fetch_add(1);
       MetaFields fields = differences(e, *existing);
@@ -983,7 +998,7 @@ struct Engine::Impl {
     adapt_to_capabilities();
     if (journal) {
       for (const Failure& f : journal->failures())
-        prior_failures[parent_path(f.path)].insert(name_of(f.path));
+        prior_failures[parent_path(f.path)][name_of(f.path)] = f.error.kind;
     }
     {
       std::lock_guard lock(done_mutex);

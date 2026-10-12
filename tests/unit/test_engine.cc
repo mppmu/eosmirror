@@ -524,6 +524,47 @@ TEST_CASE("fake: uploads that fail their verification are taken back") {
   expect_mirrored(src, dst);
 }
 
+TEST_CASE("fake: files whose last copy failed are copied again, whatever their size and mtime") {
+  TempDir tmp;
+  auto journal = Journal::open(tmp.sub("j.sqlite"), "fake", "fake");
+  REQUIRE(journal.ok());
+  Journal& j = *journal.value();
+  FakeEndpoint src, dst;
+  populate(src);
+  Report mirror;
+  REQUIRE(run_sync(src, dst, fake_options(), mirror).ok());
+  // Copies in place with the source's size and mtime whose verification or
+  // close failed, and a file whose owner could not be set.
+  dst.modify("f0", [](FakeEndpoint::Node& n) { n.content = "root fil3"; });
+  dst.modify("d1/d2/f2", [](FakeEndpoint::Node& n) { n.content = "dEEp"; });
+  REQUIRE(j.begin_run(false).ok());
+  j.record_failure({"f0", EntryType::File, Error{ErrorKind::Checksum, "mismatch"}});
+  j.record_failure({"d1/d2/f2", EntryType::File, Error{ErrorKind::IO, "close failed"}});
+  j.record_failure({"d1/f1", EntryType::File, Error{ErrorKind::Permission, "chown"}});
+  REQUIRE(j.end_run(true).ok());
+
+  SUBCASE("retrying the failures") {
+    REQUIRE(j.begin_run(false).ok());
+    Report r;
+    Cancellation cancel;
+    Engine engine(src, dst, fake_options(), r, &j, cancel);
+    REQUIRE(engine.run(j.failures()).ok());
+    REQUIRE(j.end_run(true).ok());
+    CHECK(r.stats.files_copied == 2);
+    CHECK(r.stats.files_unchanged == 1);
+  }
+  SUBCASE("a plain run") {
+    REQUIRE(j.begin_run(false).ok());
+    Report r;
+    REQUIRE(run_sync(src, dst, fake_options(), r, &j).ok());
+    REQUIRE(j.end_run(true).ok());
+    CHECK(r.stats.files_copied == 2);
+    CHECK(r.stats.files_unchanged == 1);
+  }
+  CHECK(j.failures().empty());
+  expect_mirrored(src, dst);
+}
+
 TEST_CASE("fake: the backlog stays bounded and the walk completes with many entries") {
   FakeEndpoint src, dst;
   for (int d = 0; d < 20; ++d) {
