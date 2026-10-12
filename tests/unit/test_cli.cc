@@ -28,6 +28,10 @@ TEST_CASE("sizes are parsed with binary suffixes") {
   CHECK_FALSE(parse_size("").ok());
   CHECK_FALSE(parse_size("8MB").ok());
   CHECK_FALSE(parse_size("x").ok());
+  // Nothing wraps around.
+  for (const char* text : {"-1", "+1", " 1", "18446744073709551616", "16777216T"})
+    CHECK_FALSE(parse_size(text).ok());
+  CHECK(parse_size("16777215T").value() == 16777215ull << 40);
 }
 
 TEST_CASE("the sync command line maps onto the options") {
@@ -133,6 +137,22 @@ TEST_CASE("usage errors are rejected") {
   CHECK_FALSE(parse({"sync", "--max-delete", "-1", "a", "b"}).ok());
   CHECK_FALSE(parse({"sync", "--delete-emptied", "a", "b"}).ok());
   CHECK_FALSE(parse({"sync", "--max-consecutive-failures", "x", "a", "b"}).ok());
+  // Numbers out of the range of where they go, rather than cut to fit.
+  for (std::vector<std::string> args :
+       {std::vector<std::string>{"--shard", "4294967296/2"}, {"--shard", "1/4294967298"},
+        {"--max-backlog", "-1"}, {"--checkers", "4294967297"}, {"--transfers", "-4294967295"},
+        {"--retries", "2147483647"}, {"--retry-delay", "-1"}, {"--progress", "-5"},
+        {"--write-window", "4294967297"}, {"--max-delete", "99999999999999999999"},
+        {"--buffer-size", "-1"}}) {
+    std::string given = args[0] + " " + args[1];
+    INFO(given);
+    args.insert(args.begin(), "sync");
+    args.push_back("a");
+    args.push_back("b");
+    CHECK_FALSE(parse(args).ok());
+  }
+  CHECK(parse({"sync", "--retries", "2147483646", "a", "b"}).value().sync.retry.attempts ==
+        2147483647);
   CHECK_FALSE(parse({"failures"}).ok());
 
   CHECK(parse({"--version"}).value().command == Command::Version);

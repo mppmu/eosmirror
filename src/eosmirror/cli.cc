@@ -2,8 +2,11 @@
 #include "eosmirror/cli.hh"
 
 #include <algorithm>
+#include <cctype>
+#include <cerrno>
 #include <cstdlib>
 #include <functional>
+#include <limits>
 #include <map>
 #include <optional>
 
@@ -15,17 +18,34 @@ Error usage_error(const std::string& message) { return Error{ErrorKind::Other, m
 
 Result<long long> parse_integer(const std::string& text, const std::string& option) {
   char* end = nullptr;
+  errno = 0;
   long long value = std::strtoll(text.c_str(), &end, 10);
-  if (text.empty() || *end != '\0') return usage_error("invalid number for " + option + ": " + text);
+  if (text.empty() || *end != '\0' || errno == ERANGE)
+    return usage_error("invalid number for " + option + ": " + text);
   return value;
 }
+
+// An integer within [min, max], so that it fits where it goes.
+Result<long long> parse_integer(const std::string& text, const std::string& option, long long min,
+                                long long max) {
+  auto n = parse_integer(text, option);
+  if (n.ok() && (n.value() < min || n.value() > max))
+    return usage_error(option + " must be between " + std::to_string(min) + " and " +
+                       std::to_string(max));
+  return n;
+}
+
+constexpr long long kMaxInt = std::numeric_limits<int>::max();
 
 }  // namespace
 
 Result<uint64_t> parse_size(const std::string& text) {
   char* end = nullptr;
+  errno = 0;
   unsigned long long value = std::strtoull(text.c_str(), &end, 10);
-  if (text.empty() || end == text.c_str()) return usage_error("invalid size: " + text);
+  // strtoull takes a sign, and wraps a minus around.
+  if (text.empty() || !std::isdigit(static_cast<unsigned char>(text[0])) || errno == ERANGE)
+    return usage_error("invalid size: " + text);
   uint64_t factor = 1;
   std::string suffix(end);
   if (suffix == "k" || suffix == "K")
@@ -37,6 +57,8 @@ Result<uint64_t> parse_size(const std::string& text) {
   else if (suffix == "T")
     factor = 1ull << 40;
   else if (!suffix.empty())
+    return usage_error("invalid size: " + text);
+  if (value > std::numeric_limits<uint64_t>::max() / factor)
     return usage_error("invalid size: " + text);
   return static_cast<uint64_t>(value) * factor;
 }
@@ -185,9 +207,10 @@ Result<CliOptions> parse_command_line(int argc, char** argv) {
                       }};
   };
   auto value = [&](const std::string& name, Handler f) { handlers[name] = {true, f}; };
-  auto integer = [&](const std::string& name, std::function<void(long long)> f) {
-    value(name, [name, f](const std::string& v) -> Status {
-      auto n = parse_integer(v, name);
+  auto integer = [&](const std::string& name, long long min, long long max,
+                     std::function<void(long long)> f) {
+    value(name, [name, min, max, f](const std::string& v) -> Status {
+      auto n = parse_integer(v, name, min, max);
       if (!n.ok()) return n.error();
       f(n.value());
       return Status();
@@ -226,29 +249,31 @@ Result<CliOptions> parse_command_line(int argc, char** argv) {
     sync.link_rewrites.emplace_back(v.substr(0, eq), v.substr(eq + 1));
     return Status();
   });
-  integer("--checkers", [&](long long n) { sync.checkers = static_cast<int>(n); });
+  integer("--checkers", 1, kMaxInt, [&](long long n) { sync.checkers = static_cast<int>(n); });
   // Given on the command line: --transfers N, or --min-transfers and
   // --max-transfers.
   std::optional<int> transfers, min_transfers, max_transfers;
-  integer("--transfers", [&](long long n) { transfers = static_cast<int>(n); });
-  integer("--min-transfers", [&](long long n) { min_transfers = static_cast<int>(n); });
-  integer("--max-transfers", [&](long long n) { max_transfers = static_cast<int>(n); });
-  integer("--write-window",
+  integer("--transfers", 1, kMaxInt, [&](long long n) { transfers = static_cast<int>(n); });
+  integer("--min-transfers", 1, kMaxInt, [&](long long n) { min_transfers = static_cast<int>(n); });
+  integer("--max-transfers", 1, kMaxInt, [&](long long n) { max_transfers = static_cast<int>(n); });
+  integer("--write-window", 1, kMaxInt,
           [&](long long n) { opts.endpoints.xrootd.write_window = static_cast<int>(n); });
-  integer("--read-window",
+  integer("--read-window", 1, kMaxInt,
           [&](long long n) { opts.endpoints.xrootd.read_window = static_cast<int>(n); });
   flag("--shared-connection", [&] { opts.endpoints.xrootd.shared_connection = true; });
-  integer("--max-backlog", [&](long long n) { sync.max_backlog = static_cast<size_t>(n); });
+  integer("--max-backlog", 0, std::numeric_limits<long long>::max(),
+          [&](long long n) { sync.max_backlog = static_cast<size_t>(n); });
   value("--buffer-size", [&](const std::string& v) -> Status {
     auto n = parse_size(v);
     if (!n.ok()) return n.error();
     sync.buffer_size = static_cast<size_t>(n.value());
     return Status();
   });
-  integer("--retries", [&](long long n) { retries = static_cast<int>(n); });
-  integer("--retry-delay", [&](long long n) {
-    sync.retry.initial_delay = std::chrono::seconds(n);
-  });
+  // The attempts are one more.
+  integer("--retries", 0, kMaxInt - 1, [&](long long n) { retries = static_cast<int>(n); });
+  // In milliseconds.
+  integer("--retry-delay", 0, std::numeric_limits<long long>::max() / 1000,
+          [&](long long n) { sync.retry.initial_delay = std::chrono::seconds(n); });
   value("--mgm", [&](const std::string& v) -> Status {
     opts.endpoints.mgm = v;
     return Status();
@@ -262,15 +287,15 @@ Result<CliOptions> parse_command_line(int argc, char** argv) {
   value("--shard", [&](const std::string& v) -> Status {
     auto slash = v.find('/');
     if (slash == std::string::npos) return usage_error("--shard expects K/N");
-    auto k = parse_integer(v.substr(0, slash), "--shard");
-    auto n = parse_integer(v.substr(slash + 1), "--shard");
+    auto k = parse_integer(v.substr(0, slash), "--shard", 0, kMaxInt);
+    auto n = parse_integer(v.substr(slash + 1), "--shard", 1, kMaxInt);
     if (!k.ok()) return k.error();
     if (!n.ok()) return n.error();
     sync.shard_index = static_cast<int>(k.value());
     sync.shard_count = static_cast<int>(n.value());
     return Status();
   });
-  integer("--progress", [&](long long n) { opts.progress_seconds = static_cast<int>(n); });
+  integer("--progress", 0, kMaxInt, [&](long long n) { opts.progress_seconds = static_cast<int>(n); });
   flag("-v", [&] { opts.log_level = LogLevel::Debug; });
   flag("--verbose", [&] { opts.log_level = LogLevel::Debug; });
   flag("-q", [&] { opts.log_level = LogLevel::Warn; });
@@ -318,15 +343,10 @@ Result<CliOptions> parse_command_line(int argc, char** argv) {
   if (positional.size() != 2) return usage_error("sync needs exactly SOURCE and TARGET");
   opts.source = positional[0];
   opts.target = positional[1];
-  if (retries < 0) return usage_error("--retries must not be negative");
   sync.retry.attempts = retries + 1;
-  if (sync.checkers < 1) return usage_error("--checkers must be at least 1");
   if (transfers && (min_transfers || max_transfers))
     return usage_error("--transfers excludes --min-transfers and --max-transfers");
   if (transfers) min_transfers = max_transfers = transfers;
-  for (const auto& n : {min_transfers, max_transfers})
-    if (n && *n < 1)
-      return usage_error("--transfers, --min-transfers and --max-transfers must be at least 1");
   if (min_transfers && max_transfers && *min_transfers > *max_transfers)
     return usage_error("--min-transfers must not exceed --max-transfers");
   // One of them given alone moves the other's default where needed.
@@ -335,8 +355,6 @@ Result<CliOptions> parse_command_line(int argc, char** argv) {
   if (!min_transfers) sync.min_transfers = std::min(sync.min_transfers, sync.max_transfers);
   if (!max_transfers) sync.max_transfers = std::max(sync.max_transfers, sync.min_transfers);
   if (sync.buffer_size > (1u << 30)) return usage_error("--buffer-size must be at most 1G");
-  if (opts.endpoints.xrootd.write_window < 1 || opts.endpoints.xrootd.read_window < 1)
-    return usage_error("--write-window and --read-window must be at least 1");
   if (sync.shard_count < 1 || sync.shard_index < 0 || sync.shard_index >= sync.shard_count)
     return usage_error("--shard K/N needs 0 <= K < N");
   if (sync.delete_emptied && !sync.delete_extra)
