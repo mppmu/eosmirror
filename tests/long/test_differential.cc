@@ -323,7 +323,7 @@ std::map<std::string, Entry> listing(Endpoint& ep, const RelPath& dir) {
   REQUIRE(listed.value().skipped == 0);
   std::map<std::string, Entry> result;
   for (Entry& e : listed.value().entries)
-    if (!ep.is_temporary(e.name)) result.emplace(e.name, std::move(e));
+    if (!ep.is_temporary(e)) result.emplace(e.name, std::move(e));
   return result;
 }
 

@@ -119,7 +119,7 @@ TEST_CASE("xrootd endpoint: stat, list, mkdir, write, checksum, rename, remove")
   auto during = ep.list("d");
   REQUIRE(during.ok());
   REQUIRE(during.value().entries.size() == 1);
-  CHECK(ep.is_temporary(during.value().entries[0].name));
+  CHECK(ep.is_temporary(during.value().entries[0]));
   REQUIRE(writer.value()->commit(spec).ok());
 
   auto listed = ep.list("d");

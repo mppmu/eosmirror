@@ -34,7 +34,7 @@ class PosixEndpoint : public Endpoint {
   std::string describe() const override { return root_; }
   Location location() const override { return {"", root_}; }
   Capabilities capabilities() const override;
-  bool is_temporary(std::string_view name) const override;
+  bool is_temporary(const Entry& entry) const override;
   // Warns about EOS FUSE mounts.
   std::string target_warning() const override;
   // Probes the mtime resolution, which capabilities() reports as full

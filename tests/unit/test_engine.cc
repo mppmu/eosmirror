@@ -1267,6 +1267,30 @@ TEST_CASE("fake: temporaries of the source are not entries of the tree") {
   CHECK_FALSE(dst.get("d1/.tmp-other"));
 }
 
+TEST_CASE("fake: directories and symlinks named like temporaries are entries of the tree") {
+  FakeEndpoint src, dst;
+  populate(src);
+  src.add_dir(".tmp-dir");
+  src.add_file(".tmp-dir/f", "user data");
+  src.add_symlink(".tmp-link", "f0");
+  Report r;
+  REQUIRE(run_sync(src, dst, fake_options(), r).ok());
+  CHECK(r.stats.failures == 0);
+  expect_mirrored(src, dst);
+
+  // On the target, they count for a directory that the source emptied.
+  src.add_dir("emptied");
+  dst.add_dir("emptied");
+  dst.add_dir("emptied/.tmp-old", 0755, {1000, 0});
+  SyncOptions o = fake_options();
+  o.delete_extra = true;
+  Report r2;
+  REQUIRE(run_sync(src, dst, o, r2).ok());
+  CHECK(r2.stats.emptied_dirs == 1);
+  CHECK(r2.stats.deleted == 0);
+  CHECK(dst.get("emptied/.tmp-old"));
+}
+
 TEST_CASE("fake: read-only directories get their mtime before their mode") {
   FakeEndpoint src, dst;
   dst.utimes_needs_write = true;

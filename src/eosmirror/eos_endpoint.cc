@@ -563,8 +563,9 @@ Result<EosEndpoint::ProcResult> EosEndpoint::run_proc(const std::string& query, 
   return parse_proc_reply(response);
 }
 
-bool EosEndpoint::is_temporary(std::string_view name) const {
-  return XrdEndpoint::is_temporary(name) || name.rfind(".sys.a#.", 0) == 0;
+bool EosEndpoint::is_temporary(const Entry& entry) const {
+  return XrdEndpoint::is_temporary(entry) ||
+         (entry.type == EntryType::File && entry.name.starts_with(".sys.a#."));
 }
 
 std::string EosEndpoint::target_note() const {

@@ -118,8 +118,13 @@ TEST_CASE("posix writer commits atomically with metadata") {
   auto during = ep.list("");
   REQUIRE(during.ok());
   REQUIRE(during.value().entries.size() == 1);
-  CHECK(ep.is_temporary(during.value().entries[0].name));
-  CHECK_FALSE(ep.is_temporary("out.bin"));
+  CHECK(ep.is_temporary(during.value().entries[0]));
+  Entry named_so = during.value().entries[0];
+  named_so.type = EntryType::Directory;
+  CHECK_FALSE(ep.is_temporary(named_so));
+  named_so.type = EntryType::File;
+  named_so.name = "out.bin";
+  CHECK_FALSE(ep.is_temporary(named_so));
 
   REQUIRE(writer.value()->write(6, bytes("world")).ok());
   hasher.update(bytes("world"));

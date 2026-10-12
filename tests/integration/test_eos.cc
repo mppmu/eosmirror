@@ -421,7 +421,7 @@ TEST_CASE("FS to EOS: --delete leaves another writer's upload in progress alone"
   REQUIRE(listed.ok());
   REQUIRE(listed.value().entries.size() == 1);
   const Entry& hidden = listed.value().entries[0];
-  CHECK(ep.is_temporary(hidden.name));
+  CHECK(ep.is_temporary(hidden));
   CHECK(hidden.mtime.sec == 1500000000);
   CHECK(hidden.ctime.sec > now - 600);
 

@@ -538,7 +538,7 @@ struct Engine::Impl {
     for (Entry& e : src_entries) {
       if (cancel.requested()) break;
       if (node->only && !node->only->count(e.name)) continue;
-      if (source.is_temporary(e.name)) {
+      if (source.is_temporary(e)) {
         log::debug("skipping the source's temporary ", join(node->path, e.name));
         continue;
       }
@@ -569,7 +569,7 @@ struct Engine::Impl {
       if (node->only)
         std::erase_if(dst_entries, [&](const auto& e) { return !node->only->count(e.first); });
       bool removable = std::any_of(dst_entries.begin(), dst_entries.end(), [&](const auto& e) {
-        return !target.is_temporary(e.first) || stale(e.second);
+        return !target.is_temporary(e.second) || stale(e.second);
       });
       handle_extras(node, dst_entries,
                     options.delete_extra && removable && may_delete(node, emptied, skipped));
@@ -609,12 +609,12 @@ struct Engine::Impl {
 
   bool empty_source(const std::vector<Entry>& entries) const {
     return std::all_of(entries.begin(), entries.end(),
-                       [&](const Entry& e) { return source.is_temporary(e.name); });
+                       [&](const Entry& e) { return source.is_temporary(e); });
   }
 
   bool empty_target(const std::unordered_map<std::string, Entry>& entries) const {
     return std::all_of(entries.begin(), entries.end(),
-                       [&](const auto& e) { return target.is_temporary(e.first); });
+                       [&](const auto& e) { return target.is_temporary(e.second); });
   }
 
   // Reports a directory that could not be listed or created. For the top
@@ -802,7 +802,7 @@ struct Engine::Impl {
     for (const auto& [name, e] : extras) {
       if (cancel.requested()) return;
       RelPath path = join(node->path, name);
-      if (target.is_temporary(name)) {
+      if (target.is_temporary(e)) {
         if (!stale(e)) continue;
         if (!deleting) {
           stats.stale_temps.fetch_add(1);

@@ -45,7 +45,10 @@ mtime is always the source mtime as observed *before* reading the file (by a
 stat, or for EOS sources from the listing, see below). If the source changed
 while it was read (size or mtime differ afterwards), the copy is reported as
 "changed" and retried; whatever was renamed into place carries the old mtime,
-so a later run copies it again. Temporaries on the target that neither
+so a later run copies it again. Temporaries are regular files (and on
+POSIX targets symlinks, which are made under a temporary name too): a
+directory with the name of one is an entry like any other. Temporaries on
+the target that neither
 their mtime nor their ctime shows changed for an hour are taken for
 leftovers of interrupted runs and removed with `--delete`; a copy sets the
 mtime of its temporary before the rename, and EOS gives an atomic upload

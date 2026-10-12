@@ -140,9 +140,12 @@ class Endpoint {
   virtual Location location() const = 0;
   virtual Capabilities capabilities() const = 0;
 
-  // Whether an entry name is one of the endpoint's own temporary files, so
-  // that listings of a target never report them as foreign.
-  virtual bool is_temporary(std::string_view /*name*/) const { return false; }
+  // Whether an entry is one of the endpoint's own temporaries, so that
+  // listings of a target never report them as foreign. Temporaries are
+  // regular files, and symlinks where the endpoint makes symlinks through
+  // temporary names: a directory with the name of one is an entry like any
+  // other.
+  virtual bool is_temporary(const Entry& /*entry*/) const { return false; }
 
   // A warning, and a note, about writing to this endpoint, shown when a run
   // starts with it as target; empty if there is none.

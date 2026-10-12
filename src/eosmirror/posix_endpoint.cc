@@ -273,8 +273,10 @@ void PosixEndpoint::probe_target() {
   });
 }
 
-bool PosixEndpoint::is_temporary(std::string_view name) const {
-  return is_temporary_name(name);
+// Files are written, and symlinks made, under temporary names.
+bool PosixEndpoint::is_temporary(const Entry& entry) const {
+  return (entry.type == EntryType::File || entry.type == EntryType::Symlink) &&
+         is_temporary_name(entry.name);
 }
 
 std::optional<std::string> mount_type(std::string_view mountinfo, std::string_view path) {

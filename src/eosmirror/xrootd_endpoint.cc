@@ -489,8 +489,8 @@ Location XrdEndpoint::location() const {
   return {host_, path};
 }
 
-bool XrdEndpoint::is_temporary(std::string_view name) const {
-  return is_temporary_name(name);
+bool XrdEndpoint::is_temporary(const Entry& entry) const {
+  return entry.type == EntryType::File && is_temporary_name(entry.name);
 }
 
 std::string XrdEndpoint::absolute(const RelPath& path) const {

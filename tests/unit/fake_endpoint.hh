@@ -152,7 +152,9 @@ class FakeEndpoint : public eosmirror::Endpoint {
   std::string describe() const override { return name_; }
   eosmirror::Location location() const override { return {name_, "/"}; }
   eosmirror::Capabilities capabilities() const override { return caps; }
-  bool is_temporary(std::string_view name) const override { return name.rfind(".tmp-", 0) == 0; }
+  bool is_temporary(const Entry& e) const override {
+    return e.type == eosmirror::EntryType::File && e.name.starts_with(".tmp-");
+  }
   std::string target_warning() const override { return warning; }
   std::string target_note() const override { return note; }
 

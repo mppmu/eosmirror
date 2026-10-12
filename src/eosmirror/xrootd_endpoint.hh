@@ -81,7 +81,7 @@ class XrdEndpoint : public Endpoint {
   // The root normalized; EOS resolves it on creation.
   Location location() const override;
   Capabilities capabilities() const override { return caps_; }
-  bool is_temporary(std::string_view name) const override;
+  bool is_temporary(const Entry& entry) const override;
 
   Result<Entry> stat(const RelPath& path) override;
   Result<Listing> list(const RelPath& dir) override;
