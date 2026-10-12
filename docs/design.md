@@ -284,7 +284,16 @@ permission bits of modes, and compute a checksum only when configured
 (`query config chksum` tells which). Their listings and stats follow
 symlinks. The endpoint reports these as capabilities; the engine then
 compares files by size only, skips symlinks (counted), applies no mtimes,
-ignores owners of such a source, and detects directory cycles. Writes go to
+ignores owners of such a source, and detects directory cycles. A server
+ends a listing with stat information at the first entry that it cannot
+stat for another reason than its absence, such as a symlink loop, and
+reports success (`XrdOssApi.cc`, `XrdOfs.cc` and `XrdXrootdXeq.cc`,
+do_DirStat, take the error for the end). Each directory is therefore also
+listed by name, which stats nothing, in a request sent alongside; names
+that the listing with stat information lacks are stated one by one, and
+left out (counted) where that fails. Both listings send one name per line,
+unescaped, so a name with line breaks can add lines: names listed more
+than once are left out (counted), as in EOS listings. Writes go to
 a temporary name `.<name>.eosmirror-<12 hex digits>` with up to
 `--write-window` writes in flight per file, the stored checksum is verified
 by a checksum query (where nothing is compared, a stat checks the size),
@@ -536,10 +545,11 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
   Those changes fail, and the next run makes them.
 - POSIX mtime resolutions coarser than one second (FAT) are treated as one
   second.
-- EOS's find output prints names raw, one entry per line. A name with line
-  breaks can therefore add lines that look like entries. Lines that cannot be
-  parsed and names listed twice are skipped, but a forged line for a name
-  that is not otherwise in the directory cannot be told from a real one. In
+- EOS's find output and plain XRootD listings print names raw, one entry
+  per line. A name with line breaks can therefore add lines that look like
+  entries. Lines that cannot be parsed and names listed twice are skipped,
+  but a forged line for a name that is not otherwise in the directory cannot
+  be told from a real one. In
   a listing that find cut short, a forged line can also stand in for an
   existing entry whose own line was cut off.
 - Directories that find leaves out for lack of permission are recognized by

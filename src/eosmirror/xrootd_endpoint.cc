@@ -17,9 +17,11 @@
 #include <cstdlib>
 #include <filesystem>
 #include <functional>
+#include <future>
 #include <mutex>
 #include <optional>
 #include <sstream>
+#include <unordered_map>
 #include <vector>
 
 #include "eosmirror/log.hh"
@@ -520,35 +522,84 @@ Result<Entry> XrdEndpoint::stat_abs(const std::string& abs) {
   return entry_from_stat(name_of(abs), *info);
 }
 
+// A server ends a listing with stat information at the first entry it cannot
+// stat for another reason than ENOENT, such as a symlink loop, and reports
+// success (XrdOssDir::Readdir, XrdOfsDirectory::nextEntry and
+// XrdXrootdProtocol::do_DirStat take the error for the end). A listing of
+// the names alone stats nothing, so it is taken alongside, and its names
+// that the other lacks are stated one by one. Names come one per line,
+// unescaped: a name with line breaks can forge lines, so names listed more
+// than once are left out.
 Result<Listing> XrdEndpoint::list(const RelPath& dir) {
   std::string abs = absolute(dir);
   auto request = request_path(abs);
   if (!request.ok()) return request.error();
+  using Names = std::pair<XrdCl::XRootDStatus, std::unique_ptr<XrdCl::DirectoryList>>;
+  auto names_listed = std::make_shared<std::promise<Names>>();
+  auto names_future = names_listed->get_future();
+  auto* handler = new Callback(
+      [names_listed](const XrdCl::XRootDStatus& st, XrdCl::AnyObject* response) {
+        XrdCl::DirectoryList* names = nullptr;
+        if (response) {
+          response->Get(names);
+          response->Set(static_cast<int*>(nullptr));  // takes it over
+        }
+        names_listed->set_value({st, std::unique_ptr<XrdCl::DirectoryList>(names)});
+      });
+  XrdCl::XRootDStatus st = fs().DirList(request.value(), XrdCl::DirListFlags::None, handler);
+  if (!st.IsOK()) {
+    delete handler;  // XrdCl calls it only for requests it accepted
+    return xrd_error(st, "list " + url_of(abs));
+  }
   XrdCl::DirectoryList* listing = nullptr;
-  XrdCl::XRootDStatus st = fs().DirList(request.value(), XrdCl::DirListFlags::Stat, listing);
-  if (!st.IsOK()) return xrd_error(st, "list " + url_of(abs));
+  st = fs().DirList(request.value(), XrdCl::DirListFlags::Stat, listing);
   std::unique_ptr<XrdCl::DirectoryList> owned(listing);
+  Names names = names_future.get();
+  if (!st.IsOK()) return xrd_error(st, "list " + url_of(abs));
+  if (!names.first.IsOK() || !names.second) return xrd_error(names.first, "list " + url_of(abs));
+
+  std::unordered_map<std::string, int> with_stat, named;
+  for (auto it = listing->Begin(); it != listing->End(); ++it) ++with_stat[(*it)->GetName()];
+  for (auto it = names.second->Begin(); it != names.second->End(); ++it) ++named[(*it)->GetName()];
+  auto twice = [](const std::unordered_map<std::string, int>& counts, const std::string& name) {
+    auto it = counts.find(name);
+    return it != counts.end() && it->second > 1;
+  };
   Listing result;
   result.entries.reserve(listing->GetSize());
+  size_t forged = 0;
+  // An entry stated on its own: one that is gone is no entry, one that
+  // cannot be stated is left out.
+  auto stat_entry = [&](const std::string& name) {
+    auto e = stat(join(dir, name));
+    if (e.ok()) {
+      result.entries.push_back(std::move(e).value());
+    } else if (e.error().kind != ErrorKind::NotFound) {
+      log::warn("skipping ", e.error().describe());
+      ++result.skipped;
+    }
+  };
   for (auto it = listing->Begin(); it != listing->End(); ++it) {
     XrdCl::DirectoryList::ListEntry* item = *it;
-    if (!item->GetStatInfo()) {
-      // Servers without stat support in listings: one stat per entry.
-      auto e = stat(join(dir, item->GetName()));
-      if (!e.ok()) {
-        if (e.error().kind == ErrorKind::NotFound) continue;
-        if (e.error().kind == ErrorKind::Unsupported) {
-          log::warn("skipping ", e.error().describe());
-          ++result.skipped;
-          continue;
-        }
-        return e.error();
-      }
-      result.entries.push_back(std::move(e).value());
-      continue;
+    if (twice(with_stat, item->GetName()) || twice(named, item->GetName())) {
+      ++forged;
+    } else if (!item->GetStatInfo()) {
+      stat_entry(item->GetName());  // the server lists no stat information
+    } else {
+      result.entries.push_back(entry_from_stat(item->GetName(), *item->GetStatInfo()));
     }
-    result.entries.push_back(entry_from_stat(item->GetName(), *item->GetStatInfo()));
   }
+  for (const auto& [name, count] : named) {
+    if (with_stat.count(name)) continue;
+    if (count > 1)
+      forged += static_cast<size_t>(count);
+    else
+      stat_entry(name);
+  }
+  if (forged > 0)
+    log::warn("skipping ", forged, " entries of ", url_of(abs),
+              " whose names are listed more than once");
+  result.skipped += forged;
   return result;
 }
 

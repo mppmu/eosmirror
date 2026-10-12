@@ -331,6 +331,23 @@ TEST_CASE("xrootd endpoint: detection, and servers that cannot be asked") {
   CHECK(is_transient(unreachable.error().kind));
 }
 
+TEST_CASE("xrootd endpoint: listings that end early or have forged lines") {
+  if (!base_url()) return;
+  auto ep = XrdEndpoint::create(std::string(base_url()) + "/fixtures");
+  REQUIRE(ep.ok());
+  // Symlinks to themselves, which the server cannot stat: its listing with
+  // stat information ends at the first of them.
+  auto ended = ep.value()->list("eloop");
+  REQUIRE(ended.ok());
+  CHECK(ended.value().entries.size() == 20);
+  CHECK(ended.value().skipped == 3);
+  // A name with line breaks that adds a line for f0.
+  auto forged = ep.value()->list("forged");
+  REQUIRE(forged.ok());
+  for (const Entry& e : forged.value().entries) CHECK(e.name != "f0");
+  CHECK(forged.value().skipped == 2);
+}
+
 TEST_CASE("xrootd to FS: owners and symlink loops of a server that follows symlinks") {
   if (!base_url()) return;
   // xrootd-server.sh creates loop/sub/up -> .. and loop/self -> ., which the
