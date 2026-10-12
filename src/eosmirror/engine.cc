@@ -274,6 +274,14 @@ struct Engine::Impl {
     if (error.kind == ErrorKind::Cancelled) return;
     Failure f{path, type, error};
     if (journal && !options.dry_run) journal->record_failure(f);
+    // Each deletion that the cap withholds is recorded, for --retry-failed,
+    // but told once, and none is a failure in a row.
+    if (error.kind == ErrorKind::Withheld) {
+      bool first = !delete_cap_reported.exchange(true);
+      if (first) log::warn(error.describe(), "; the deletions withheld after it are failures too, not logged");
+      report.add_failure(std::move(f), false);
+      return;
+    }
     report.add_failure(std::move(f));
     in_a_row(path, type, error.describe());
   }
@@ -883,9 +891,7 @@ struct Engine::Impl {
       ensure_writable(node);
       node->touched = true;
       Status removed = delete_tree(path, e);
-      if (!removed.ok() && (!removed.error().message.starts_with("deletion cap") ||
-                            !delete_cap_reported.exchange(true)))
-        fail(path, e.type, removed.error());
+      if (!removed.ok()) fail(path, e.type, removed.error());
     }
   }
 
@@ -918,8 +924,8 @@ struct Engine::Impl {
     }
     if (deletions.fetch_add(1) >= options.max_delete) {
       deletions.fetch_sub(1);
-      return Error{ErrorKind::Other, "deletion cap of " + std::to_string(options.max_delete) +
-                                         " reached, not deleting " + path};
+      return Error{ErrorKind::Withheld, "deletion cap of " + std::to_string(options.max_delete) +
+                                            " reached (--max-delete), not deleting " + path};
     }
     log::info(options.dry_run ? "would delete " : "deleting ", to_string(e.type), " ", path);
     if (!options.dry_run) {

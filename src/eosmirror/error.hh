@@ -25,6 +25,7 @@ enum class ErrorKind : uint8_t {
   Cancelled,  // the run is being stopped
   Other,
   NoSpace,  // no space left or quota exceeded
+  Withheld,  // a deletion beyond the cap of a run (--max-delete)
 };
 
 std::string_view to_string(ErrorKind kind);

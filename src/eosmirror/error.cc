@@ -20,6 +20,7 @@ std::string_view to_string(ErrorKind kind) {
     case ErrorKind::Changed: return "changed during copy";
     case ErrorKind::Checksum: return "checksum mismatch";
     case ErrorKind::NoSpace: return "no space";
+    case ErrorKind::Withheld: return "deletion withheld";
     case ErrorKind::Cancelled: return "cancelled";
     case ErrorKind::Other: return "error";
   }

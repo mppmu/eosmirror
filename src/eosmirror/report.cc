@@ -22,10 +22,11 @@ void Report::init_slots(size_t transfers, size_t backlog) {
   backlog_capacity = backlog;
 }
 
-void Report::add_failure(Failure failure) {
+void Report::add_failure(Failure failure, bool logged) {
   stats.failures.fetch_add(1, std::memory_order_relaxed);
-  log::warn(to_string(failure.type), " ", failure.path.empty() ? "." : failure.path, ": ",
-            failure.error.describe());
+  if (logged)
+    log::warn(to_string(failure.type), " ", failure.path.empty() ? "." : failure.path, ": ",
+              failure.error.describe());
   std::lock_guard lock(mutex_);
   if (failures_.size() < kKeptFailures) failures_.push_back(std::move(failure));
 }

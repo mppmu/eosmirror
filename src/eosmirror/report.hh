@@ -74,8 +74,9 @@ class Report {
   // Sets up one slot per transfer worker.
   void init_slots(size_t transfers, size_t backlog);
 
-  // Counts a failure, logs it and keeps the first few for the summary.
-  void add_failure(Failure failure);
+  // Counts a failure, logs it if asked to and keeps the first few for the
+  // summary.
+  void add_failure(Failure failure, bool logged = true);
   std::vector<Failure> failures() const;
   uint64_t failure_count() const { return stats.failures.load(); }
 

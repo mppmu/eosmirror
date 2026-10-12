@@ -1026,6 +1026,44 @@ TEST_CASE("fake: an exhausted deletion cap still reports blocked conflicts") {
   CHECK(r.stats.failures >= 1);
 }
 
+TEST_CASE("fake: every deletion that the cap withholds is journaled, and told once") {
+  TempDir tmp;
+  auto journal = Journal::open(tmp.sub("j.sqlite"), "fake", "fake");
+  REQUIRE(journal.ok());
+  Journal& j = *journal.value();
+  FakeEndpoint src, dst;
+  populate(src);
+  for (int i = 0; i < 5; ++i) dst.add_file("extra" + std::to_string(i), "x");
+  SyncOptions o = fake_options();
+  o.delete_extra = true;
+  o.max_delete = 2;
+  o.max_consecutive_failures = 2;  // which withheld deletions do not count for
+  REQUIRE(j.begin_run(false).ok());
+  Report r;
+  StderrCapture err;
+  REQUIRE(run_sync(src, dst, o, r, &j).ok());
+  std::string text = err.text();
+  REQUIRE(j.end_run(true).ok());
+  CHECK(r.stats.deleted == 2);
+  CHECK(r.stats.failures == 3);
+  CHECK(j.failures().size() == 3);
+  size_t told = 0;
+  for (size_t at = 0; (at = text.find("deletion cap", at)) != std::string::npos; ++at) ++told;
+  CHECK(told == 1);
+
+  o.max_delete = 3;
+  REQUIRE(j.begin_run(false).ok());
+  Report r2;
+  Cancellation cancel;
+  Engine engine(src, dst, o, r2, &j, cancel);
+  REQUIRE(engine.run(j.failures()).ok());
+  REQUIRE(j.end_run(true).ok());
+  CHECK(r2.stats.deleted == 3);
+  CHECK(j.failures().empty());
+  expect_mirrored(src, dst);
+  CHECK(dst.paths().size() == src.paths().size());
+}
+
 TEST_CASE("fake: a directory that cannot be created is reported once") {
   FakeEndpoint src, dst;
   populate(src);
