@@ -279,7 +279,9 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
 - Endpoints are `root://mgm//eos/...` URLs, or paths below `/eos` on the
   command line, which name the instance of `--mgm` or `EOS_MGM_URL` (the eos
   client's convention) and never a local FUSE mount; `file:///eos/...` names
-  the mount explicitly.
+  the mount explicitly. A run logs both endpoints as resolved, with the
+  server, the real path and for such paths where the MGM came from, so that
+  a stale `EOS_MGM_URL` does not go unnoticed.
 - Paths are sent percent-encoded behind `/#curl#` (`/#curl#/eos/a%20b`),
   with `eos.encodepath=1` among the opaque parameters: in opens, in plain
   XRootD requests (mkdir, rm, rmdir, checksum queries, which take

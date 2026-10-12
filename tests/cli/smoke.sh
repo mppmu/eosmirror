@@ -44,8 +44,11 @@ grep -q 'The target is ready' "$work/selftest.out" || fail "selftest output: $(c
 [[ -e $work/dst ]] && fail "dry run created the target"
 grep -q '3 would be copied' "$work/dry.out" || fail "dry run summary: $(cat "$work/dry.out")"
 
-# The real run.
-"$bin" sync -q "${owner_opt[@]}" --journal "$work/j.db" "$work/src" "$work/dst" > "$work/run.out"
+# The real run, which logs the endpoints as resolved.
+ln -s src "$work/srclink"
+"$bin" sync "${owner_opt[@]}" --journal "$work/j.db" "$work/srclink/" "file://$work/dst" > "$work/run.out" 2> "$work/run.err"
+grep -q "source: $(readlink -f "$work/src")\$" "$work/run.err" || fail "source not logged: $(cat "$work/run.err")"
+grep -q "target: $(readlink -f "$work")/dst\$" "$work/run.err" || fail "target not logged: $(cat "$work/run.err")"
 [[ $(sha256sum < "$work/src/big") == $(sha256sum < "$work/dst/big") ]] || fail "big differs"
 [[ $(readlink "$work/dst/link") == a ]] || fail "symlink"
 [[ $(stat -c %Y "$work/dst/a") == $(stat -c %Y "$work/src/a") ]] || fail "mtime of a"

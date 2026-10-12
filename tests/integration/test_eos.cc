@@ -859,6 +859,13 @@ TEST_CASE("eos endpoint: endpoint URLs") {
   REQUIRE(ep.ok());
   CHECK(ep.value()->describe() == url);
   CHECK(ep.value()->capabilities().has_symlinks);
+  // Runs log where a /eos path took them.
+  std::string resolved = describe_resolved(path, *ep.value(), settings);
+  CHECK(resolved.find(path + " on ") == 0);
+  CHECK(resolved.find(":1094 (" + path + " on the MGM from --mgm)") != std::string::npos);
+  EndpointSettings from_env;
+  CHECK(describe_resolved(path, *ep.value(), from_env).find("from EOS_MGM_URL") != std::string::npos);
+  CHECK(describe_resolved(url, *ep.value(), from_env).find("MGM") == std::string::npos);
   auto below = EosEndpoint::create(url + "/replica2");
   REQUIRE(below.ok());
   CHECK_FALSE(check_disjoint(*below.value(), *ep.value()).ok());

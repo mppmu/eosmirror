@@ -75,7 +75,10 @@ cannot do.
 
 Endpoints are local paths or XRootD URLs. An XRootD URL that answers to
 EOS commands is treated as EOS (symlinks, owners, nanosecond mtimes, atomic
-uploads); `eos://` names an EOS instance explicitly. Authentication is the
+uploads); `eos://` names an EOS instance explicitly. Paths below `/eos`
+are on the instance of `--mgm` or `EOS_MGM_URL`, as for the `eos` client.
+A run logs both endpoints as resolved (server, real path, and where the MGM
+came from). Authentication is the
 XRootD client's (`XrdSecPROTOCOL`, `XrdSecSSSKT`, Kerberos tickets).
 
 For example, a first run with a journal, then a rerun of what failed:

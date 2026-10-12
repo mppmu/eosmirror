@@ -149,6 +149,10 @@ int sync(const CliOptions& opts) {
     log::error(target.error().describe());
     return kFatal;
   }
+  // A stale EOS_MGM_URL or a symlink would otherwise take a run elsewhere
+  // unnoticed.
+  log::info("source: ", describe_resolved(opts.source, *source.value(), opts.endpoints));
+  log::info("target: ", describe_resolved(opts.target, *target.value(), opts.endpoints));
   if (Status s = check_disjoint(*source.value(), *target.value()); !s.ok()) {
     log::error(s.error().describe());
     return kFatal;

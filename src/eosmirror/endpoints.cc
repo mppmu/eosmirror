@@ -56,9 +56,20 @@ Status check_disjoint(const Endpoint& source, const Endpoint& target) {
   return Error{ErrorKind::Other, problem + ": refusing to run"};
 }
 
+bool is_eos_path(const std::string& spec) { return spec == "/eos" || spec.starts_with("/eos/"); }
+
+std::string describe_resolved(const std::string& spec, const Endpoint& endpoint,
+                              const EndpointSettings& settings) {
+  std::string text = to_string(endpoint.location());
+  if (is_eos_path(spec))
+    text += " (" + spec + " on the MGM from " + (settings.mgm.empty() ? "EOS_MGM_URL" : "--mgm") +
+            ")";
+  return text;
+}
+
 Result<std::string> eos_path_url(const std::string& spec, const std::string& mgm,
                                  const char* env_mgm) {
-  if (spec != "/eos" && !spec.starts_with("/eos/")) return spec;
+  if (!is_eos_path(spec)) return spec;
   std::string server = !mgm.empty() ? mgm : env_mgm ? env_mgm : "";
   while (!server.empty() && server.back() == '/') server.pop_back();
   if (server.empty())
