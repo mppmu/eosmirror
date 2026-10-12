@@ -615,6 +615,18 @@ TEST_CASE("fake: the preflight refuses to drop owners silently") {
   CHECK(r2.stats.files_copied == 3);
 }
 
+TEST_CASE("fake: what a target says about writing to it is shown at the start") {
+  FakeEndpoint src, dst;
+  populate(src);
+  dst.warning = "a FUSE mount";
+  dst.note = "pipelined writes";
+  StderrCapture err;
+  Report r;
+  REQUIRE(run_sync(src, dst, fake_options(), r).ok());
+  CHECK(err.text().find("WARN  a FUSE mount") != std::string::npos);
+  CHECK(err.text().find("INFO  pipelined writes") != std::string::npos);
+}
+
 TEST_CASE("fake: shards partition the files and together cover everything") {
   FakeEndpoint src;
   populate(src);

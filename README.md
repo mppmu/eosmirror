@@ -99,9 +99,8 @@ are compared by size only and symlinks are skipped (both are reported).
 Each file is copied in chunks of `--buffer-size` (8 MiB) with up to 4 reads
 and 4 writes in flight (`--read-window`, `--write-window`), over one
 connection per server. Writes go out in order, each where the previous one
-ended. This is safe for erasure-coded EOS files only while the storage
-nodes (FSTs) keep EOS's default `xrootd.async off`; `--write-window 1` opts
-out. Files read from EOS or from an XRootD server that computes checksums
+ended, which erasure-coded EOS files take only under a condition (see
+below). Files read from EOS or from an XRootD server that computes checksums
 are verified against the stored checksum when the target computes none.
 Files read from EOS take their metadata and checksum from the directory
 listing, so the MGM sees one open per file, as with xrdcp; a file that
@@ -130,6 +129,25 @@ the source empty but not the target, with `--delete`, or source and target
 overlapping), 4 when it stopped
 after too many failures in a row (try again later with `--resume`) and 130
 when interrupted.
+
+## Pipelined writes and erasure coding
+
+Each file is written with up to `--write-window` writes of `--buffer-size`
+in flight (4 × 8 MiB by default), in offset order over one connection,
+each starting where the previous one ended. xrdcp and `eos rclone` (which
+copies through XrdCl's copy process) do the same, with 4 writes of 8 MiB.
+
+For erasure-coded (RAIN) directories on EOS, this is safe only while the
+storage nodes (FSTs) run with EOS's default `xrootd.async off`, which EOS's
+packaged FST configuration sets. XrdCl asks for asynchronous I/O on every
+open, so an FST with `xrootd.async on` may execute the writes of a file out
+of order, and EOS up to 5.5.2 then stores zero parity: the file reads
+correctly until one of its stripes is lost. XrdCl never sends writes over
+substreams, so `XRD_SUBSTREAMSPERCHANNEL` does not matter. A client cannot
+ask an FST for the setting: when in doubt, use `--write-window 1`, which
+sends each write once the previous one has completed and is slower over
+long distances. Runs with an EOS target and a larger window say so at the
+start.
 
 ## Building
 

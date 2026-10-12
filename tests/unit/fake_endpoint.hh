@@ -67,6 +67,8 @@ class FakeEndpoint : public eosmirror::Endpoint {
   // Like EOS: files are written in place and confirmed by AtomicUploadWriter,
   // against the checksum of `caps.checksum` where set.
   bool atomic_uploads = false;
+  // What runs with this endpoint as target say about it at the start.
+  std::string warning, note;
   // Entries that listings leave out as unsafe, and count, like lines of an
   // EOS listing that cannot be parsed.
   std::set<RelPath> unlistable;
@@ -145,6 +147,8 @@ class FakeEndpoint : public eosmirror::Endpoint {
   eosmirror::Location location() const override { return {name_, "/"}; }
   eosmirror::Capabilities capabilities() const override { return caps; }
   bool is_temporary(std::string_view name) const override { return name.rfind(".tmp-", 0) == 0; }
+  std::string target_warning() const override { return warning; }
+  std::string target_note() const override { return note; }
 
   Result<Entry> stat(const RelPath& path) override {
     if (auto err = check("stat", path)) return *err;

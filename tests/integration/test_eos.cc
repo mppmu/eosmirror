@@ -1220,6 +1220,61 @@ TEST_CASE("FS to EOS and back, replica and erasure coded layouts") {
   }
 }
 
+TEST_CASE("FS to EOS: pipelined writes give erasure-coded files their parity") {
+  if (!base_url()) return;
+  RemoteDir dir("parity", "raid6");
+  EosEndpoint& ep = *dir.endpoint;
+  REQUIRE(ep.target_note().find("xrootd.async off") != std::string::npos);
+  XrdOptions one_by_one;
+  one_by_one.write_window = 1;
+  CHECK(EosEndpoint::create(dir.url, one_by_one).value()->target_note().empty());
+
+  // Files of several RAIN groups (4 data stripes of 1 MiB), copied in many
+  // chunks with the default write window.
+  TempDir tmp;
+  std::string content = pattern(9 * 1024 * 1024 + 12345);
+  for (int i = 0; i < 3; ++i) tmp.write_file("src/f" + std::to_string(i), content);
+  PosixEndpoint src(tmp.sub("src"));
+  SyncOptions options = test_options();
+  options.buffer_size = 256 * 1024;
+  Cancellation cancel;
+  Report r;
+  Engine engine(src, ep, options, r, nullptr, cancel);
+  REQUIRE(engine.run().ok());
+  REQUIRE(r.stats.files_copied == 3);
+
+  // Data stripes come first, parity stripes last. Each file loses two
+  // stripes, another pair each: what is missing of the data must come from
+  // the parity, which an out-of-order write leaves zero (EOS up to 5.5.2).
+  auto locations = [&](const std::string& path) {
+    auto info = ep.proc("mgm.cmd=fileinfo&mgm.path=" + ep.absolute(path) +
+                        "&mgm.file.info.option=-m");
+    REQUIRE(info.ok());
+    REQUIRE(info.value().out.find(" layout=raid6 nstripes=6 ") != std::string::npos);
+    std::vector<std::string> fsids;
+    for (size_t at = info.value().out.find(" fsid="); at != std::string::npos;
+         at = info.value().out.find(" fsid=", at + 1)) {
+      std::string rest = info.value().out.substr(at + 6);
+      fsids.push_back(rest.substr(0, rest.find_first_not_of("0123456789")));
+    }
+    return fsids;
+  };
+  for (int i = 0; i < 3; ++i) {
+    std::string path = "f" + std::to_string(i);
+    INFO("file ", path);
+    auto fsids = locations(path);
+    REQUIRE(fsids.size() == 6);
+    for (int stripe : {2 * i, 2 * i + 1}) {
+      auto dropped = ep.proc("mgm.cmd=file&mgm.subcmd=drop&mgm.path=" + ep.absolute(path) +
+                             "&mgm.file.fsid=" + fsids[static_cast<size_t>(stripe)]);
+      REQUIRE(dropped.ok());
+      REQUIRE(dropped.value().retc == 0);
+    }
+    REQUIRE(locations(path).size() == 4);
+    CHECK(get(ep, path) == content);
+  }
+}
+
 TEST_CASE("FS to EOS and back with connections of each transfer's own") {
   if (!base_url()) return;
   TempDir tmp;

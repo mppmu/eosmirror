@@ -564,6 +564,14 @@ bool EosEndpoint::is_temporary(std::string_view name) const {
   return XrdEndpoint::is_temporary(name) || name.rfind(".sys.a#.", 0) == 0;
 }
 
+std::string EosEndpoint::target_note() const {
+  if (options_.write_window <= 1) return {};
+  return "pipelined writes (--write-window " + std::to_string(options_.write_window) + ") to " +
+         url_ +
+         " are safe for erasure-coded directories only while its storage nodes keep EOS's "
+         "default xrootd.async off; use --write-window 1 when in doubt";
+}
+
 Result<std::string> EosEndpoint::request_path(const std::string& abs_path) const {
   return with_cgi(eos_request_path(abs_path), cgi_);
 }

@@ -30,6 +30,8 @@ class EosEndpoint : public XrdEndpoint {
   static Result<bool> is_eos(const std::string& url);
 
   bool is_temporary(std::string_view name) const override;
+  // The condition of pipelined writes for erasure-coded files.
+  std::string target_note() const override;
   Result<std::string> request_path(const std::string& abs_path) const override;
   Result<Listing> list(const RelPath& dir) override;
   Status symlink(const RelPath& path, const std::string& target) override;

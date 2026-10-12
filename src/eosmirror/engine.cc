@@ -943,6 +943,7 @@ struct Engine::Impl {
     if (ran) return Error{ErrorKind::Other, "an engine runs only once"};
     ran = true;
     if (std::string warning = target.target_warning(); !warning.empty()) log::warn(warning);
+    if (std::string note = target.target_note(); !note.empty()) log::info(note);
     if (options.preserve_owner && !source.capabilities().has_owners) {
       log::warn(source.describe(), " reports no owners: owners and groups are not synchronized");
       options.preserve_owner = false;

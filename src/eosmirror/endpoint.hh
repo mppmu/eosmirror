@@ -144,9 +144,10 @@ class Endpoint {
   // that listings of a target never report them as foreign.
   virtual bool is_temporary(std::string_view /*name*/) const { return false; }
 
-  // A warning about writing to this endpoint, shown when a run starts with
-  // it as target; empty if there is none.
+  // A warning, and a note, about writing to this endpoint, shown when a run
+  // starts with it as target; empty if there is none.
   virtual std::string target_warning() const { return {}; }
+  virtual std::string target_note() const { return {}; }
 
   // Finds out what the endpoint can do as a target where that takes writing
   // to it (POSIX probes how precisely the file system stores mtimes), once

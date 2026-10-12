@@ -439,17 +439,29 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
   file through one XrdCl file over one connection, from one thread, each
   write starting where the previous one ended and only the last one short,
   with XrdCl's write recovery off (which would resend writes over a new
-  connection) and its substreams at the default of one (writes always go
-  over the first). XrdCl sends a connection's requests in the order they
-  were submitted (one FIFO per substream, `XrdClStream.cc`), and a storage
-  node running with `xrootd.async off`, which EOS's packaged configuration
-  sets (`misc/etc/xrd.cf.fst`, `misc/etc/eos/config/fst/fst`), executes
-  them in that order. The client cannot tell a storage node that runs with
-  async on. Pipelined writes are thus safe for erasure-coded files only
-  while the FSTs keep EOS's default `xrootd.async off`; `--write-window 1`
+  connection). XrdCl sends writes over the first substream however many a
+  connection has (it never multiplexes `kXR_write`,
+  `XrdClXRootDTransport.cc`), so `XRD_SUBSTREAMSPERCHANNEL` does not
+  matter, and sends a connection's requests in the order they were
+  submitted (one FIFO per substream, `XrdClStream.cc`). It asks for
+  asynchronous I/O in every open (`kXR_async`, `XrdClFileStateHandler.cc`),
+  but a storage node running with `xrootd.async off`, which EOS's packaged
+  configuration sets (`misc/etc/xrd.cf.fst`, `misc/etc/eos/config/fst/fst`),
+  executes them in that order. The client cannot tell a storage node that
+  runs with async on. Pipelined writes are thus safe for erasure-coded
+  files only while the FSTs keep EOS's default `xrootd.async off`, as are
+  xrdcp and `eos rclone`, which keep 4 writes of 8 MiB in flight in the
+  same order (`XrdClClassicCopyJob.cc`, `XrdClConstants.hh`). A run with an
+  EOS target and a larger window says so at the start; `--write-window 1`
   opts out. Once a write has failed, nothing more is sent; the writes in
   flight are waited for and the upload is discarded. EOS computes the
   checksum while storing the file.
+- The integration tests check the parity of pipelined raid6 uploads by
+  reading them back with two stripes dropped (`file drop`), so that data
+  stripes must be made up from the parity. Setting filesystems' config
+  status to off would not do: EOS 5.5.2 still names their stripes to the
+  storage node that reads the file (the masking of offline filesystems in
+  `mgm/ofs/XrdMgmOfsFile.cc` is overwritten right after it is set).
 - XrdCl reports the close of a file whose connection is gone as done
   (`XrdClFileStateHandler.cc`, `Close`), while the storage node discards
   the upload. A commit is therefore confirmed: by the checksum query where
