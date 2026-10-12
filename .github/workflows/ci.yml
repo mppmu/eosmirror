@@ -54,11 +54,12 @@ jobs:
           ctest --test-dir build -R integration --output-on-failure
           tests/integration/xrootd-server.sh stop
 
-  eos:
-    # A single-host EOS instance and an xrootd server in rootless podman
-    # containers from CERN's public EOS image, as scripts/integration-test.sh
-    # runs them, nightly and on demand.
-    name: EOS integration tests
+  nightly:
+    # The long tests, and the integration tests against a single-host EOS
+    # instance and an xrootd server in rootless podman containers from
+    # CERN's public EOS image, as scripts/integration-test.sh runs them;
+    # nightly and on demand.
+    name: Long and EOS integration tests
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -72,6 +73,10 @@ jobs:
         env:
           EOSMIRROR_BUILD_ROOT: ${{ runner.temp }}/build
         run: scripts/check.sh ubuntu22
+      - name: Long tests
+        env:
+          EOSMIRROR_BUILD_ROOT: ${{ runner.temp }}/build
+        run: scripts/in-container.sh ubuntu22 ctest --test-dir /build/none -C long -L long --output-on-failure
       - name: Integration tests
         env:
           EOSMIRROR_BUILD_ROOT: ${{ runner.temp }}/build

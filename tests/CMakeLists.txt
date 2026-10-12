@@ -40,6 +40,19 @@ set_tests_properties(unit_unprivileged PROPERTIES SKIP_RETURN_CODE 77)
 add_test(NAME cli_smoke
   COMMAND ${test_launcher} bash ${CMAKE_CURRENT_SOURCE_DIR}/cli/smoke.sh $<TARGET_FILE:eosmirror>)
 
+# Long-running tests (a minute or two each), which run only when asked for
+# with `ctest -C long -L long`: randomized differential tests, and crash
+# consistency with SIGKILL.
+add_executable(eosmirror_long_tests unit/test_main.cc long/test_differential.cc)
+target_include_directories(eosmirror_long_tests
+  PRIVATE ${PROJECT_SOURCE_DIR}/third_party ${CMAKE_CURRENT_SOURCE_DIR}/unit)
+target_link_libraries(eosmirror_long_tests PRIVATE eosmirror_core)
+add_test(NAME differential CONFIGURATIONS long
+  COMMAND ${test_launcher} $<TARGET_FILE:eosmirror_long_tests>)
+add_test(NAME crash_consistency CONFIGURATIONS long
+  COMMAND ${test_launcher} bash ${CMAKE_CURRENT_SOURCE_DIR}/long/crash.sh $<TARGET_FILE:eosmirror>)
+set_tests_properties(differential crash_consistency PROPERTIES LABELS long TIMEOUT 900)
+
 if(EOSMIRROR_WITH_XROOTD)
   add_executable(eosmirror_integration_tests
     integration/main.cc
@@ -58,7 +71,8 @@ if(EOSMIRROR_WITH_XROOTD)
   # sees in glibc's time zone setup (tsan.supp). The unit tests load the
   # client library too.
   if(EOSMIRROR_SANITIZER AND EOSMIRROR_XROOTD_LIBDIR)
-    set_tests_properties(unit unit_unprivileged integration cli_smoke PROPERTIES ENVIRONMENT
+    set_tests_properties(unit unit_unprivileged integration cli_smoke differential crash_consistency
+      PROPERTIES ENVIRONMENT
       "LD_LIBRARY_PATH=${EOSMIRROR_XROOTD_LIBDIR};LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/lsan.supp;TSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tsan.supp")
   endif()
 endif()

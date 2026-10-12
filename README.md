@@ -181,6 +181,13 @@ EOSMIRROR_XROOTD_URL=root://localhost:1094//data ctest --test-dir build -R integ
 EOSMIRROR_XROOTD_LOCAL=1 tests/integration/xrootd-server.sh stop
 ```
 
+Two longer tests (about a minute each) run only when asked for, as in
+CI's nightly job: `ctest --test-dir build -C long -L long`. One kills
+syncs of a local tree at random points with SIGKILL and checks the copy
+once a run completes; the other changes random trees at random, syncs them
+with injected faults and compares the result in content and metadata.
+Both print their seed; `EOSMIRROR_SEED=<seed>` repeats a failing one.
+
 ## Packaging
 
 `packaging/eosmirror.spec` builds an RPM (`rpmbuild -ta eosmirror-VERSION.tar.gz`)

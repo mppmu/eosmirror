@@ -80,6 +80,11 @@ class FakeEndpoint : public eosmirror::Endpoint {
     faults_.push_back({std::move(op), std::move(path), std::move(error), times});
   }
 
+  void clear_faults() {
+    std::lock_guard lock(mutex_);
+    faults_.clear();
+  }
+
   int count(const std::string& op) const {
     std::lock_guard lock(mutex_);
     auto it = counts_.find(op);
