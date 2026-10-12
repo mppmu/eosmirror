@@ -5,6 +5,7 @@
 #include <XrdCl/XrdClXRootDResponses.hh>
 
 #include <cerrno>
+#include <map>
 
 #include "doctest/doctest.h"
 #include "eosmirror/eos_endpoint.hh"
@@ -78,6 +79,40 @@ TEST_CASE("endpoint URLs keep their protocol and opaque parameters") {
         "/#curl#/eos/a%20b?eos.encodepath=1&eos.app=eosmirror&authz=token&xrd.wantprot=krb5");
   CHECK(with_cgi("root://mgm//proc/user/?mgm.cmd=whoami", cgi) ==
         "root://mgm//proc/user/?mgm.cmd=whoami&authz=token&xrd.wantprot=krb5");
+}
+
+TEST_CASE("files are replaced by moves where the server refuses to replace them") {
+  using Files = std::map<std::string, std::string>;
+  Files files;
+  bool lose_new = false;  // the new file cannot be moved in
+  auto move = [&](const std::string& from, const std::string& to) -> Status {
+    if (!files.count(from)) return Error{ErrorKind::NotFound, "no " + from};
+    if (files.count(to)) return Error{ErrorKind::Exists, to + " exists"};
+    if (lose_new && from == "/d/.f.tmp") return Error{ErrorKind::IO, "connection lost"};
+    files[to] = files[from];
+    files.erase(from);
+    return {};
+  };
+  auto remove = [&](const std::string& path) -> Status {
+    files.erase(path);
+    return {};
+  };
+
+  files = {{"/d/.f.tmp", "new"}};
+  REQUIRE(move_replacing("/d/.f.tmp", "/d/f", move, remove).ok());
+  CHECK(files == Files{{"/d/f", "new"}});
+
+  files = {{"/d/.f.tmp", "new"}, {"/d/f", "old"}};
+  REQUIRE(move_replacing("/d/.f.tmp", "/d/f", move, remove).ok());
+  CHECK(files == Files{{"/d/f", "new"}});
+
+  // The old file goes back where the new one cannot follow.
+  files = {{"/d/.f.tmp", "new"}, {"/d/f", "old"}};
+  lose_new = true;
+  auto failed = move_replacing("/d/.f.tmp", "/d/f", move, remove);
+  REQUIRE_FALSE(failed.ok());
+  CHECK(failed.error().kind == ErrorKind::IO);
+  CHECK(files == Files{{"/d/.f.tmp", "new"}, {"/d/f", "old"}});
 }
 
 TEST_CASE("XRootD errors are classified for retries") {

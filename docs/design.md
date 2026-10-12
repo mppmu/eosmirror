@@ -261,7 +261,10 @@ compares files by size only, skips symlinks (counted), applies no mtimes,
 ignores owners of such a source, and detects directory cycles. Writes go to
 a temporary name `.<name>.eosmirror-<12 hex digits>` with up to
 `--write-window` writes in flight per file, the stored checksum is verified
-by a checksum query, and the file is renamed into place. A file read from a
+by a checksum query (where nothing is compared, a stat checks the size),
+and the file is renamed into place. A server that refuses to replace an
+existing file gets that file moved aside to a temporary name first, removed
+once the new one is in place, or moved back if that fails. A file read from a
 server that computes checksums is verified by a checksum query after the
 read when the target computes none; the server may have to read the file
 once more to answer it.

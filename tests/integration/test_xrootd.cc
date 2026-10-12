@@ -163,6 +163,15 @@ TEST_CASE("xrootd endpoint: stat, list, mkdir, write, checksum, rename, remove")
   REQUIRE(w3.value()->write(0, bytes(other)).ok());
   REQUIRE(w3.value()->commit(spec2).ok());
   CHECK(ep.stat("d/f").value().size == other.size());
+  // Also without a checksum to compare (the size is).
+  spec2.checksum = Checksum{};
+  auto w4 = ep.open_write("d/f", spec2);
+  REQUIRE(w4.ok());
+  REQUIRE(w4.value()->write(0, bytes(other)).ok());
+  auto unverified = w4.value()->commit(spec2);
+  REQUIRE(unverified.ok());
+  CHECK_FALSE(unverified.value().verified);
+  CHECK(ep.list("d").value().entries.size() == 1);
 
   CHECK(ep.symlink("d/l", "f").error().kind == ErrorKind::Unsupported);
   ErrorKind not_empty = ep.remove("d", EntryType::Directory).error().kind;

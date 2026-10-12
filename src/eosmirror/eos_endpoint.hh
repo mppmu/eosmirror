@@ -31,7 +31,6 @@ class EosEndpoint : public XrdEndpoint {
 
   bool is_temporary(std::string_view name) const override;
   Result<std::string> request_path(const std::string& abs_path) const override;
-  Result<Entry> stat(const RelPath& path) override;
   Result<Listing> list(const RelPath& dir) override;
   Status symlink(const RelPath& path, const std::string& target) override;
   Status set_metadata(const RelPath& path, const Entry& metadata, MetaFields fields) override;
@@ -43,7 +42,7 @@ class EosEndpoint : public XrdEndpoint {
 
   // Stats an absolute path without following a final symlink; the result is
   // named by the last path component.
-  Result<Entry> stat_abs(const std::string& abs_path);
+  Result<Entry> stat_abs(const std::string& abs_path) override;
 
   // Runs an MGM fsctl command (mgm.pcmd=<command><args>) on an absolute path,
   // as a single query; it replies "<command>: retc=<errno>".

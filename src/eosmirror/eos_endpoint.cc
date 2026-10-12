@@ -568,12 +568,6 @@ Result<std::string> EosEndpoint::request_path(const std::string& abs_path) const
   return with_cgi(eos_request_path(abs_path), cgi_);
 }
 
-Result<Entry> EosEndpoint::stat(const RelPath& path) {
-  auto e = stat_abs(absolute(path));
-  if (e.ok() && path.empty()) e.value().name.clear();
-  return e;
-}
-
 Result<Entry> EosEndpoint::stat_abs(const std::string& abs) {
   std::string request = request_path(abs).value();
   XrdCl::Buffer arg;

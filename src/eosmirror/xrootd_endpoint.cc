@@ -150,6 +150,13 @@ class XrdWriter : public XrdFileWriter {
     } else if (spec.require_verification) {
       return Error{ErrorKind::Unsupported, "the server computes no checksum to verify " + temp_ +
                                                " against"};
+    } else {
+      // Nothing compared: the server must at least have stored all of it.
+      auto st = ep_.stat_abs(temp_);
+      if (!st.ok()) return st.error();
+      if (st.value().size != spec.size)
+        return Error{ErrorKind::IO, temp_ + " has " + std::to_string(st.value().size) +
+                                        " bytes instead of " + std::to_string(spec.size)};
     }
     Status renamed = ep_.rename_abs(temp_, final_);
     if (renamed.ok()) temp_exists_ = false;
@@ -198,6 +205,26 @@ std::string with_cgi(std::string request, std::string_view cgi) {
   request += request.find('?') == std::string::npos ? '?' : '&';
   request += cgi;
   return request;
+}
+
+Status move_replacing(const std::string& from, const std::string& to,
+                      const std::function<Status(const std::string&, const std::string&)>& move,
+                      const std::function<Status(const std::string&)>& remove) {
+  Status moved = move(from, to);
+  if (moved.ok() || moved.error().kind != ErrorKind::Exists) return moved;
+  std::string aside = parent_of(to) + "/" + temporary_name(name_of(to));
+  if (Status s = move(to, aside); !s.ok()) return s;
+  moved = move(from, to);
+  if (!moved.ok()) {
+    if (Status back = move(aside, to); !back.ok())
+      log::error("cannot move ", aside, " back to ", to, " after a failed rename: ",
+                 back.error().describe());
+    return moved;
+  }
+  // Left over, it is a temporary that a later run with --delete removes.
+  if (Status removed = remove(aside); !removed.ok())
+    log::warn("cannot remove the replaced ", aside, ": ", removed.error().describe());
+  return {};
 }
 
 Result<std::string> xrootd_request_path(const std::string& abs_path) {
@@ -466,14 +493,19 @@ Result<std::string> XrdEndpoint::request_path(const std::string& abs_path) const
 }
 
 Result<Entry> XrdEndpoint::stat(const RelPath& path) {
-  std::string abs = absolute(path);
+  auto e = stat_abs(absolute(path));
+  if (e.ok() && path.empty()) e.value().name.clear();
+  return e;
+}
+
+Result<Entry> XrdEndpoint::stat_abs(const std::string& abs) {
   auto request = request_path(abs);
   if (!request.ok()) return request.error();
   XrdCl::StatInfo* info = nullptr;
   XrdCl::XRootDStatus st = fs_->Stat(request.value(), info);
   if (!st.IsOK()) return xrd_error(st, "stat " + url_of(abs));
   std::unique_ptr<XrdCl::StatInfo> owned(info);
-  return entry_from_stat(path.empty() ? "" : name_of(path), *info);
+  return entry_from_stat(name_of(abs), *info);
 }
 
 Result<Listing> XrdEndpoint::list(const RelPath& dir) {
@@ -558,22 +590,16 @@ Status XrdEndpoint::remove_abs(const std::string& abs) {
 }
 
 Status XrdEndpoint::rename_abs(const std::string& from, const std::string& to) {
-  auto request_from = request_path(from);
-  if (!request_from.ok()) return request_from.error();
-  auto request_to = request_path(to);
-  if (!request_to.ok()) return request_to.error();
-  XrdCl::XRootDStatus st = fs_->Mv(request_from.value(), request_to.value());
-  if (st.IsOK()) return {};
-  Error e = xrd_error(st, "rename " + url_of(from) + " to " + url_of(to));
-  if (e.kind != ErrorKind::Exists) return e;
-  // The server refuses to replace an existing file: remove it first. This
-  // leaves a short window without the file, which EOS avoids with atomic
-  // uploads.
-  Status removed = remove_abs(to);
-  if (!removed.ok()) return removed;
-  st = fs_->Mv(request_from.value(), request_to.value());
-  if (!st.IsOK()) return xrd_error(st, "rename " + url_of(from) + " to " + url_of(to));
-  return {};
+  auto move = [&](const std::string& a, const std::string& b) -> Status {
+    auto request_a = request_path(a);
+    if (!request_a.ok()) return request_a.error();
+    auto request_b = request_path(b);
+    if (!request_b.ok()) return request_b.error();
+    XrdCl::XRootDStatus st = fs_->Mv(request_a.value(), request_b.value());
+    if (!st.IsOK()) return xrd_error(st, "rename " + url_of(a) + " to " + url_of(b));
+    return {};
+  };
+  return move_replacing(from, to, move, [&](const std::string& abs) { return remove_abs(abs); });
 }
 
 Result<Checksum> XrdEndpoint::query_checksum(const std::string& abs) {

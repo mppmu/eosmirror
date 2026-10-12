@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -50,6 +51,13 @@ std::string with_cgi(std::string request, std::string_view cgi);
 // paths: a '?' starts the opaque parameters, so paths with one are refused.
 Result<std::string> xrootd_request_path(const std::string& abs_path);
 
+// Renames from to to through move, for servers whose move fails with Exists
+// where to exists: the file there is moved aside to a temporary name first,
+// and removed once from is in place, or moved back if that fails.
+Status move_replacing(const std::string& from, const std::string& to,
+                      const std::function<Status(const std::string&, const std::string&)>& move,
+                      const std::function<Status(const std::string&)>& remove);
+
 // An endpoint on an XRootD server, given as root://host[:port]//path, or
 // roots:// for TLS. Opaque parameters of the URL (such as authz tokens) go
 // with every request.
@@ -96,6 +104,8 @@ class XrdEndpoint : public Endpoint {
 
   // Operations on absolute server paths, used by the writer. A stored
   // checksum of a type eosmirror cannot compute, or none, has type None.
+  // The result of a stat is named by the last path component.
+  virtual Result<Entry> stat_abs(const std::string& abs_path);
   Result<Checksum> query_checksum(const std::string& abs_path);
   Status remove_abs(const std::string& abs_path);
   Status rename_abs(const std::string& from, const std::string& to);
