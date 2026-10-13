@@ -31,15 +31,18 @@ class Journal {
   // and shard; opening it for another combination fails, and so does
   // opening a database that is not a journal. Checking the owner and
   // recording that of a new journal is one transaction, so that runs
-  // started together cannot both take a new journal.
+  // started together cannot both take a new journal. A journal serves one
+  // run at a time: the object holds an exclusive lock on the file, and
+  // opening a journal that another one holds fails.
   static Result<std::unique_ptr<Journal>> open(const std::string& file, const std::string& source,
                                                const std::string& target,
                                                const std::string& shard = "0/1");
 
   // Opens an existing journal read-only, changing nothing (nor making the
   // files of a write-ahead log): for a dry run, which names its source,
-  // target and shard as for open(), or for inspection, which names none. An
-  // error for a file that is not a journal.
+  // target and shard and holds the journal's lock as for open(), or for
+  // inspection, which names none and takes no lock. An error for a file
+  // that is not a journal.
   static Result<std::unique_ptr<Journal>> open_read_only(const std::string& file,
                                                          const std::string& source = "",
                                                          const std::string& target = "",
@@ -73,6 +76,7 @@ class Journal {
 
  private:
   Journal(sqlite3* db, std::string file) : db_(db), file_(std::move(file)) {}
+  Status lock();
   Status exec(const std::string& sql);
   Result<std::string> meta(const std::string& key);
   Status set_meta(const std::string& key, const std::string& value);
@@ -86,6 +90,7 @@ class Journal {
 
   sqlite3* db_;
   std::string file_;
+  int lock_fd_ = -1;
   std::mutex mutex_;
   int64_t run_id_ = 0;
   sqlite3_stmt* insert_failure_ = nullptr;

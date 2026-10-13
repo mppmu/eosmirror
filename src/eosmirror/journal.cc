@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "eosmirror/journal.hh"
 
+#include <fcntl.h>
 #include <sqlite3.h>
+#include <sys/file.h>
+#include <unistd.h>
 
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
@@ -76,6 +80,7 @@ Result<std::unique_ptr<Journal>> Journal::open(const std::string& file, const st
     return e;
   }
   std::unique_ptr<Journal> journal(new Journal(db, file));
+  if (Status s = journal->lock(); !s.ok()) return s.error();
   sqlite3_busy_timeout(db, 10000);
   if (Status s = journal->claim(source, target, shard); !s.ok()) return s.error();
   // Outside the transaction, which the journal mode cannot change in.
@@ -97,6 +102,9 @@ Result<std::unique_ptr<Journal>> Journal::open_read_only(const std::string& file
     return e;
   }
   std::unique_ptr<Journal> journal(new Journal(db, file));
+  if (!source.empty()) {
+    if (Status s = journal->lock(); !s.ok()) return s.error();
+  }
   sqlite3_busy_timeout(db, 10000);
   if (Status s = journal->prepare_statements(); !s.ok())
     return journal->not_a_journal(s.error().message);
@@ -110,6 +118,17 @@ Result<std::unique_ptr<Journal>> Journal::open_read_only(const std::string& file
     if (Status s = journal->check_owner(source, target, shard); !s.ok()) return s.error();
   }
   return journal;
+}
+
+// Takes the journal's lock for this object's life: flock on the database
+// file, which SQLite's own (fcntl) locks do not interfere with.
+Status Journal::lock() {
+  lock_fd_ = ::open(file_.c_str(), O_RDONLY | O_CLOEXEC);
+  if (lock_fd_ < 0) return errno_error(errno, "open journal " + file_);
+  if (flock(lock_fd_, LOCK_EX | LOCK_NB) == 0) return {};
+  if (errno == EWOULDBLOCK)
+    return Error{ErrorKind::Other, "journal " + file_ + " is in use by another run"};
+  return errno_error(errno, "lock journal " + file_);
 }
 
 // Takes a new journal for source, target and shard, or checks that an
@@ -185,6 +204,9 @@ Journal::~Journal() {
        {insert_failure_, delete_failure_, select_failures_, insert_done_, select_done_})
     sqlite3_finalize(stmt);
   sqlite3_close(db_);
+  // After the database: closing a descriptor of the file drops the fcntl
+  // locks that SQLite holds on it.
+  if (lock_fd_ >= 0) close(lock_fd_);
 }
 
 Error Journal::db_error(const std::string& context) {

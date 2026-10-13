@@ -162,3 +162,18 @@ TEST_CASE("journal: the options of the last run") {
       j.differing_options({{"--delete", "yes"}, {"--no-owner", "yes"}, {"--new", "x"}});
   CHECK(differing.value() == std::vector<std::string>{"--delete"});
 }
+
+TEST_CASE("journal: one run at a time") {
+  TempDir tmp;
+  std::string file = tmp.sub("j.sqlite");
+  auto first = Journal::open(file, "/src", "/dst");
+  REQUIRE(first.ok());
+  auto second = Journal::open(file, "/src", "/dst");
+  REQUIRE_FALSE(second.ok());
+  CHECK(second.error().message == "journal " + file + " is in use by another run");
+  CHECK_FALSE(Journal::open_read_only(file, "/src", "/dst").ok());  // a dry run
+  CHECK(Journal::open_read_only(file).ok());  // an inspection
+  first.value().reset();
+  CHECK(Journal::open(file, "/src", "/dst").ok());
+  CHECK(Journal::open_read_only(file, "/src", "/dst").ok());
+}

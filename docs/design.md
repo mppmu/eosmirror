@@ -357,6 +357,11 @@ Modes:
   cleared, no directory finalized), and create it where it does not exist.
   A journal in the tree of the source or the target is refused, as is a
   database that is not a journal.
+- A journal serves one run at a time, so that the finalized directories
+  and failures of two runs cannot mix: a run, dry runs included, holds an
+  exclusive lock (`flock`) on its file, and a run whose journal is held by
+  another one does not start (exit status 3). `eosmirror failures` takes
+  no lock.
 
 ### Sharding
 

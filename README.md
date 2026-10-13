@@ -116,6 +116,9 @@ eosmirror sync --journal migration.db --progress 60 /data/project root://eos.exa
 eosmirror sync --journal migration.db --retry-failed /data/project root://eos.example.org//eos/project
 ```
 
+A journal serves one run at a time: a run whose journal another run holds
+does not start.
+
 Setting owners on EOS needs an identity that EOS treats as root (a sudoer cannot);
 the run refuses to start otherwise unless `--no-owner` is given. Plain
 XRootD servers store no mtimes and have no symlinks: a run against one
