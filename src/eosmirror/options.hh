@@ -16,12 +16,14 @@ struct RetryPolicy {
   double factor = 4.0;
   std::chrono::milliseconds max_delay{60000};
 
-  // The delay before the given retry (1 = the first retry).
+  // The delay before the given retry (1 = the first retry). It stops growing
+  // at max_delay, before it could overflow.
   std::chrono::milliseconds delay(int retry) const {
     double d = static_cast<double>(initial_delay.count());
-    for (int i = 1; i < retry; ++i) d *= factor;
-    auto ms = static_cast<std::chrono::milliseconds::rep>(d);
-    return std::chrono::milliseconds(ms < max_delay.count() ? ms : max_delay.count());
+    double cap = static_cast<double>(max_delay.count());
+    for (int i = 1; i < retry && d > 0 && d < cap; ++i) d *= factor;
+    if (d >= cap) return max_delay;
+    return std::chrono::milliseconds(static_cast<std::chrono::milliseconds::rep>(d));
   }
 };
 

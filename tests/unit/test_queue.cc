@@ -2,6 +2,7 @@
 #include "eosmirror/queue.hh"
 
 #include <atomic>
+#include <limits>
 #include <numeric>
 #include <thread>
 #include <vector>
@@ -107,4 +108,16 @@ TEST_CASE("retries follow the policy and stop on permanent errors or cancellatio
   });
   CHECK(calls == 1);
   CHECK(cancel.wait(std::chrono::milliseconds(1000)));
+}
+
+TEST_CASE("retry delays stay within their cap for every retry the options allow") {
+  constexpr int kMaxRetry = std::numeric_limits<int>::max() - 1;  // --retries at most
+  RetryPolicy policy;  // 1 s, 4 times as long each retry, up to 60 s
+  CHECK(policy.delay(1) == std::chrono::seconds(1));
+  CHECK(policy.delay(3) == std::chrono::seconds(16));
+  for (int retry : {4, 27, 28, 40, 1000, kMaxRetry}) CHECK(policy.delay(retry) == policy.max_delay);
+  policy.initial_delay = std::chrono::seconds(std::numeric_limits<long long>::max() / 1000);
+  CHECK(policy.delay(1) == policy.max_delay);  // --retry-delay at most
+  policy.initial_delay = std::chrono::milliseconds(0);
+  CHECK(policy.delay(kMaxRetry) == std::chrono::milliseconds(0));
 }
