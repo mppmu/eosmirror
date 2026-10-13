@@ -3,9 +3,11 @@
 // Randomized differential tests: random trees and random changes of the
 // source (files created, rewritten with or without another size, deleted,
 // renamed, given other modes and mtimes; symlinks; type changes), runs with
-// injected faults, then a run without them, after which the target must
-// equal the source in content and metadata, and a further run must change
-// nothing. Each seed is reproducible: a failure names it, and
+// injected faults, after which the journal must record every entry left
+// behind and a retry of what it records must repair them, then a run
+// without faults, after which the target must equal the source in content
+// and metadata, and a further run must change nothing. Each seed is
+// reproducible: a failure names it, and
 // EOSMIRROR_SEED=<seed> runs that one alone. EOSMIRROR_SEEDS sets how many
 // seeds run (from EOSMIRROR_SEED_BASE, by default the time), and
 // EOSMIRROR_VERBOSE=1 shows the runs' logs.
@@ -20,6 +22,7 @@
 #include <fstream>
 #include <map>
 #include <random>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -384,6 +387,46 @@ void no_wrong_files(Endpoint& src, Endpoint& dst, const RelPath& dir) {
   }
 }
 
+// The entries of the source below dir that the target lacks, or has with
+// another type, content, mode, mtime, owner or link target.
+std::vector<RelPath> outdated(Endpoint& src, Endpoint& dst, const RelPath& dir = "") {
+  std::map<std::string, Entry> theirs;
+  if (auto listed = dst.list(dir); listed.ok())
+    for (Entry& e : listed.value().entries) theirs.emplace(e.name, std::move(e));
+  std::vector<RelPath> result;
+  for (const auto& [name, e] : listing(src, dir)) {
+    if (e.type == EntryType::Other) continue;
+    RelPath path = join(dir, name);
+    auto it = theirs.find(name);
+    const Entry* t = it == theirs.end() ? nullptr : &it->second;
+    bool same = t && t->type == e.type;
+    if (same && e.type != EntryType::Directory)
+      same = t->mtime == e.mtime && t->uid == e.uid && t->gid == e.gid &&
+             t->link_target == e.link_target;
+    if (same && e.type == EntryType::File)
+      same = t->mode == e.mode && t->size == e.size &&
+             read_all(src, path, e.size) == read_all(dst, path, t->size);
+    if (!same) result.push_back(path);
+    if (e.type == EntryType::Directory) {
+      auto below = outdated(src, dst, path);
+      result.insert(result.end(), below.begin(), below.end());
+    }
+  }
+  return result;
+}
+
+// Whether the journal records a failure of the path or of a directory above.
+bool recorded(Journal& journal, RelPath path) {
+  std::set<RelPath> failed;
+  for (const Failure& f : journal.failures().value()) failed.insert(f.path);
+  while (!failed.count(path)) {
+    if (path.empty()) return false;
+    auto slash = path.rfind('/');
+    path = slash == std::string::npos ? "" : path.substr(0, slash);
+  }
+  return true;
+}
+
 SyncOptions random_options(Rng& rng) {
   SyncOptions o;
   o.checkers = 1 + static_cast<int>(pick(rng, 4));
@@ -468,17 +511,36 @@ TEST_CASE("differential: fake endpoints with faults") {
       faulty.delete_extra = chance(rng, 0.7);
       faulty.keep_emptied = faulty.delete_extra && chance(rng, 0.5);
       Report with_faults;
-      (void)sync(src, dst, faulty, *journal.value(), with_faults);  // which faults may end
+      Status faulted = sync(src, dst, faulty, *journal.value(), with_faults);  // faults may end it
       src.clear_faults();
       dst.clear_faults();
       src.unlistable.clear();
       dst.unlistable.clear();
       no_wrong_files(src, dst, "");
+      // What a run that completed left behind, it has recorded.
+      if (faulted.ok())
+        for (const RelPath& path : outdated(src, dst)) {
+          INFO("left behind: ", path);
+          CHECK(recorded(*journal.value(), path));
+        }
 
       SyncOptions clean = random_options(rng);
       Report retried, r, again;
-      if (chance(rng, 0.5))
-        completed(sync(src, dst, clean, *journal.value(), retried, /*retry_failed=*/true));
+      if (chance(rng, 0.5)) {
+        // With the faulty run's options, the retry must reach what that run
+        // reaches without faults, which leaves a run with them nothing to do.
+        completed(sync(src, dst, faulty, *journal.value(), retried, /*retry_failed=*/true));
+        if (faulted.ok()) {
+          Report rest;
+          completed(sync(src, dst, faulty, *journal.value(), rest));
+          CHECK(rest.stats.files_copied == 0);
+          CHECK(rest.stats.symlinks_created == 0);
+          CHECK(rest.stats.dirs_created == 0);
+          CHECK(rest.stats.metadata_fixed == 0);
+          CHECK(rest.stats.deleted == 0);
+          CHECK(rest.stats.failures == retried.stats.failures);
+        }
+      }
       completed(sync(src, dst, clean, *journal.value(), r));
       CHECK(r.stats.failures == 0);
       compare(src, dst, "", true);

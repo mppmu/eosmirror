@@ -279,7 +279,9 @@ Two longer tests (about a minute each) run only when asked for, as in
 CI's nightly job: `ctest --test-dir build -C long -L long`. One kills
 syncs of a local tree at random points with SIGKILL and checks the copy
 once a run completes; the other changes random trees at random, syncs them
-with injected faults and compares the result in content and metadata.
+with injected faults, checks that the journal records what the faults left
+behind and that retrying it repairs that, and compares the result in
+content and metadata.
 Both print their seed; `EOSMIRROR_SEED=<seed>` repeats a failing one.
 
 ## Packaging
