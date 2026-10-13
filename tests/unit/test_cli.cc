@@ -35,7 +35,7 @@ TEST_CASE("sizes are parsed with binary suffixes") {
 }
 
 TEST_CASE("the sync command line maps onto the options") {
-  auto r = parse({"sync", "-n", "--delete", "--delete-emptied", "--max-delete", "5", "--no-owner", "--checkers=3",
+  auto r = parse({"sync", "-n", "--delete", "--keep-emptied", "--max-delete", "5", "--no-owner", "--checkers=3",
                   "--transfers", "4", "--buffer-size", "1M", "--retries", "0",
                   "--write-window", "1", "--read-window=6", "--shared-connection",
                   "--rewrite-links", "/old/=/new/", "--journal", "j.db", "--resume",
@@ -47,7 +47,7 @@ TEST_CASE("the sync command line maps onto the options") {
   CHECK(o.target == "/dst");
   CHECK(o.sync.dry_run);
   CHECK(o.sync.delete_extra);
-  CHECK(o.sync.delete_emptied);
+  CHECK(o.sync.keep_emptied);
   CHECK(o.sync.max_delete == 5);
   CHECK_FALSE(o.sync.preserve_owner);
   CHECK(o.sync.preserve_mode);
@@ -73,8 +73,8 @@ TEST_CASE("the sync command line maps onto the options") {
   REQUIRE(defaults.ok());
   CHECK(defaults.value().sync.retry.attempts == 3);
   CHECK(defaults.value().sync.preserve_owner);
-  CHECK(defaults.value().sync.max_delete == 1000);
-  CHECK_FALSE(defaults.value().sync.delete_emptied);
+  CHECK(defaults.value().sync.max_delete == UINT64_MAX);
+  CHECK_FALSE(defaults.value().sync.keep_emptied);
   CHECK_FALSE(defaults.value().sync.dry_run);
   CHECK(defaults.value().endpoints.xrootd.write_window == 4);
   CHECK(defaults.value().endpoints.xrootd.read_window == 4);
@@ -84,6 +84,7 @@ TEST_CASE("the sync command line maps onto the options") {
 
   CHECK(defaults.value().sync.max_consecutive_failures == 1000);
   CHECK(parse({"sync", "--max-delete", "unlimited", "a", "b"}).value().sync.max_delete == UINT64_MAX);
+  CHECK(parse({"sync", "--max-delete", "1000", "a", "b"}).value().sync.max_delete == 1000);
   CHECK(parse({"sync", "--max-consecutive-failures", "10", "a", "b"})
             .value()
             .sync.max_consecutive_failures == 10);
@@ -135,7 +136,8 @@ TEST_CASE("usage errors are rejected") {
   CHECK_FALSE(parse({"sync", "--read-window", "0", "a", "b"}).ok());
   CHECK_FALSE(parse({"sync", "--buffer-size", "2G", "a", "b"}).ok());
   CHECK_FALSE(parse({"sync", "--max-delete", "-1", "a", "b"}).ok());
-  CHECK_FALSE(parse({"sync", "--delete-emptied", "a", "b"}).ok());
+  CHECK_FALSE(parse({"sync", "--keep-emptied", "a", "b"}).ok());
+  CHECK_FALSE(parse({"sync", "--delete", "--delete-emptied", "a", "b"}).ok());
   CHECK_FALSE(parse({"sync", "--max-consecutive-failures", "x", "a", "b"}).ok());
   // Numbers out of the range of where they go, rather than cut to fit.
   for (std::vector<std::string> args :

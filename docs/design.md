@@ -17,14 +17,16 @@ A run walks the source tree directory by directory and makes the target match:
   all its entries have been processed, since changing entries changes mtimes.
 - Special files (devices, sockets, fifos) are skipped and counted.
 - Entries that exist only on the target are counted, and deleted only with
-  `--delete`, up to `--max-delete` deletions per run; each deletion beyond
-  that is a failure, recorded for `--retry-failed` (and warned about once).
-  A source directory that is empty, against a target directory that is
-  not, is more likely an unmounted file system (an automount, say) or a
-  broken server than a tree to delete: for the top directory such a run
-  stops without deleting anything, below it nothing is deleted in that
-  directory (counted and warned about) unless `--delete-emptied` says
-  otherwise. A missing source stops a run before it
+  `--delete`, which follows rsync wherever there is a choice: it deletes in
+  directories that are empty on the source as in any other, and up to
+  `--max-delete` deletions per run (unlimited by default); each deletion
+  beyond that is a failure, recorded for `--retry-failed` (and warned about
+  once). A source that is empty as a whole, against a target that is not,
+  is more likely an unmounted file system (an automount, say) or a broken
+  server than a tree to delete: such a run stops without deleting anything.
+  `--keep-emptied` treats directories below the top alike: nothing is
+  deleted in one that is empty on the source while the target's is not
+  (counted and warned about, no failure). A missing source stops a run before it
   starts, and so do a source and target that overlap (the same tree, or
   one inside the other): the run would copy the target into itself, or
   delete what is around the source. Trees are compared by real path, for a
@@ -94,19 +96,26 @@ Names from listings are checked before they are joined into paths: empty
 names, `.`, `..` and names containing `/`, NUL or a line break are skipped
 with a warning and counted, on both sides and when deleting trees. Listings
 report the entries they left out themselves (lines of an EOS listing that
-cannot be told apart, names a plain XRootD server cannot address). In a
-directory where either listing missed entries, `--delete` deletes nothing,
-neither extras nor entries of another type than the source's, since the
-other side may list one of them as an entry the source lacks; such
-directories are counted and warned about. A tree being deleted is not
-deleted further where the listing of one of its directories missed
-entries, which is a failure. Listings can also miss entries without
-saying so (a server's listing that ends early), so before `--delete`
-deletes the extras of a directory, the source is asked by a stat for
-each: one that it has after all, or cannot answer for, holds back the
-deletions in that directory in the same way. An entry of another type
-than the source's is replaced only while a stat finds the source's entry
-with the type listed. Dry runs do the same. Log lines, the progress
+cannot be told apart, names a plain XRootD server cannot address).
+Entries left out of the source's listing are not copied, which is a
+failure of their directory, as rsync reports files it could not transfer
+(exit status 23). In a directory where either listing missed entries,
+`--delete` deletes nothing, neither extras nor entries of another type
+than the source's, since the other side may list one of them as an entry
+the source lacks; such directories are counted and warned about. A tree
+being deleted is not deleted further where the listing of one of its
+directories missed entries, which is a failure. Listings can also miss
+entries without saying so (a server's listing that ends early), so before
+`--delete` deletes the extras of a directory, the source is asked by a
+stat for each: one that it has after all, or cannot answer for, holds
+back the deletions in that directory in the same way. An entry of another
+type than the source's is replaced only while a stat finds the source's
+entry with the type listed. Deletions held back are a failure of the
+directory ("deletion withheld", like those beyond the cap), recorded for
+`--retry-failed`, but only where something would have been deleted. A
+directory with such a failure still gets its metadata, but its completion
+neither clears the failure nor counts as finalized for `--resume`. Dry
+runs do the same. Log lines, the progress
 display and the summary replace control characters and invalid UTF-8 in
 names with `?`.
 
@@ -234,7 +243,7 @@ Modes:
   was interrupted; after a completed run there is nothing to resume and
   everything is walked. Recorded failures are not retried by resuming. A
   run resumes only with the options of the interrupted run that decide
-  what it makes of the target (`--delete`, `--delete-emptied`,
+  what it makes of the target (`--delete`, `--keep-emptied`,
   `--no-owner`, `--no-mode`, `--no-verify`, `--require-checksum`,
   `--verify-readback`, `--rewrite-links`), which the journal records.
 - `--retry-failed` processes only the recorded failures: each within its

@@ -72,7 +72,7 @@ RunOptions result_options(const CliOptions& opts) {
   for (const auto& [from, to] : opts.sync.link_rewrites)
     rewrites += std::to_string(from.size()) + ":" + from + std::to_string(to.size()) + ":" + to;
   return {{"--delete", yes(opts.sync.delete_extra)},
-          {"--delete-emptied", yes(opts.sync.delete_emptied)},
+          {"--keep-emptied", yes(opts.sync.keep_emptied)},
           {"--no-owner", yes(!opts.sync.preserve_owner)},
           {"--no-mode", yes(!opts.sync.preserve_mode)},
           {"--no-verify", yes(!opts.sync.verify)},
@@ -97,10 +97,10 @@ EOS_MGM_URL, not on a local FUSE mount (name that as file:///eos/...).
 
 Options:
   -n, --dry-run            report what would be done, change nothing
-      --delete             delete entries on the target that the source lacks,
-                           except in directories that are empty on the source
-      --delete-emptied     with --delete, delete there too
-      --max-delete N       stop deleting after N entries (default 1000, or "unlimited")
+      --delete             delete entries on the target that the source lacks
+      --keep-emptied       with --delete, delete nothing in directories that are
+                           empty on the source, as an unmounted file system looks
+      --max-delete N       stop deleting after N entries (default unlimited)
       --no-owner           do not set owners and groups
       --no-mode            do not set modes
       --no-verify          do not compute checksums
@@ -222,7 +222,7 @@ Result<CliOptions> parse_command_line(int argc, char** argv) {
   flag("-n", [&] { sync.dry_run = true; });
   flag("--dry-run", [&] { sync.dry_run = true; });
   flag("--delete", [&] { sync.delete_extra = true; });
-  flag("--delete-emptied", [&] { sync.delete_emptied = true; });
+  flag("--keep-emptied", [&] { sync.keep_emptied = true; });
   // An option that takes a count, or "unlimited" for the given value.
   auto limit = [&](const std::string& name, uint64_t& out, uint64_t unlimited) {
     value(name, [name, &out, unlimited](const std::string& v) -> Status {
@@ -361,8 +361,8 @@ Result<CliOptions> parse_command_line(int argc, char** argv) {
   if (sync.buffer_size > (1u << 30)) return usage_error("--buffer-size must be at most 1G");
   if (sync.shard_count < 1 || sync.shard_index < 0 || sync.shard_index >= sync.shard_count)
     return usage_error("--shard K/N needs 0 <= K < N");
-  if (sync.delete_emptied && !sync.delete_extra)
-    return usage_error("--delete-emptied needs --delete");
+  if (sync.keep_emptied && !sync.delete_extra)
+    return usage_error("--keep-emptied needs --delete");
   if ((sync.resume || opts.retry_failed) && opts.journal.empty())
     return usage_error("--resume and --retry-failed need --journal");
   if (sync.resume && opts.retry_failed) return usage_error("--resume and --retry-failed exclude each other");

@@ -24,14 +24,20 @@ client for now. See [docs/design.md](docs/design.md).
   endpoint supports it.
 - Symlinks are recreated as symlinks and never followed. Hard links are copied
   as separate files. Special files are skipped and reported.
-- Extra files on the target are only deleted with an explicit option
-  (`--delete`), with a dry run and a cap on the number of deletions, and
-  never because the source is empty: not in directories that are empty on
-  the source (as an unmounted automount looks) unless `--delete-emptied` is
-  given, and a run whose source is empty as a whole stops. Nothing is
-  deleted in directories where a listing had to skip entries, nor where
-  the source, asked before deleting, has an entry its listing lacked. A
-  source and target that overlap (one inside the other) are refused.
+- Extra entries on the target are only deleted with an explicit option
+  (`--delete`), which behaves like rsync's: it deletes in directories that
+  are empty on the source too, and takes an optional cap on the number of
+  deletions (`--max-delete`). A run whose source is empty as a whole stops
+  instead of emptying the target; `--keep-emptied` also keeps the entries
+  of directories below that are empty on the source (as an unmounted
+  automount looks). Nothing is deleted in directories where a listing had
+  to skip entries, nor where the source, asked before deleting, has an
+  entry its listing lacked; those deletions, and the ones beyond the cap,
+  are failures that `--retry-failed` takes up again. A source and target
+  that overlap (one inside the other) are refused.
+- Entries that a listing of the source has to skip (names that cannot be
+  used as paths, lines of a server's listing that cannot be told apart)
+  are not copied, which is a failure of their directory, as with rsync.
 - Files and directories that disappear from the source during a run are
   counted as vanished, not as failures; the next run finds them gone.
 - Errors are retried with backoff; what still fails is recorded in the

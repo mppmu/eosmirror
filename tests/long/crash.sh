@@ -108,7 +108,7 @@ describe() {
     \( -type l -printf '%P link %T@ %l\n' \) | sort)
 }
 
-args=(sync -q "${owner_opt[@]}" --journal "$work/journal.db" --resume --delete --delete-emptied
+args=(sync -q "${owner_opt[@]}" --journal "$work/journal.db" --resume --delete
   --checkers 4 --transfers 8 --buffer-size 64k "$src" "$dst")
 total_kills=0
 # Kills fall within the time a run takes (ms): that of the last complete

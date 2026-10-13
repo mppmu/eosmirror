@@ -1372,6 +1372,7 @@ TEST_CASE("fake: directories and symlinks named like temporaries are entries of 
   dst.add_dir("emptied/.tmp-old", 0755, {1000, 0});
   SyncOptions o = fake_options();
   o.delete_extra = true;
+  o.keep_emptied = true;
   Report r2;
   REQUIRE(run_sync(src, dst, o, r2).ok());
   CHECK(r2.stats.emptied_dirs == 1);
@@ -1433,10 +1434,13 @@ TEST_CASE("fake: listed names that cannot be joined into paths are skipped and c
     src.add_file(path, "evil");
     src.modify(path, [&](FakeEndpoint::Node& n) { n.entry.name = bad[i]; });
   }
+  // Files not mirrored: a failure of their directory, as with rsync.
   Report r;
   REQUIRE(run_sync(src, dst, fake_options(), r).ok());
   CHECK(r.stats.invalid_names == bad.size());
-  CHECK(r.stats.failures == 0);
+  REQUIRE(r.failures().size() == 1);
+  CHECK(r.failures()[0].path == "");
+  CHECK(r.failures()[0].type == EntryType::Directory);
   CHECK(r.stats.files_copied == 3);
   CHECK(dst.get("")->entry.type == EntryType::Directory);
   CHECK(dst.paths() == std::vector<RelPath>{"d1", "d1/d2", "d1/d2/f2", "d1/f1", "d1/l", "f0"});
@@ -1457,16 +1461,23 @@ TEST_CASE("fake: listed names that cannot be joined into paths are skipped and c
   CHECK(r2.stats.invalid_names == bad.size() + 2);
   CHECK(r2.stats.incomplete_dirs == 1);
   CHECK(r2.stats.deleted == 0);
-  REQUIRE(r2.failures().size() == 1);
-  CHECK(r2.failures()[0].path == "d1/extra");
-  CHECK(r2.failures()[0].error.kind == ErrorKind::NotEmpty);
+  REQUIRE(r2.failures().size() == 2);
+  for (const Failure& f : r2.failures()) {
+    INFO("failure of ", f.path);
+    CHECK(f.error.kind == (f.path.empty() ? ErrorKind::Other : ErrorKind::NotEmpty));
+    CHECK((f.path.empty() || f.path == "d1/extra"));
+  }
   CHECK(dst.get("junk"));
   CHECK(dst.get("extra"));
   CHECK(dst.get("d1/extra/inner"));
   CHECK(dst.get("d1"));
 }
 
-TEST_CASE("fake: nothing is deleted where a listing skipped entries") {
+TEST_CASE("fake: nothing is deleted where a listing skipped entries, which is a failure") {
+  TempDir tmp;
+  auto journal = Journal::open(tmp.sub("j.sqlite"), "fake", "fake");
+  REQUIRE(journal.ok());
+  Journal& j = *journal.value();
   FakeEndpoint src, dst;
   populate(src);
   Report mirror;
@@ -1482,10 +1493,10 @@ TEST_CASE("fake: nothing is deleted where a listing skipped entries") {
   dst.add_file("extra", "x");
   SyncOptions o = fake_options();
   o.delete_extra = true;
-  o.delete_emptied = true;
+  REQUIRE(j.begin_run(false).ok());
   Report r;
-  REQUIRE(run_sync(src, dst, o, r).ok());
-  CHECK(r.stats.failures == 0);
+  REQUIRE(run_sync(src, dst, o, r, &j).ok());
+  REQUIRE(j.end_run(true).ok());
   CHECK(r.stats.deleted == 1);
   CHECK(r.stats.incomplete_dirs == 2);
   CHECK(dst.get("d1/f1"));
@@ -1494,11 +1505,32 @@ TEST_CASE("fake: nothing is deleted where a listing skipped entries") {
   CHECK_FALSE(dst.get("extra"));
   CHECK(r.summary(false).find("could not be listed, whose target entries were kept: 2") !=
         std::string::npos);
+  // Failures of their directories, as with rsync: what the source's listing
+  // left out is not copied, and the deletions held back are withheld.
+  CHECK(r.stats.failures == 2);
+  auto rows = j.failures().value();
+  REQUIRE(rows.size() == 2);
+  CHECK(rows[0].path == "d1");
+  CHECK(rows[0].error.kind == ErrorKind::Other);
+  CHECK(rows[1].path == "d1/d2");
+  CHECK(rows[1].error.kind == ErrorKind::Withheld);
+
+  // Retrying them once the listings are whole deletes there.
+  src.unlistable.clear();
+  dst.unlistable.clear();
+  REQUIRE(j.begin_run(false).ok());
+  Report retried;
+  Cancellation cancel;
+  Engine engine(src, dst, o, retried, &j, cancel);
+  REQUIRE(engine.run(j.failures().value()).ok());
+  REQUIRE(j.end_run(true).ok());
+  CHECK(retried.stats.deleted == 3);
+  CHECK(retried.stats.failures == 0);
+  CHECK(j.failures().value().empty());
+  expect_mirrored(src, dst);
 
   // Where nothing would be deleted, nothing is held back either.
-  src.unlistable.clear();
   dst.unlistable = {"d1/f1"};
-  dst.erase("d1/extra");
   int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
                     std::chrono::system_clock::now().time_since_epoch())
                     .count();
@@ -1506,7 +1538,7 @@ TEST_CASE("fake: nothing is deleted where a listing skipped entries") {
   Report r2;
   REQUIRE(run_sync(src, dst, o, r2).ok());
   CHECK(r2.stats.incomplete_dirs == 0);
-  CHECK(r2.stats.deleted == 2);  // in d1/d2
+  CHECK(r2.stats.failures == 0);
   CHECK(dst.get("d1/.tmp-upload"));
 }
 
@@ -1533,10 +1565,11 @@ TEST_CASE("fake: no type conflict is resolved and no tree deleted where a listin
   CHECK(r.stats.deleted == 0);
   CHECK(dst.get("d/x/inner"));
   CHECK(dst.get("gone/sub/a"));
-  REQUIRE(r.failures().size() == 2);
+  // And d, whose listing left out y.
+  REQUIRE(r.failures().size() == 3);
   for (const Failure& f : r.failures()) {
     INFO("failure of ", f.path);
-    CHECK((f.path == "d/x" || f.path == "gone"));
+    CHECK((f.path == "d" || f.path == "d/x" || f.path == "gone"));
   }
 }
 
@@ -1557,6 +1590,9 @@ TEST_CASE("fake: the source confirms what it lacks before anything is deleted") 
     REQUIRE(run_sync(src, dst, o, r).ok());
     CHECK(r.stats.incomplete_dirs == 1);
     CHECK(r.stats.deleted == 0);
+    REQUIRE(r.failures().size() == 1);
+    CHECK(r.failures()[0].path == "d1");
+    CHECK(r.failures()[0].error.kind == ErrorKind::Withheld);
   }
   CHECK(dst.get("d1/f1"));
   CHECK(dst.get("d1/extra"));
@@ -1567,6 +1603,7 @@ TEST_CASE("fake: the source confirms what it lacks before anything is deleted") 
   Report r2;
   REQUIRE(run_sync(src, dst, o, r2).ok());
   CHECK(r2.stats.incomplete_dirs == 1);
+  CHECK(r2.stats.failures == 1);
   CHECK(dst.get("d1/extra"));
   Report r3;
   REQUIRE(run_sync(src, dst, o, r3).ok());
@@ -1588,8 +1625,9 @@ TEST_CASE("fake: the source confirms what it lacks before anything is deleted") 
   REQUIRE(run_sync(src, dst, o, r4).ok());
   CHECK(r4.stats.incomplete_dirs == 1);
   CHECK(r4.stats.deleted == 0);
-  REQUIRE(r4.failures().size() == 1);
-  CHECK(r4.failures()[0].error.kind == ErrorKind::Changed);
+  REQUIRE(r4.failures().size() == 2);
+  for (const Failure& f : r4.failures())
+    CHECK(f.error.kind == (f.path == "c" ? ErrorKind::Changed : ErrorKind::Withheld));
   CHECK(dst.get("c/inner"));
   CHECK(dst.get("extra"));
 }
@@ -2369,7 +2407,7 @@ TEST_CASE("fake: an empty source does not empty the target") {
   CHECK(fs::exists(tmp.sub("dst/keep")));
 }
 
-TEST_CASE("fake: directories emptied on the source keep their target entries unless asked") {
+TEST_CASE("fake: directories emptied on the source are emptied, or kept with --keep-emptied") {
   FakeEndpoint src, dst;
   populate(src);
   // An empty directory, as an unmounted automount looks, and an emptied
@@ -2385,6 +2423,7 @@ TEST_CASE("fake: directories emptied on the source keep their target entries unl
 
   SyncOptions o = fake_options();
   o.delete_extra = true;
+  o.keep_emptied = true;
   Report r;
   REQUIRE(run_sync(src, dst, o, r).ok());
   CHECK(r.stats.failures == 0);
@@ -2393,19 +2432,21 @@ TEST_CASE("fake: directories emptied on the source keep their target entries unl
   CHECK(r.stats.emptied_dirs == 2);
   CHECK(dst.get("mnt/f49"));
   CHECK(dst.get("d1/d2/sub/g"));
-  CHECK(r.summary(false).find("empty on the source whose target entries were kept: 2") !=
-        std::string::npos);
+  CHECK(r.summary(false).find("empty on the source whose target entries were kept "
+                              "(--keep-emptied): 2") != std::string::npos);
 
   // Without --delete, nothing would be deleted anyway.
   Report r2;
   REQUIRE(run_sync(src, dst, fake_options(), r2).ok());
   CHECK(r2.stats.emptied_dirs == 0);
 
-  o.delete_emptied = true;
+  // --delete alone deletes there, like rsync.
+  o.keep_emptied = false;
   Report r3;
   REQUIRE(run_sync(src, dst, o, r3).ok());
   CHECK(r3.stats.deleted == 51);
   CHECK(r3.stats.emptied_dirs == 0);
+  CHECK(r3.stats.failures == 0);
   CHECK_FALSE(dst.get("mnt/f0"));
   src.erase("d1/d2/sub/.tmp-partial");
   expect_mirrored(src, dst);

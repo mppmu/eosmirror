@@ -43,6 +43,10 @@ struct DirNode {
   std::atomic<int> pending{1};  // own processing plus unfinished entries
   std::atomic<bool> touched{false};        // entries were created, replaced or removed
   std::atomic<bool> failed{false};         // listing, creation or metadata failed
+  // A failure of the directory is recorded while its entries and metadata
+  // are handled (entries left out of a listing, deletions held back), which
+  // its completion must not clear.
+  std::atomic<bool> incomplete{false};
   std::atomic<bool> relaxing_tried{false};
   std::atomic<bool> made_writable{false};  // the target's mode was relaxed for changes
   std::atomic<bool> unverified_warned{false};
@@ -285,13 +289,9 @@ struct Engine::Impl {
     if (error.kind == ErrorKind::Cancelled) return;
     Failure f{path, type, error};
     if (journal && !options.dry_run) journal_write(journal->record_failure(f));
-    // Each deletion that the cap withholds is recorded, for --retry-failed,
-    // but told once, and none is a failure in a row.
+    // Withheld deletions are recorded, for --retry-failed, but told where
+    // they are withheld, and none is a failure in a row.
     if (error.kind == ErrorKind::Withheld) {
-      bool first = !delete_cap_reported.exchange(true);
-      if (first)
-        log::warn(error.describe(),
-                  "; the deletions withheld after it are failures too, not logged");
       report.add_failure(std::move(f), false);
       return;
     }
@@ -475,8 +475,9 @@ struct Engine::Impl {
       // relaxed for creating a subdirectory is restored here.
       if (!apply_metadata(node->path, node->source, MetaFields::Mode)) node->failed = true;
     }
-    if (!node->failed && !cancel.requested()) succeeded(node->path);
-    if (journal && !options.dry_run && !node->failed && !node->only && !cancel.requested())
+    bool complete = !node->failed && !node->incomplete;
+    if (complete && !cancel.requested()) succeeded(node->path);
+    if (journal && !options.dry_run && complete && !node->only && !cancel.requested())
       journal_write(journal->record_done_dir(node->path));
     if (node->parent) {
       entry_done(node->parent);
@@ -525,6 +526,14 @@ struct Engine::Impl {
     }
     std::vector<Entry>& src_entries = listed.value().entries;
     node->unlisted = drop_invalid_names(source, node->path, listed.value());
+    // Entries that the source's listing left out are not copied.
+    if (node->unlisted > 0) {
+      node->incomplete = true;
+      fail(node->path, EntryType::Directory,
+           Error{ErrorKind::Other, std::to_string(node->unlisted) +
+                                       " entries of the source could not be listed safely and "
+                                       "are not copied"});
+    }
 
     std::unordered_map<std::string, Entry> dst_entries;
     if (!node->created) {
@@ -616,15 +625,14 @@ struct Engine::Impl {
   }
 
   // Whether --delete may delete the extras of a directory: not where
-  // deletions are held back, and not in a directory emptied on the source
-  // unless --delete-emptied says so.
+  // deletions are held back, and with --keep-emptied not in a directory
+  // emptied on the source.
   bool may_delete(const std::shared_ptr<DirNode>& node, bool emptied) {
     if (!deletions_allowed(node)) return false;
-    if (!emptied || options.delete_emptied) return true;
+    if (!emptied || !options.keep_emptied) return true;
     stats.emptied_dirs.fetch_add(1);
     log::warn("deleting nothing in ", node->path.empty() ? "." : node->path,
-              ": the source's directory is empty, the target's is not (--delete-emptied "
-              "deletes there)");
+              ": the source's directory is empty, the target's is not (--keep-emptied)");
     return false;
   }
 
@@ -659,12 +667,16 @@ struct Engine::Impl {
   }
 
   // Deletes nothing more in a directory whose listings may be incomplete;
-  // counted and told once.
+  // counted and told once. That is a failure of the directory, which
+  // --retry-failed revisits, unless one is recorded already.
   void hold_deletions(const std::shared_ptr<DirNode>& node, const std::string& why) {
     if (node->deletions_held) return;
     node->deletions_held = true;
     stats.incomplete_dirs.fetch_add(1);
     log::warn("deleting nothing in ", node->path.empty() ? "." : node->path, ": ", why);
+    if (!node->incomplete.exchange(true))
+      fail(node->path, EntryType::Directory,
+           Error{ErrorKind::Withheld, "deletions held back: " + why});
   }
 
   bool empty_source(const std::vector<Entry>& entries) const {
@@ -940,8 +952,13 @@ struct Engine::Impl {
     }
     if (deletions.fetch_add(1) >= options.max_delete) {
       deletions.fetch_sub(1);
-      return Error{ErrorKind::Withheld, "deletion cap of " + std::to_string(options.max_delete) +
-                                            " reached (--max-delete), not deleting " + path};
+      Error withheld{ErrorKind::Withheld, "deletion cap of " + std::to_string(options.max_delete) +
+                                              " reached (--max-delete), not deleting " + path};
+      // Each one is a failure, but told once.
+      if (!delete_cap_reported.exchange(true))
+        log::warn(withheld.describe(),
+                  "; the deletions withheld after it are failures too, not logged");
+      return withheld;
     }
     log::info(options.dry_run ? "would delete " : "deleting ", to_string(e.type), " ", path);
     if (!options.dry_run) {

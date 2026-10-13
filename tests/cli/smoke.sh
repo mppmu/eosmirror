@@ -118,16 +118,24 @@ rc=0; "$bin" sync -q "${owner_opt[@]}" --delete --max-delete 1 "$work/src" "$wor
 [[ $(ls "$work/dst" | grep -c extra) == 0 ]] || fail "extra not deleted"
 
 # A source directory that is empty, as an unmounted automount looks, keeps
-# the entries of its copy unless --delete-emptied says otherwise.
+# the entries of its copy with --keep-emptied, and is emptied without.
 mkdir "$work/src/automount" "$work/dst/automount"
 touch "$work/dst/automount/f1" "$work/dst/automount/f2"
-"$bin" sync -q "${owner_opt[@]}" --delete "$work/src" "$work/dst" > "$work/emptied.out" 2> "$work/emptied.err" \
+"$bin" sync -q "${owner_opt[@]}" --delete --keep-emptied "$work/src" "$work/dst" > "$work/emptied.out" 2> "$work/emptied.err" \
   || fail "emptied directory: $(cat "$work/emptied.err")"
 [[ -f $work/dst/automount/f2 ]] && grep -q 'deleting nothing in automount' "$work/emptied.err" \
   || fail "emptied directory deleted: $(cat "$work/emptied.err")"
-grep -q 'empty on the source whose target entries were kept: 1' "$work/emptied.out" || fail "emptied summary"
-"$bin" sync -q "${owner_opt[@]}" --delete --delete-emptied "$work/src" "$work/dst" > /dev/null
-[[ -z $(ls -A "$work/dst/automount") ]] || fail "--delete-emptied"
+grep -q 'empty on the source whose target entries were kept (--keep-emptied): 1' "$work/emptied.out" || fail "emptied summary"
+"$bin" sync -q "${owner_opt[@]}" --delete "$work/src" "$work/dst" > /dev/null
+[[ -z $(ls -A "$work/dst/automount") ]] || fail "emptied directory kept"
+
+# An entry that cannot be copied (a name with a line break) is a failure of
+# its directory, recorded in the journal, as rsync exits with 23.
+mkdir -p "$work/odd/sub"
+touch "$work/odd/sub/fine" "$work/odd/sub/$(printf 'line\nbreak')"
+rc=0; "$bin" sync -q "${owner_opt[@]}" --journal "$work/odd.db" "$work/odd" "$work/odd-copy" > /dev/null 2>&1 || rc=$?
+[[ $rc == 1 && -f $work/odd-copy/sub/fine ]] || fail "an entry that cannot be copied: $rc"
+"$bin" failures "$work/odd.db" 2> /dev/null | grep -q $'^directory\tsub\t' || fail "its directory not recorded"
 
 # An empty or missing source does not empty the target.
 mkdir "$work/empty"

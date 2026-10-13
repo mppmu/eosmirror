@@ -393,7 +393,6 @@ SyncOptions random_options(Rng& rng) {
   o.retry.initial_delay = std::chrono::milliseconds(1);
   o.retry.factor = 1;
   o.delete_extra = true;
-  o.delete_emptied = true;
   o.max_consecutive_failures = 0;
   return o;
 }
@@ -467,7 +466,7 @@ TEST_CASE("differential: fake endpoints with faults") {
       random_faults(rng, src, dst);
       SyncOptions faulty = random_options(rng);
       faulty.delete_extra = chance(rng, 0.7);
-      faulty.delete_emptied = chance(rng, 0.5);
+      faulty.keep_emptied = faulty.delete_extra && chance(rng, 0.5);
       Report with_faults;
       (void)sync(src, dst, faulty, *journal.value(), with_faults);  // which faults may end
       src.clear_faults();

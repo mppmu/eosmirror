@@ -106,8 +106,8 @@ std::string Report::summary(bool dry_run) const {
     s << "  transfers that waited for listings, all checkers busy: " << stats.listing_bound.load()
       << " (more --checkers may help)\n";
   if (stats.emptied_dirs.load() > 0)
-    s << "  directories empty on the source whose target entries were kept: "
-      << stats.emptied_dirs.load() << " (--delete-emptied deletes them)\n";
+    s << "  directories empty on the source whose target entries were kept (--keep-emptied): "
+      << stats.emptied_dirs.load() << "\n";
   if (stats.incomplete_dirs.load() > 0)
     s << "  directories with entries that could not be listed, whose target entries were kept: "
       << stats.incomplete_dirs.load() << "\n";
