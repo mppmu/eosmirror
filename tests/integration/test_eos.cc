@@ -53,8 +53,8 @@ struct RemoteDir {
   explicit RemoteDir(const std::string& label, const std::string& layout = "replica2") {
     auto parent = EosEndpoint::create(std::string(base_url()) + "/" + layout);
     REQUIRE(parent.ok());
-    name = label + "-" + std::to_string(getpid()) + "-" +
-           std::to_string(std::chrono::steady_clock::now().time_since_epoch().count() % 100000);
+    // Unique on an instance that outlives many test runs.
+    name = label + "-" + std::to_string(getpid()) + "-" + random_suffix();
     REQUIRE(parent.value()->mkdir(name, 0755).ok());
     url = std::string(base_url()) + "/" + layout + "/" + name;
     auto ep = EosEndpoint::create(url);

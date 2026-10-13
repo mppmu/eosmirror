@@ -48,8 +48,8 @@ struct RemoteDir {
     std::string base = base_url();
     auto parent = XrdEndpoint::create(base);
     REQUIRE(parent.ok());
-    name = label + "-" + std::to_string(getpid()) + "-" +
-           std::to_string(std::chrono::steady_clock::now().time_since_epoch().count() % 100000);
+    // Unique on an instance that outlives many test runs.
+    name = label + "-" + std::to_string(getpid()) + "-" + random_suffix();
     REQUIRE(parent.value()->mkdir(name, 0755).ok());
     url = base + "/" + name;
     auto ep = XrdEndpoint::create(url);
