@@ -2,6 +2,8 @@
 #include "eosmirror/error.hh"
 
 #include <cerrno>
+#include <string>
+#include <vector>
 
 #include "doctest/doctest.h"
 #include "eosmirror/types.hh"
@@ -55,6 +57,14 @@ TEST_CASE("Result carries a value or an error") {
   Result<int> bad(Error{ErrorKind::IO, "boom"});
   REQUIRE_FALSE(bad);
   CHECK(bad.error().message == "boom");
+
+  // The value of a temporary outlives it.
+  size_t sum = 0;
+  for (const std::string& s : Result<std::vector<std::string>>({"a value longer than a short string",
+                                                                "and another one"})
+                                  .value())
+    sum += s.size();
+  CHECK(sum == 49);
 
   Status fine;
   CHECK(fine.ok());

@@ -66,7 +66,9 @@ class [[nodiscard]] Result {
 
   T& value() & { return *value_; }
   const T& value() const& { return *value_; }
-  T&& value() && { return std::move(*value_); }
+  // By value, so that the value of a temporary outlives it, as in
+  // `for (auto& x : f().value())`.
+  T value() && { return std::move(*value_); }
   const Error& error() const { return *error_; }
 
  private:
