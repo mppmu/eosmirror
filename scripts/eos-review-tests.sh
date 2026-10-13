@@ -7,7 +7,7 @@
 # Example:
 #   kinit skluth            # or whatever authentication your instance uses
 #   ./eos-review-tests.sh ./build/src/eosmirror \
-#       root://eostest.mpp.mpg.de//eos/test/user/s/skluth/eosmirror-review
+#       root://eos.example.org//eos/test/user/s/skluth/eosmirror-review
 #
 # Env:
 #   BIG_MB=1024       total size of the large files for the interruption tests
