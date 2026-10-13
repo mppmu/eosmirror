@@ -46,7 +46,10 @@ A run walks the source tree directory by directory and makes the target match:
   server than a tree to delete: such a run stops without deleting anything.
   `--keep-emptied` treats directories below the top alike: nothing is
   deleted in one that is empty on the source while the target's is not
-  (counted and warned about, no failure). A missing source stops a run before it
+  (counted and warned about, no failure). That stop is one of two
+  deliberate deviations from rsync; the other is that `--delete` needs
+  `--target-without-symlinks` against plain XRootD targets (see the XRootD
+  endpoint). A missing source stops a run before it
   starts, and so do a source and target that overlap (the same tree, or
   one inside the other): the run would copy the target into itself, or
   delete what is around the source. Trees are compared by real path, for a
@@ -695,6 +698,23 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
 - Directories that find leaves out for lack of permission are recognized by
   the paths in its error output, which are printed raw as well: a name with
   line breaks there fails the whole listing.
+- A graceful stop (the first SIGINT or SIGTERM) waits for the copies under
+  way, and XrdCl's request timeout ends once the header of a read's reply
+  has arrived: a storage node that sends the rest of a reply slowly keeps a
+  transfer waiting, and the run from ending. The second signal exits at
+  once, without a summary, leaving temporaries (removed by a later run with
+  `--delete` once they are stale) and, on local targets, copies with mtime
+  0 (copied again).
+- Temporaries are stale after an hour without a change of their mtime or
+  ctime, also EOS atomic uploads (`.sys.a#.`) of other writers: one that
+  has been running for longer is deleted by `--delete`. EOS's creation
+  tracker (`space.tracker=on`, off by default;
+  `mgm/tracker/ReplicationTracker.cc`) removes abandoned atomic uploads
+  after two days.
+- Plain XRootD servers mask the modes of new files and directories with
+  `ofs.crmode` (by default 0775), while the endpoint reports that it keeps
+  all permission bits: files writable by others get their mode set again
+  by every run.
 
 ## Not in scope (for now)
 

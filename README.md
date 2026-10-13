@@ -77,6 +77,15 @@ them, retries and journals failures, and adapts its concurrency to the
 target. EOS to EOS copies stream through the client; third-party copy is
 planned.
 
+## Differences from rsync
+
+With `--delete`, eosmirror behaves like rsync wherever there is a choice,
+with two deliberate exceptions: a run whose source is empty as a whole,
+against a target that is not, stops instead of emptying the target (an
+unmounted file system or a broken server looks so), and against a plain
+XRootD target, which cannot show symlinks, `--delete` needs
+`--target-without-symlinks` (see Known limitations).
+
 ## Usage
 
 ```
@@ -216,6 +225,24 @@ start.
   directory where they replace files, and count those files. Attributes
   that a directory takes from another through `sys.attr.link` are not
   seen.
+- EOS keeps an atomic upload under a hidden name (`.sys.a#.`) until its
+  close. Such files that neither their mtime nor their ctime shows changed
+  for an hour are taken for leftovers of interrupted uploads and deleted
+  with `--delete`, also another writer's upload that has been running for
+  longer than an hour. EOS's own creation tracker
+  (`eos space config default space.tracker=on`, off by default) removes
+  abandoned atomic uploads after two days.
+- The first Ctrl-C (or SIGTERM) lets the copies under way finish. XrdCl's
+  request timeout ends once the header of a read's reply has arrived, so
+  a storage node that sends the rest of the reply slowly keeps a transfer,
+  and with it the run, waiting. A second Ctrl-C exits at once, without a
+  summary; the next run removes the temporaries left behind (with
+  `--delete`, once they are an hour old) and copies again what a sync has
+  not made durable.
+- Plain XRootD servers create files and directories with modes masked by
+  their `ofs.crmode` (by default 0775), while eosmirror takes them to keep
+  all permission bits: files writable by others (o+w) get their mode
+  "fixed" by every run.
 
 ## Building
 
