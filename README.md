@@ -23,6 +23,8 @@ client for now. See [docs/design.md](docs/design.md).
   the source's modification time, and verify a checksum end to end where the
   endpoint supports it. An EOS upload is done once the file it created,
   known by its id, is in place with the right size, mtime and checksum.
+  With a journal, an upload whose run ended before that is copied again by
+  the next run.
 - Symlinks are recreated as symlinks and never followed. Hard links are copied
   as separate files. Special files are skipped and reported.
 - Extra entries on the target are only deleted with an explicit option

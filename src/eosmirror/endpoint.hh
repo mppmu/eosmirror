@@ -44,6 +44,10 @@ struct Capabilities {
   // The checksum the endpoint computes itself for stored files (None if it
   // computes none), which a copy verifies against.
   ChecksumType checksum = ChecksumType::None;
+  // Whether a written file is in place before its commit has confirmed it
+  // (EOS's atomic uploads): a run that ends in between leaves a copy with
+  // the source's size and mtime that nothing verified.
+  bool confirms_after_commit = false;
 };
 
 // A directory listing. Entries that cannot be listed safely (such as lines

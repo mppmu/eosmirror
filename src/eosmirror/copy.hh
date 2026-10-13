@@ -22,6 +22,8 @@ struct CopyOptions {
   bool verify = true;
   bool require_verification = false;  // fail copies that neither side can verify
   bool replaces = true;  // the target may have a file of that name already
+  // Called before the target's commit; an error fails the copy.
+  std::function<Status()> before_commit;
   std::function<void(uint64_t)> on_chunk;  // called with the size of every chunk written
   // Called with the error of a failed operation on the target (open, write,
   // commit), to tell a struggling target from a struggling source.

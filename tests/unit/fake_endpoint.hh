@@ -155,7 +155,11 @@ class FakeEndpoint : public eosmirror::Endpoint {
 
   std::string describe() const override { return name_; }
   eosmirror::Location location() const override { return {name_, "/"}; }
-  eosmirror::Capabilities capabilities() const override { return caps; }
+  eosmirror::Capabilities capabilities() const override {
+    eosmirror::Capabilities c = caps;
+    c.confirms_after_commit = atomic_uploads;
+    return c;
+  }
   bool is_temporary(const Entry& e) const override {
     return e.type == eosmirror::EntryType::File && e.name.starts_with(".tmp-");
   }

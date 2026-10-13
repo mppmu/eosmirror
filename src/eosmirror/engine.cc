@@ -209,6 +209,7 @@ struct Engine::Impl {
   // An endpoint normally provides a checksum to verify copies against: the
   // target computes them, or else the source stores them.
   bool checksums_expected = false;
+  bool confirms_after_commit = false;  // the target's commits are confirmed afterwards
   bool relax_modes = false;  // make read-only target directories writable first
 
   WorkQueue<std::shared_ptr<DirNode>> dirs;
@@ -1066,6 +1067,23 @@ struct Engine::Impl {
         target_failed = true;
         if (is_transient(e.kind)) target_errors.fetch_add(1);
       };
+      // A copy that is in place before it is confirmed is journaled as in
+      // doubt first, which a run that ends in between leaves for the next.
+      bool pending = false;
+      if (journal && confirms_after_commit)
+        job_options.before_commit = [&] {
+          if (pending) return Status();
+          pending = true;
+          Status recorded = journal->record_failure(
+              {path, EntryType::File,
+               Error{ErrorKind::IO, "the run ended before the copy was confirmed"}});
+          journal_write(recorded);
+          return recorded;
+        };
+      // The pending row goes once the copy is settled; a failure replaces it.
+      auto settled = [&] {
+        if (pending) journal_write(journal->clear_failure(path));
+      };
       // The error of an attempt that may have left its copy in place.
       std::optional<Error> doubt;
       auto result = retry([&] {
@@ -1089,6 +1107,7 @@ struct Engine::Impl {
                       job.dir->path.empty() ? "." : job.dir->path);
         }
         succeeded(path);
+        settled();
       } else if (doubt) {
         // The journal keeps the copy in doubt, however its last attempt
         // ended, also when cancelled.
@@ -1100,6 +1119,7 @@ struct Engine::Impl {
         fail(path, EntryType::File, e);
       } else if (result.error().kind == ErrorKind::NotFound && !target_failed) {
         vanished(path, EntryType::File);
+        settled();
       } else {
         fail(path, EntryType::File, result.error());
       }
@@ -1150,6 +1170,7 @@ struct Engine::Impl {
     file_mode_bits = dst.file_mode_bits;
     dir_mode_bits = dst.dir_mode_bits;
     checksums_expected = dst.checksum != ChecksumType::None || src.checksum != ChecksumType::None;
+    confirms_after_commit = dst.confirms_after_commit;
     if (options.preserve_mode && (file_mode_bits != 07777 || dir_mode_bits != 07777)) {
       char bits[80];
       std::snprintf(bits, sizeof bits, "%04o of files and %04o of directories", file_mode_bits,

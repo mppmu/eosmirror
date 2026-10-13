@@ -590,6 +590,51 @@ TEST_CASE("fake: an upload is confirmed by its file, not by what is in its place
   }
 }
 
+TEST_CASE("fake: a run that ends before an upload is confirmed leaves it in doubt") {
+  TempDir tmp;
+  std::string file = tmp.sub("j.sqlite");
+  auto journal = Journal::open(file, "fake", "fake");
+  REQUIRE(journal.ok());
+  Journal& j = *journal.value();
+  FakeEndpoint src, dst;
+  dst.atomic_uploads = true;
+  populate(src);
+  // The journal as a run that ends between the close of f0 and its
+  // confirmation leaves it: its copy is in place, but nothing confirmed it.
+  std::string ended = tmp.sub("ended.sqlite");
+  dst.hook = [&](std::string_view op, const RelPath& path) {
+    if (op != "confirm" || path != "f0") return;
+    sqlite3* db = nullptr;
+    REQUIRE(sqlite3_open(file.c_str(), &db) == SQLITE_OK);
+    CHECK(sqlite3_exec(db, ("VACUUM INTO '" + ended + "'").c_str(), nullptr, nullptr, nullptr) ==
+          SQLITE_OK);
+    sqlite3_close(db);
+  };
+  // One copy at a time, so that no other is under way then.
+  SyncOptions one = fake_options();
+  one.min_transfers = one.max_transfers = 1;
+  REQUIRE(j.begin_run(false).ok());
+  Report r;
+  REQUIRE(run_sync(src, dst, one, r, &j).ok());
+  REQUIRE(j.end_run(true).ok());
+  CHECK(r.stats.files_copied == 3);
+  CHECK(j.failures().value().empty());
+  dst.hook = nullptr;
+
+  // The next run with that journal copies it again, though it has the
+  // source's size and mtime.
+  auto after = Journal::open(ended, "fake", "fake");
+  REQUIRE(after.ok());
+  REQUIRE(after.value()->begin_run(false).ok());
+  Report r2;
+  REQUIRE(run_sync(src, dst, fake_options(), r2, after.value().get()).ok());
+  REQUIRE(after.value()->end_run(true).ok());
+  CHECK(r2.stats.files_copied == 1);
+  CHECK(r2.stats.files_unchanged == 2);
+  CHECK(after.value()->failures().value().empty());
+  expect_mirrored(src, dst);
+}
+
 TEST_CASE("fake: files whose last copy failed are copied again, whatever their size and mtime") {
   TempDir tmp;
   auto journal = Journal::open(tmp.sub("j.sqlite"), "fake", "fake");

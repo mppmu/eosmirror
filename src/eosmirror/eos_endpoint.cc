@@ -567,6 +567,7 @@ EosEndpoint::EosEndpoint(const std::string& url, EndpointUrl parts, XrdOptions o
   caps_.file_mode_bits = 0777;
   caps_.dir_mode_bits = 03777;
   caps_.checksum = ChecksumType::Adler32;
+  caps_.confirms_after_commit = true;
 }
 
 Result<std::unique_ptr<EosEndpoint>> EosEndpoint::create(const std::string& url,

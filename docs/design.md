@@ -244,6 +244,13 @@ Modes:
   when it could be neither removed nor given mtime 0, which then fails it as
   an I/O error whatever went wrong. Before the new copy, the file gets
   mtime 0, so that an upload that does not arrive cannot be taken for it.
+  An EOS upload gets such a row ("the run ended before the copy was
+  confirmed") right before its close, removed once the copy is confirmed
+  or replaced by its failure: a run that ends in between (killed, or on a
+  host that crashed) leaves the copy in doubt. Rows are written in a
+  transaction each, in SQLite's write-ahead log with synchronous=NORMAL,
+  which keeps them when the process ends, though not necessarily through
+  a power loss.
   Once an attempt has left a copy in doubt, its row is such an I/O error
   however the later attempts end, also when the run is cancelled before
   the next one.
@@ -488,7 +495,10 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
   the removal; another writer can still replace the file between the two
   requests. Where the query cannot tell whether the upload is in place, the
   file in place is left alone, and the copy fails as an I/O error, which
-  keeps it in doubt (see the journal above). Owner and mode are applied
+  keeps it in doubt (see the journal above). A run with a journal records
+  each upload as in doubt before its close, until it is confirmed or its
+  failure recorded: a run that ends in between leaves it to the next run,
+  which copies it again. Owner and mode are applied
   after the close, since an upload runs under the client's identity: the
   file is briefly visible with the uploader's owner. The mode is passed in
   the open, which gives a new file that mode plus the owner's read and

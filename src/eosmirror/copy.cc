@@ -148,6 +148,12 @@ Result<CopyOutcome> copy_file(Endpoint& source, Endpoint& target, const RelPath&
     }
   }
   spec.require_verification = options.require_verification && !source_verified;
+  if (options.before_commit) {
+    if (Status s = options.before_commit(); !s.ok()) {
+      writer->abort();
+      return s.error();
+    }
+  }
   auto committed = writer->commit(spec);
   if (!committed.ok()) return target_failed(committed.error());
   return CopyOutcome{src.size, spec.checksum, committed.value().verified || source_verified};
