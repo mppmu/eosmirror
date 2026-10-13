@@ -18,7 +18,8 @@ struct sqlite3_stmt;
 namespace eosmirror {
 
 // The options of a run that decide what it makes of the target, as names
-// and values, which a resumed run must share with the run it resumes.
+// and values, which a resumed run must share with the run it resumes. An
+// option that is off has the value "no", or "" (one that takes a value).
 using RunOptions = std::vector<std::pair<std::string, std::string>>;
 
 // The SQLite journal of a source/target pair: the entries that failed after
@@ -57,7 +58,7 @@ class Journal {
   // Whether the last run was interrupted, which leaves it to resume.
   Result<bool> interrupted();
   // The names of the given options that the last run had otherwise; an
-  // option it has no record of counts as the same.
+  // option it has no record of was off then (older journals predate it).
   Result<std::vector<std::string>> differing_options(const RunOptions& options);
 
   // Starts a run and records its options. Finalized directories of earlier

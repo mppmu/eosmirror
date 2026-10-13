@@ -154,13 +154,18 @@ TEST_CASE("journal: the options of the last run") {
   auto opened = Journal::open(tmp.sub("j.sqlite"), "/src", "/dst");
   REQUIRE(opened.ok());
   Journal& j = *opened.value();
-  CHECK(j.differing_options({{"--delete", "yes"}}).value().empty());  // none recorded
+  // Options without a record were off.
+  CHECK(j.differing_options({{"--delete", "no"}, {"--rewrite-links", ""}}).value().empty());
+  CHECK(j.differing_options({{"--delete", "yes"}}).value() == std::vector<std::string>{"--delete"});
   REQUIRE(j.begin_run(false, {{"--delete", "no"}, {"--no-owner", "yes"}}).ok());
   REQUIRE(j.end_run(false).ok());
   CHECK(j.interrupted().value());
-  auto differing =
-      j.differing_options({{"--delete", "yes"}, {"--no-owner", "yes"}, {"--new", "x"}});
-  CHECK(differing.value() == std::vector<std::string>{"--delete"});
+  auto differing = j.differing_options({{"--delete", "yes"},
+                                        {"--no-owner", "yes"},
+                                        {"--checksum", "yes"},
+                                        {"--size-only", "no"},
+                                        {"--rewrite-links", "1:a1:b"}});
+  CHECK(differing.value() == std::vector<std::string>{"--delete", "--checksum", "--rewrite-links"});
 }
 
 TEST_CASE("journal: one run at a time") {

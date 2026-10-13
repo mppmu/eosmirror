@@ -329,9 +329,11 @@ Modes:
   was interrupted; after a completed run there is nothing to resume and
   everything is walked. Recorded failures are not retried by resuming. A
   run resumes only with the options of the interrupted run that decide
-  what it makes of the target (`--delete`, `--keep-emptied`,
-  `--no-owner`, `--no-mode`, `--no-verify`, `--require-checksum`,
-  `--verify-readback`, `--rewrite-links`), which the journal records.
+  what it makes of the target (`--size-only`, `--checksum`, `--delete`,
+  `--keep-emptied`, `--one-file-system`, `--no-owner`, `--no-mode`,
+  `--no-verify`, `--require-checksum`, `--verify-readback`,
+  `--rewrite-links`), which the journal records. An option that the
+  journal has no record of (it predates the option) was off.
 - `--retry-failed` processes only the recorded failures: each within its
   parent directory, directories as subtree walks (rows below a retried
   entry are covered by its walk, whatever type it was recorded as), the

@@ -299,7 +299,8 @@ Result<std::vector<std::string>> Journal::differing_options(const RunOptions& op
   for (const auto& [name, value] : options) {
     auto recorded = meta(std::string(kOptionKey) + name);
     if (!recorded.ok() && recorded.error().kind != ErrorKind::NotFound) return recorded.error();
-    if (recorded.ok() && recorded.value() != value) differing.push_back(name);
+    bool off = value == "no" || value.empty();
+    if (recorded.ok() ? recorded.value() != value : !off) differing.push_back(name);
   }
   return differing;
 }
