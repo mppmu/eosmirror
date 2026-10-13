@@ -125,11 +125,11 @@ Status check_journal_outside(const std::string& file, const Endpoint& source,
   return {};
 }
 
-// Opens the journal of a run, and settles whether it resumes: only an
-// interrupted run with the same options, see RunOptions. A dry run reads
-// the journal but never changes it, and goes without one that does not
-// exist yet, except that one comparing by checksum records the files that
-// differ.
+// Opens the journal of a run, and settles whether the run resumes, which it
+// does only after an interrupted run with the same options (see
+// RunOptions). A dry run reads the journal but never changes it, and goes
+// without one that does not exist yet. The exception is a dry run that
+// compares by checksum: it records the files that differ.
 Result<std::unique_ptr<Journal>> open_journal(const CliOptions& opts, const Endpoint& source,
                                               const Endpoint& target, SyncOptions& sync) {
   std::string shard =
@@ -172,7 +172,7 @@ Result<std::unique_ptr<Journal>> open_journal(const CliOptions& opts, const Endp
   return opened;
 }
 
-// Creates the target's missing ancestors, like mkdir -p; the engine creates
+// Creates the target's missing ancestors, like mkdir -p. The engine creates
 // the target directory itself.
 Status ensure_parents(const std::string& spec, const EndpointSettings& settings, bool dry_run) {
   std::string parent = parent_spec(spec);
@@ -248,7 +248,8 @@ int sync(const CliOptions& opts) {
     }
     journal = std::move(opened).value();
   }
-  // What --retry-failed retries; nothing without a journal (a dry run's).
+  // What --retry-failed retries: nothing for a dry run whose journal does
+  // not exist yet.
   std::vector<Failure> retried;
   if (opts.retry_failed && journal) {
     auto failures = journal->failures();

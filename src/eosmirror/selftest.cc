@@ -123,7 +123,7 @@ class Selftest {
     else
       skip("verify the stored checksum", "the target computes no checksum to compare with");
 
-    // As a run ends, before the metadata is final.
+    // Flushed as at the end of a run, which makes the metadata final.
     if (Status flushed = target_.flush(); !flushed.ok())
       fail("make the file durable", flushed.error().describe());
     auto st = target_.stat(file_);
@@ -209,8 +209,8 @@ class Selftest {
   void cleanup() {
     if (link_exists_) check("remove the symlink", target_.remove(link_, EntryType::Symlink));
     if (file_exists_) check("remove the file", target_.remove(file_, EntryType::File));
-    // Failed steps may have left entries behind (such as a server's own
-    // temporaries); remove whatever is still there.
+    // Failed steps may have left entries behind, such as a server's own
+    // temporaries.
     auto left = target_.list(dir_);
     if (left.ok()) {
       for (const Entry& e : left.value().entries) {

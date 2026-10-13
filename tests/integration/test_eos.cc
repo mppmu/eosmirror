@@ -3,7 +3,7 @@
 // Integration tests against a live EOS instance. EOSMIRROR_EOS_URL names a
 // writable directory on it, e.g. root://eosmirror-mgm.eosmirror.test//eos/test,
 // with the subdirectories replica2, raid6 and nochecksum as the test instance
-// creates them. The tests run as root, except for the one of a sudoer's
+// creates them. The tests run as root, except the one that needs a sudoer's
 // identity, which as-sudoer.sh runs on its own.
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -539,8 +539,8 @@ TEST_CASE("EOS to FS: downloads are verified, and a read that fails midway leave
   REQUIRE(attr.value().retc == 0);
   put(ep, "crc/bad", big);
   // The crc32c checksum relabelled as adler32. The storage node finds the
-  // mismatch itself: it fails the read that reaches the end of the file, and
-  // later opens.
+  // mismatch itself: the read that reaches the end of the file fails, and so
+  // do later opens.
   auto relabel = ep.proc("mgm.cmd=file&mgm.subcmd=layout&mgm.path=" + ep.absolute("crc/bad") +
                          "&mgm.file.layout.checksum=adler");
   REQUIRE(relabel.ok());
@@ -626,8 +626,8 @@ TEST_CASE("EOS to FS: files are read with the listing's metadata, without MGM st
     CHECK(tmp.read_file("dst/d/f7") == pattern(1007));
     // Per file, the MGM sees the open, which redirects to the storage node
     // (or, for the empty file of the replica layout, serves it), and the
-    // storage node a stat after the read; the only stat on the MGM is the
-    // one of the top directory, the other opens are the two listings.
+    // storage node sees a stat after the read. The only stat on the MGM is
+    // that of the top directory, and the two other opens are the listings.
     INFO("requests: ", sent.size());
     CHECK(RequestLog::count(sent, mgm, "kXR_query") == 1);
     CHECK(RequestLog::count(sent, mgm, "kXR_stat") == 0);
@@ -758,10 +758,10 @@ TEST_CASE("FS to EOS: an upload is confirmed by one query of the MGM") {
     CHECK(r.stats.files_copied == files);
     CHECK(r.stats.files_unverified == 0);
   }
-  // Per file, the open, which redirects to the storage node, and one query
-  // that confirms the upload by its file id, size, mtime and checksum
-  // (getfmd); no stats (owners are not set here, and new files get their
-  // mode with the open).
+  // Per file, the MGM sees the open, which redirects to the storage node,
+  // and one query that confirms the upload by its file id, size, mtime and
+  // checksum (getfmd). It sees no stats: owners are not set here, and new
+  // files get their mode with the open.
   auto per_file = [&](std::string_view request) {
     return (RequestLog::count(sent[30], mgm, request) - RequestLog::count(sent[10], mgm, request)) /
            20.0;
@@ -1086,8 +1086,8 @@ TEST_CASE("eos endpoint: names that need encoding") {
   if (!base_url()) return;
   RemoteDir dir("names");
   EosEndpoint& ep = *dir.endpoint;
-  // Unencoded, these would cut the path short and add opaque parameters;
-  // and XrdCl takes x.meta4 for a Metalink document unless told not to.
+  // Unencoded, these would cut the path short and add opaque parameters.
+  // XrdCl also takes x.meta4 for a Metalink document unless told not to.
   for (std::string name :
        {"a b", "q?eos.atomic=0&x=1", "100%25 #1", "Gr\xc3\xb6\xc3\x9f" "e", "x.meta4"}) {
     INFO("name ", name);
@@ -1398,9 +1398,9 @@ TEST_CASE("FS to EOS: pipelined writes give erasure-coded files their parity") {
   REQUIRE(engine.run().ok());
   REQUIRE(r.stats.files_copied == 3);
 
-  // Data stripes come first, parity stripes last. Each file loses two
-  // stripes, another pair each: what is missing of the data must come from
-  // the parity, which an out-of-order write leaves zero (EOS up to 5.5.2).
+  // Data stripes come first, parity stripes last. Each file loses a
+  // different pair of stripes: missing data must come from the parity,
+  // which an out-of-order write leaves zero (EOS up to 5.5.2).
   auto locations = [&](const std::string& path) {
     auto info = ep.proc("mgm.cmd=fileinfo&mgm.path=" + ep.absolute(path) +
                         "&mgm.file.info.option=-m");

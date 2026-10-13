@@ -58,7 +58,7 @@ TEST_CASE("Result carries a value or an error") {
   REQUIRE_FALSE(bad);
   CHECK(bad.error().message == "boom");
 
-  // The value of a temporary outlives it.
+  // The value of a temporary Result outlives it in a range-for.
   size_t sum = 0;
   for (const std::string& s : Result<std::vector<std::string>>({"a value longer than a short string",
                                                                 "and another one"})

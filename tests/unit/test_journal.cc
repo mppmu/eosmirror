@@ -131,7 +131,7 @@ TEST_CASE("journal: read-only opens and other databases change nothing") {
   }
   CHECK(files_in(tmp.path()) == before);
 
-  // Databases of others, and files that are none, are refused as they are.
+  // Other databases and non-database files are refused and left as they are.
   std::string other = tmp.sub("other.sqlite"), with_meta = tmp.sub("meta.sqlite");
   sql(other, "CREATE TABLE notes (x TEXT)");
   sql(with_meta, "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)");

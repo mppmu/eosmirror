@@ -1,8 +1,8 @@
 #!/bin/bash
-# Build the binary packages from a release tarball of the working tree, RPMs
-# (rpmbuild -ta) or .debs (dpkg-buildpackage): in the build containers of the
-# given platforms or in fresh containers from stock distribution images. Runs
-# rpmlint and lintian on the results.
+# Build the binary packages, RPMs (rpmbuild -ta) or .debs (dpkg-buildpackage),
+# from a release tarball of the working tree, in the build containers of the
+# given platforms or in fresh containers from stock distribution images, and
+# run rpmlint and lintian on the results.
 #
 # Usage: scripts/build-packages.sh [--output=DIR] [--image=IMAGE...] [platform...]
 #        (default: all platforms)
@@ -37,7 +37,7 @@ if [[ ${#platforms[@]} == 0 && ${#images[@]} == 0 ]]; then
   for f in "$repo"/containers/Containerfile.*; do platforms+=("${f##*/Containerfile.}"); done
 fi
 
-# The package versions must follow the project's.
+# The package versions must match the project's.
 version=$(sed -n 's/^project(eosmirror VERSION \([0-9.]*\).*/\1/p' "$repo/CMakeLists.txt")
 grep -q "^Version: *$version\$" "$repo/packaging/eosmirror.spec" \
   || { echo "build-packages.sh: packaging/eosmirror.spec is not at version $version" >&2; exit 1; }

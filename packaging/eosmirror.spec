@@ -4,8 +4,8 @@
 # From the source tree:    rpmbuild -bb --build-in-place packaging/eosmirror.spec
 #
 # The XRootD client library is CERN's eos-xrootd under /opt/eos/xrootd (the
-# version EOS is built against, the default on EL) or, --without eos_xrootd,
-# the distribution's (EPEL, openSUSE).
+# version EOS is built against, the default except on openSUSE) or, --without
+# eos_xrootd, the distribution's (EPEL, openSUSE).
 %if 0%{?suse_version}
 %bcond_with eos_xrootd
 %else
@@ -47,10 +47,11 @@ Requires:       xrootd-libs%{?_isa}
 %description
 eosmirror copies a file tree from a source to a target so that the target
 ends up with the same files, symlinks, directories, owners, modes and
-modification times. Sources and targets are local file systems, XRootD servers
-and EOS instances. It is made for very large trees over high-latency links:
-it keeps many transfers in flight, works directory by directory with bounded
-memory, and keeps a journal so that a later run retries exactly what failed.
+modification times. Sources and targets can be local file systems, XRootD
+servers or EOS instances. It is made for very large trees over high-latency
+links: it keeps many transfers in flight, works directory by directory with
+bounded memory, and keeps a journal so that a later run retries exactly what
+failed.
 
 %prep
 %autosetup

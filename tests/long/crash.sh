@@ -4,12 +4,13 @@
 # journal, --resume and --delete as an operator would run them. The copy
 # must then equal the source in content and metadata. Killed runs leave the
 # copies they made since their last sync of the file system with mtime 0,
-# which the next run copies again. Several rounds change
-# the source in between (files rewritten with and without another size,
-# deleted, added, given other modes, replaced by directories). The seed
-# (printed; EOSMIRROR_SEED or the second argument) reproduces the trees and
-# the changes, though not the contents of the files nor where in a run the
-# kills hit, which depends on its speed.
+# which the next run copies again. Several rounds change the source in
+# between (files rewritten with the same or another size, deleted, added,
+# given other modes, replaced by directories).
+#
+# The seed (printed, and taken from the second argument or EOSMIRROR_SEED)
+# reproduces the trees and the changes, but not the contents of the files or
+# where in a run the kills hit, which depends on its speed.
 #
 # Usage: crash.sh PATH_TO_EOSMIRROR [SEED]
 # Env:   EOSMIRROR_ROUNDS  rounds (default 60)
@@ -32,7 +33,7 @@ fail() {
   exit 1
 }
 
-# A run still going when the test ends (killed by a timeout) goes too.
+# When the test ends, such as by a timeout, a run still going is killed too.
 stop_run() {
   if [[ -n $pid && $(cat "/proc/$pid/comm" 2> /dev/null) == eosmirror ]]; then
     kill -9 "$pid" 2> /dev/null || true
@@ -43,7 +44,7 @@ trap stop_run EXIT
 owner_opt=()
 [[ $(id -u) == 0 ]] || owner_opt=(--no-owner)
 
-# Sets when to a random time for touch -d.
+# Sets $when to a random time for touch -d.
 random_time() { when="@$((1500000000 + RANDOM * 3000)).$((RANDOM % 1000))"; }
 
 # A file of random content: empty, up to 20 kB, or up to 1 MiB.
@@ -101,8 +102,7 @@ change_source() {
   done
 }
 
-# The tree as find describes it, eosmirror's temporaries of killed runs
-# aside.
+# The tree as find describes it, without the temporaries of killed runs.
 describe() {
   (cd "$1" && find . -name '.*.eosmirror-*' -prune -o \
     \( -type f -printf '%P file %m %T@ %s\n' \) -o \
@@ -121,7 +121,7 @@ provisional=0
 duration=100
 longest=0
 for ((round = 0; round < rounds; round++)); do
-  # Each round from a seed of its own: the draws of the runs before differ.
+  # Each round gets a seed of its own, as the draws of the runs before it vary.
   RANDOM=$((seed * 1000 + round))
   ((round == 0)) || change_source
   # Directories get their mtimes once their changes are made.

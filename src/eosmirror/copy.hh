@@ -46,7 +46,7 @@ struct CopyOutcome {
 // (FileReader::state: a stat, or the listed entry where the reader can tell
 // that the file still has its listed size). If the source changed by the
 // end, nothing is committed and the error is Changed. Nothing is created on
-// the target before the first chunk was read. Checksums are computed while
+// the target until the first chunk is read. Checksums are computed while
 // streaming: the target's own type if it computes one, else the source's,
 // else adler32. The checksum the source stores is compared too where the
 // target computes none, or where the source lists it anyway: `listed` is the
@@ -58,8 +58,8 @@ Result<CopyOutcome> copy_file(Endpoint& source, Endpoint& target, const RelPath&
                               const Cancellation& cancel);
 
 // The checksum of the given type of a file on an endpoint as it was listed,
-// computed by reading it in chunks of the pool's buffer size; Changed if the
-// file has another size than listed or changes while it is read.
+// computed by reading it in chunks of the pool's buffer size. Changed if the
+// file no longer has its listed size, or changes while it is read.
 Result<Checksum> read_checksum(Endpoint& ep, const RelPath& path, const Entry& listed,
                                ChecksumType type, BufferPool& pool, const Cancellation& cancel);
 

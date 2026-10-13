@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// The requests and replies of the XRootD and EOS endpoints, without a server.
+// The XRootD and EOS endpoints' requests and replies, tested without a server.
 #include <XProtocol/XProtocol.hh>
 #include <XrdCl/XrdClXRootDResponses.hh>
 
@@ -62,7 +62,8 @@ TEST_CASE("endpoint URLs keep their protocol and opaque parameters") {
   CHECK(parts.value().path == "/data");
   CHECK(parts.value().cgi.empty());
   CHECK_FALSE(parse_endpoint_url("root://host/relative").ok());
-  // Servers resolve . and .. after symlinks, which comparing roots cannot.
+  // Servers resolve . and .. after symlinks, which a comparison of roots
+  // cannot, so such paths are refused.
   for (const char* url : {"root://host//eos/missing/../alias/p", "root://host//data/./x",
                           "root://host//data/..", "root://host//data/x/.?authz=a"})
     CHECK_FALSE(parse_endpoint_url(url).ok());
@@ -103,7 +104,7 @@ TEST_CASE("files are replaced by moves where the server refuses to replace them"
   REQUIRE(move_replacing("/d/.f.tmp", "/d/f", move, remove).ok());
   CHECK(files == Files{{"/d/f", "new"}});
 
-  // The old file goes back where the new one cannot follow.
+  // If the new file cannot be moved in, the old one is moved back.
   files = {{"/d/.f.tmp", "new"}, {"/d/f", "old"}};
   lose_new = true;
   auto failed = move_replacing("/d/.f.tmp", "/d/f", move, remove);
@@ -173,7 +174,7 @@ TEST_CASE("subdirectories that find leaves out for lack of permission") {
 }
 
 TEST_CASE("getfmd replies describe a file by its id, with its path") {
-  // As EOS 5.5.2 replies, '&' in names written as "#AND#".
+  // As EOS 5.5.2 replies, with '&' in names written as "#AND#".
   auto reply = parse_getfmd_reply(
       "getfmd: retc=0 name=probe a#AND#b.txt&id=227423&ctime=1791876727&ctime_ns=653271963"
       "&mtime=1791876727&mtime_ns=656643000&size=5&cid=18&uid=0&gid=0&lid=6553874&flags=416"
@@ -262,7 +263,7 @@ TEST_CASE("find listing lines") {
 
   CHECK(f.checksum == Checksum{});
 
-  // Checksums with their type; files that have none, or one never stored.
+  // Checksums with their type, and files that have none or one never stored.
   Entry c = listed(R"(path="/eos/d/c" type=file  size=5 uid=1 gid=2 flags=644 mtime=1.0 )"
                    R"(checksum=0A1b2c3d checksumtype=adler)");
   CHECK(c.checksum == Checksum{ChecksumType::Adler32, "0a1b2c3d"});
@@ -329,14 +330,14 @@ TEST_CASE("find listing lines tell directories that force uploads to be non-atom
   // The system attribute decides where it is set.
   CHECK_FALSE(non_atomic(R"(attr.sys.forced.atomic="1" attr.user.forced.atomic="0")"));
   CHECK(non_atomic(R"(attr.sys.forced.atomic="0" attr.user.forced.atomic="1")"));
-  // As EOS reads the values: a number that starts them, else 0.
+  // As EOS reads the values: the number they start with, else 0.
   CHECK(non_atomic(R"(attr.user.forced.atomic="")"));
   CHECK(non_atomic(R"(attr.user.forced.atomic="no")"));
   CHECK_FALSE(non_atomic(R"(attr.user.forced.atomic="2x")"));
   CHECK_FALSE(non_atomic(R"(attr.user.forced.atomic="-1")"));
-  // Values that would make the rest of the line ambiguous are refused, and
-  // so is a value whose quote ends it early to forge fields after it, which
-  // repeats a field, and so are fields that are not in the format.
+  // Refused: values that would make the rest of the line ambiguous, a value
+  // whose quote ends it early to forge fields after it (which repeats a
+  // field), and fields that are not in the format.
   for (const char* value : {R"("0 size=5")", R"("0)", R"(0)", R"("0"x")",
                             R"("1" size=0 checksum=00000001)", R"("1" etag=1)"}) {
     INFO("value ", value);
@@ -347,7 +348,7 @@ TEST_CASE("find listing lines tell directories that force uploads to be non-atom
 
 TEST_CASE("find listing lines that are refused") {
   // A name or link target containing the end of the path makes the line
-  // ambiguous; the second could forge "/eos/d/a" with other metadata.
+  // ambiguous. The second could forge "/eos/d/a" with other metadata.
   CHECK(refused(R"(path="/eos/d/x" type=file y" type=file  size=1 uid=1 gid=1 flags=644 )"
                 R"(mtime=1.0)"));
   CHECK(refused(R"(path="/eos/d/s" type=symlink  size=0 uid=1 gid=1 flags=0 mtime=1.0 )"
@@ -366,7 +367,7 @@ TEST_CASE("find listing lines that are refused") {
   CHECK(refused(R"(path="/eos/d/f" type=fifo  size=1 uid=1 gid=1 flags=644 mtime=1.0)"));
   CHECK(refused(R"(path="/eos/d/l" type=symlink  size=0 uid=1 gid=1 flags=0 mtime=1.0 target="x)"));
   CHECK(refused(""));
-  // Fields that cannot be parsed are no zeros.
+  // Fields that cannot be parsed are refused, not read as zeros.
   for (const char* fields :
        {"size=12x uid=1 gid=1 flags=644 mtime=1.0", "size=1 uid=-1 gid=1 flags=644 mtime=1.0",
         "size=1 uid=1 gid= flags=644 mtime=1.0", "size=1 uid=1 gid=1 flags=648 mtime=1.0",

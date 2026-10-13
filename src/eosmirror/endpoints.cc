@@ -152,7 +152,7 @@ Result<std::unique_ptr<Endpoint>> make_endpoint(const std::string& given,
     bool eos = scheme == "eos";
     if (eos || scheme == "root" || scheme == "roots" || scheme == "xroot" || scheme == "xroots") {
 #ifdef EOSMIRROR_HAVE_XROOTD
-      // An EOS MGM answers the eos client's commands; other servers get the
+      // An EOS MGM answers the eos client's commands. Other servers get the
       // plain XRootD endpoint. "eos://" names EOS explicitly.
       std::string url = eos ? "root" + spec.substr(3) : spec;
       bool is_eos = eos;

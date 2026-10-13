@@ -13,8 +13,9 @@
 
 // The requests XrdCl sends, from its log at the dump level, which has a line
 // "[host:port #n] Sending message kXR_... (...) through substream ..." for
-// each. The log output is taken over once, before XrdCl starts any threads;
-// other messages still go to stderr.
+// each. The log output is taken over once, before XrdCl starts any threads.
+// Outside a recording, every message goes to stderr; during one, only the
+// request lines are kept.
 class RequestLog : public XrdCl::LogOut {
  public:
   // Call before anything else uses XrdCl.

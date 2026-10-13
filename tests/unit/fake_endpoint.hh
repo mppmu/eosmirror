@@ -21,10 +21,10 @@
 // Creating or removing entries bumps the parent directory's mtime, as real
 // file systems do, so that tests can check that directory mtimes are fixed
 // after their entries. Writes verify the checksum when `caps.checksum` is set,
-// like EOS does. With `atomic_uploads`, they are confirmed afterwards like
-// EOS's, by the id that each upload gives its file and a "confirm" query; a
-// "close" fault fails a commit after the file is in place, and a "lost"
-// fault makes it succeed without (a close whose connection is gone).
+// like EOS does. With `atomic_uploads`, they are confirmed afterwards as on
+// EOS, by the id that each upload gives its file and a "confirm" query. A
+// "close" fault fails a commit after the file is in place. A "lost" fault,
+// like a close whose connection is gone, makes it succeed without the file.
 class FakeEndpoint : public eosmirror::Endpoint {
  public:
   using Entry = eosmirror::Entry;
@@ -59,9 +59,9 @@ class FakeEndpoint : public eosmirror::Endpoint {
   eosmirror::Capabilities caps;
   std::function<void(std::string_view op, const RelPath& path)> hook;
   bool utimes_needs_write = false;  // like EOS: utimes requires write access
-  // Like EOS: readers take the listed entry as the file's state while the
-  // file has the listed size at the open, and tell changes during the read
-  // by the size and mtime it had at the open, without a stat.
+  // Like EOS: readers take the listed entry as the file's state if the file
+  // has the listed size at the open, and detect changes during the read by
+  // the size and mtime it had at the open, without a stat.
   bool readers_take_listing = false;
   // Like a user other than root: creating and removing entries requires
   // the owner's write bit on the directory.
@@ -69,10 +69,10 @@ class FakeEndpoint : public eosmirror::Endpoint {
   // Like EOS: files are written in place and confirmed by AtomicUploadWriter,
   // against the checksum of `caps.checksum` where set.
   bool atomic_uploads = false;
-  // What runs with this endpoint as target say about it at the start.
+  // What runs with this endpoint as target print about it at the start.
   std::string warning, note;
-  // Entries that listings leave out as unsafe, and count, like lines of an
-  // EOS listing that cannot be parsed.
+  // Entries that listings leave out as unsafe and count as skipped, like
+  // lines of an EOS listing that cannot be parsed.
   std::set<RelPath> unlistable;
   // Entries that listings leave out without saying so, like a plain XRootD
   // server's listing that ends at an entry it cannot stat.
@@ -80,8 +80,7 @@ class FakeEndpoint : public eosmirror::Endpoint {
   // Directories whose listings say that they replace files at the open, like
   // EOS directories that force uploads to be non-atomic.
   std::set<RelPath> replacing_at_open;
-  // Listings carry the checksums of files, of the type of `caps.checksum`,
-  // like EOS's.
+  // Listings carry file checksums of type `caps.checksum`, like EOS listings.
   bool lists_checksums = false;
   // With `atomic_uploads`: this many commits leave the upload under its
   // hidden name (".tmp-<name>"), like an EOS close that timed out while the
@@ -420,7 +419,7 @@ class FakeEndpoint : public eosmirror::Endpoint {
     return not_found(path);
   }
 
-  // The checksum of the type of `caps.checksum`; none without.
+  // The checksum of type `caps.checksum`, or none if that is unset.
   eosmirror::Checksum checksum_of(const std::string& content) const {
     if (caps.checksum == eosmirror::ChecksumType::None) return {};
     eosmirror::Hasher h(caps.checksum);

@@ -117,8 +117,8 @@ rc=0; "$bin" sync -q "${owner_opt[@]}" --delete --max-delete 1 "$work/src" "$wor
 "$bin" sync -q "${owner_opt[@]}" --delete "$work/src" "$work/dst" > /dev/null
 [[ $(ls "$work/dst" | grep -c extra) == 0 ]] || fail "extra not deleted"
 
-# A source directory that is empty, as an unmounted automount looks, keeps
-# the entries of its copy with --keep-emptied, and is emptied without.
+# With --keep-emptied, the copy of an empty source directory (as an unmounted
+# automount looks) keeps its entries. Without, the copy is emptied.
 mkdir "$work/src/automount" "$work/dst/automount"
 touch "$work/dst/automount/f1" "$work/dst/automount/f2"
 "$bin" sync -q "${owner_opt[@]}" --delete --keep-emptied "$work/src" "$work/dst" > "$work/emptied.out" 2> "$work/emptied.err" \
@@ -138,7 +138,7 @@ rc=0; "$bin" sync -q "${owner_opt[@]}" --journal "$work/odd.db" "$work/odd" "$wo
 "$bin" failures "$work/odd.db" 2> /dev/null | grep -q $'^directory\tsub\t' || fail "its directory not recorded"
 
 # --checksum: a file rewritten with its size and mtime is found by a dry run
-# (exit 1, recorded in the journal) and copied by the next run with it.
+# (exit 1, recorded in the journal) and copied by a retry of the failures.
 mkdir -p "$work/ck/src"
 echo "same size" > "$work/ck/src/f"
 echo other > "$work/ck/src/g"
@@ -162,7 +162,7 @@ rc=0; "$bin" sync -q "${owner_opt[@]}" --delete "$work/missing" "$work/dst" > /d
 [[ -f $work/dst/a ]] || fail "target emptied"
 
 # Trees that overlap are refused before anything is created or deleted:
-# a target around the source, inside it, the same tree by another name.
+# a target around the source, inside it, or the same tree by another name.
 mkdir -p "$work/data/proj" "$work/data/unrelated"
 echo p > "$work/data/proj/f"
 echo u > "$work/data/unrelated/g"

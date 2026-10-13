@@ -6,9 +6,9 @@
 #include <system_error>
 #include <thread>
 
-// Keeps the process from starting threads while it lives, by an
-// RLIMIT_NPROC of 0. That limit does not bind root outside of a user
-// namespace, which binds() tells.
+// Keeps the process from starting threads while it lives, by setting
+// RLIMIT_NPROC to 0. The limit does not bind root outside a user namespace,
+// so binds() tells whether it took effect.
 class NoNewThreads {
  public:
   NoNewThreads() {

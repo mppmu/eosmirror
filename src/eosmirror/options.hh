@@ -35,28 +35,28 @@ struct SyncOptions {
   int min_transfers = 4;
   int max_transfers = 64;
   std::chrono::seconds adapt_interval{10};
-  // The target makes the copies so far durable this often, and at the end
-  // (Endpoint::flush); only then are their directories recorded as
-  // finalized for resuming.
+  // The target makes the copies so far durable this often and at the end
+  // (Endpoint::flush). Only then are their directories recorded as finalized
+  // for resuming.
   std::chrono::milliseconds sync_interval{30000};
   size_t max_backlog = 10000;  // queued copies before the checkers block
   size_t buffer_size = 8u << 20;
 
   bool dry_run = false;
-  // Compare files by size alone, not by mtime, as a target that stores no
-  // mtimes needs; mtimes are still set where the target stores them.
+  // Compare files by size alone, not by mtime, for a target that stores no
+  // mtimes. Where the target does store them, mtimes are still set.
   bool size_only = false;
-  // Compare files of the same size by checksum instead of mtime: stored
-  // ones where both sides have one of a type, else computed by reading. With
-  // dry_run, each file that differs is a failure (a verification).
+  // Compare files of the same size by checksum instead of mtime: stored ones
+  // where both sides have one of the same type, else computed by reading.
+  // With dry_run, each file that differs is a failure (a verification).
   bool checksum = false;
   bool delete_extra = false;
   // Keep the extras of directories that are empty on the source but not on
-  // the target, which delete_extra deletes like any other (the top
-  // directory of a run never: an empty source stops the run).
+  // the target, which delete_extra otherwise deletes like any others. The
+  // top directory of a run is the exception: an empty source stops the run.
   bool keep_emptied = false;
   uint64_t max_delete = UINT64_MAX;
-  // The target has no symlinks, which delete_extra needs to be told for a
+  // States that the target has no symlinks. delete_extra needs this for a
   // target that follows symlinks it cannot show.
   bool target_without_symlinks = false;
   bool preserve_owner = true;
@@ -64,7 +64,7 @@ struct SyncOptions {
   bool verify = true;  // compute and compare checksums where possible
   bool require_checksum = false;  // fail copies the target cannot verify
   bool resume = false;  // skip directories the journal records as finalized
-  // Skip directories of the source on other file systems than its root.
+  // Skip source directories on file systems other than the source root's.
   bool one_file_system = false;
 
   RetryPolicy retry;
@@ -79,8 +79,8 @@ struct SyncOptions {
   // Symlink targets starting with .first are rewritten to start with .second.
   std::vector<std::pair<std::string, std::string>> link_rewrites;
 
-  // Temporaries not changed for this long (by mtime and ctime) are taken
-  // for leftovers of earlier runs, and removed with --delete.
+  // Temporaries not changed for this long (by mtime and ctime) are treated
+  // as leftovers of earlier runs and removed with --delete.
   std::chrono::seconds stale_temp_age{3600};
 };
 

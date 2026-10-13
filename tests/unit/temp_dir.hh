@@ -9,8 +9,8 @@
 #include <fstream>
 #include <string>
 
-// A fresh directory under $TMPDIR, removed with its contents on destruction,
-// also read-only directories in it.
+// A fresh directory under $TMPDIR, removed with all its contents on
+// destruction, including read-only directories.
 class TempDir {
  public:
   TempDir() {

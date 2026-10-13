@@ -20,8 +20,8 @@ class Cancellation {
     return requested_.load(std::memory_order_relaxed) || (parent_ && parent_->requested());
   }
 
-  // Sleeps for the duration unless cancelled first, or until the stop flag is
-  // set. Returns true if cancelled or stopped.
+  // Sleeps for the duration, or until cancelled or the stop flag is set.
+  // Returns true if cancelled or stopped.
   bool wait(std::chrono::milliseconds duration, const std::atomic<bool>* stop = nullptr) const {
     auto deadline = std::chrono::steady_clock::now() + duration;
     while (!requested() && !(stop && stop->load())) {

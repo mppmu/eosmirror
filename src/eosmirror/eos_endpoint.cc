@@ -224,12 +224,12 @@ std::string format_timespec(const Timespec& t) {
 // Reads from a storage node. The listing has the file's exact metadata
 // (nanosecond mtime, owners), so a copy takes it from there while the open
 // replica has the listed size. The storage node's stat of the replica, which
-// comes with the open, has the file's size (the logical size of
-// erasure-coded files) but the replica's own mtime, in seconds
-// (fst/XrdFstOfsFile.cc stat): a change during the copy shows in its stat
-// after the read. A file whose size differs from the listing has changed
-// since; it is stated through the MGM before and after reading, which must
-// find the file opened under its name: one replaced since has another id.
+// comes with the open, has the file's size (the logical size of erasure-coded
+// files) but the replica's own mtime, in seconds (fst/XrdFstOfsFile.cc stat):
+// a change during the copy shows in its stat after the read. A file whose
+// size differs from the listing has changed since. It is stated through the
+// MGM before and after reading, and each stat must find the opened file under
+// its name (a file replaced since has another id).
 class EosReader : public XrdReader {
  public:
   // fid: the id of the file opened, 0 if unknown.
@@ -276,14 +276,13 @@ class EosReader : public XrdReader {
   std::optional<Entry> replica_;  // the replica at the open, when the listing was taken
 };
 
-// An upload through EOS's atomic upload: the file is created under its final
-// name with eos.atomic=1 and eos.mtime=... (unless the seconds are 0, which
-// the MGM takes for none), and EOS stores it under a hidden name and renames
-// it at close. Its commit only closes it; the
-// AtomicUploadWriter around it confirms what is in place. Up to `window`
-// writes are in flight, sent in offset order over the file's one connection,
-// each at the end of the previous one, as erasure-coded layouts need (see
-// docs/design.md).
+// An atomic upload to EOS: the file is created under its final name with
+// eos.atomic=1 and eos.mtime=... (unless the seconds are 0, which the MGM
+// takes for none), and EOS stores it under a hidden name and renames it at
+// close. Its commit only closes it. The AtomicUploadWriter around it confirms
+// what is in place. Up to `window` writes are in flight, sent in offset order
+// over the file's one connection, each at the end of the previous one, as
+// erasure-coded layouts need (see docs/design.md).
 class EosUploadWriter : public XrdFileWriter {
  public:
   EosUploadWriter(std::unique_ptr<XrdCl::File> file, std::string url, int window)
@@ -301,7 +300,7 @@ class EosUploadWriter : public XrdFileWriter {
   }
 
   // A storage node commits an atomic upload at any regular close, partial or
-  // not; told to delete it first, it discards the upload instead. A file that
+  // not. Told to delete it first, it discards the upload instead. A file that
   // XrdCl gave up on is not closed at all, and the node discards its upload
   // when the connection ends.
   void abort() override {
@@ -428,8 +427,8 @@ EosEndpoint::ProcResult parse_proc_reply(const std::string& reply) {
   return result;
 }
 
-// Whether EOS takes a forced.atomic attribute's value for on, as a number
-// that starts it and is not 0 (mgm/utils/AttrHelper.cc, checkAtomicUpload).
+// Whether EOS takes a forced.atomic attribute's value for on: it starts with
+// a number that is not 0 (mgm/utils/AttrHelper.cc, checkAtomicUpload).
 bool atomic_on(std::string_view value) {
   int number = 0;
   std::from_chars(value.data(), value.data() + value.size(), number);
@@ -458,8 +457,7 @@ Result<FindEntry> parse_find_line(std::string_view line, std::string_view abs_di
   std::string_view checksum, checksum_type;
   std::optional<std::string_view> sys_atomic, user_atomic;
   // Attribute values are printed raw as well: one with a quote and a space
-  // would continue as further fields, so none may repeat, and none may be
-  // unknown.
+  // would continue as further fields, so no field may repeat or be unknown.
   std::vector<std::string_view> keys;
   std::string_view rest = line.substr(path_end + 2);
   while (!rest.empty()) {
@@ -953,7 +951,7 @@ Status EosEndpoint::set_metadata(const RelPath& path, const Entry& md, MetaField
     if (!s.ok()) return s;
   }
   if (has(fields, MetaFields::Owner) && (!is_symlink || caps_.symlink_owner)) {
-    // The fsctl form follows symlinks and parses ids as signed ints; the
+    // The fsctl form follows symlinks and parses ids as signed ints. The
     // proc command with option h changes a symlink itself.
     constexpr uint32_t kMaxInt = 0x7fffffff;
     if (!is_symlink && md.uid <= kMaxInt && md.gid <= kMaxInt) {

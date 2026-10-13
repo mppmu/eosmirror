@@ -35,7 +35,7 @@ eos() { podman exec eosmirror-mgm eos -b "$@"; }
 
 running() { [[ $(podman inspect --format '{{.State.Running}}' "eosmirror-$1" 2>/dev/null) == true ]]; }
 
-# Retry "$@" every 2 s until it succeeds, for at most $TIMEOUT s.
+# Retries "$@" every 2 s until it succeeds, for at most $TIMEOUT s.
 wait_for() {
   local what=$1 start=$SECONDS deadline=$((SECONDS + ${TIMEOUT:-300}))
   shift
@@ -107,7 +107,7 @@ do_init() {
   fi
   [[ -e $S/eos-client.keytab ]] || grep ' n:eosmirror-client ' "$S/eos.keytab" > "$S/eos-client.keytab"
   [[ -e $S/eos-root.keytab ]] || grep ' n:eosmirror-root ' "$S/eos.keytab" > "$S/eos-root.keytab"
-  # The daemon's key, a sudoer, for the test that needs one.
+  # The daemon key, whose user is a sudoer, for the test that needs one.
   [[ -e $S/eos-daemon.keytab ]] || grep ' n:eosmirror-daemon ' "$S/eos.keytab" > "$S/eos-daemon.keytab"
   for f in qdb.password macaroon.secret; do
     [[ -e $S/$f ]] || openssl rand -hex 32 | tr -d '\n' > "$S/$f"

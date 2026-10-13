@@ -43,7 +43,7 @@ class EosEndpoint : public XrdEndpoint {
   // The checksum from the listing, without asking.
   Result<Checksum> stored_checksum(const RelPath& path, const Entry& listed) override;
 
-  // Stats an absolute path without following a final symlink; the result is
+  // Stats an absolute path without following a final symlink. The result is
   // named by the last path component.
   Result<Entry> stat_abs(const std::string& abs_path) override;
 
@@ -53,7 +53,7 @@ class EosEndpoint : public XrdEndpoint {
 
   // The file with the given id, created by an upload to an absolute path, as
   // it is now (see UploadFile), with size, mtime and stored checksum, by one
-  // query (the MGM's getfmd); NotFound once it is gone. A name that EOS
+  // query (the MGM's getfmd). NotFound once it is gone. A name that EOS
   // writes ambiguously in replies ('&' as "#AND#") takes a stat of the path.
   Result<UploadFile> file_by_id(const std::string& abs_path, uint64_t fid);
 

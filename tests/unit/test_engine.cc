@@ -204,8 +204,8 @@ TEST_CASE("FS to FS: a tree is replicated and reruns change nothing") {
   }
 
   SUBCASE("temporaries are not extras, and recent ones stay with --delete") {
-    // Copies set the mtime of their temporary before renaming it; the
-    // ctime tells that it is being worked on.
+    // Copies set the mtime of their temporary before renaming it. The ctime
+    // tells that it is being worked on.
     tmp.write_file("dst/.a.txt.eosmirror-0123456789ab", "partial");
     set_mtime(tmp.sub("dst/.a.txt.eosmirror-0123456789ab"), 1500000000, 0);
     tmp.write_file("dst/.fresh.eosmirror-0123456789ab", "in progress");
@@ -492,8 +492,8 @@ TEST_CASE("fake: an upload whose close failed is taken back where it is in place
   dst.add_dir("d1/d2");
   dst.add_file("d1/d2/f2", "older", 0640, {2500, 0});
   // EOS can commit an upload whose close fails: the file is then in place
-  // with the source's size and mtime. Every attempt fails like that; d1/f1
-  // cannot be removed either.
+  // with the source's size and mtime. Every attempt fails like that, and
+  // d1/f1 cannot be removed either.
   const int attempts = fake_options().retry.attempts;
   for (const char* path : {"f0", "d1/f1"})
     dst.fail("close", path, Error{ErrorKind::IO, "close failed"}, attempts);
@@ -522,8 +522,8 @@ TEST_CASE("fake: uploads that fail their verification are taken back") {
   dst.caps.checksum = ChecksumType::Adler32;
   populate(src);
   const int attempts = fake_options().retry.attempts;
-  // The data arrived corrupted; the upload cannot be confirmed, though it
-  // can be found in place again; and neither can be removed.
+  // The data of f0 arrives corrupted, and the upload of d1/f1 cannot be
+  // confirmed, though it can be found in place again. Neither can be removed.
   int confirms = 0;
   dst.hook = [&](std::string_view op, const RelPath& path) {
     if (op == "close" && path == "f0")
@@ -617,8 +617,8 @@ TEST_CASE("fake: a run that ends before an upload is confirmed leaves it in doub
   FakeEndpoint src, dst;
   dst.atomic_uploads = true;
   populate(src);
-  // The journal as a run that ends between the close of f0 and its
-  // confirmation leaves it: its copy is in place, but nothing confirmed it.
+  // The journal as left by a run that ends between the close of f0 and its
+  // confirmation: the copy is in place, but nothing confirmed it.
   std::string ended = tmp.sub("ended.sqlite");
   dst.hook = [&](std::string_view op, const RelPath& path) {
     if (op != "confirm" || path != "f0") return;
@@ -662,8 +662,8 @@ TEST_CASE("fake: files whose last copy failed are copied again, whatever their s
   populate(src);
   Report mirror;
   REQUIRE(run_sync(src, dst, fake_options(), mirror).ok());
-  // Copies in place with the source's size and mtime whose verification or
-  // close failed, and a file whose owner could not be set.
+  // Copies whose verification or close failed, in place with the source's
+  // size and mtime, and a file whose owner could not be set.
   dst.modify("f0", [](FakeEndpoint::Node& n) { n.content = "root fil3"; });
   dst.modify("d1/d2/f2", [](FakeEndpoint::Node& n) { n.content = "dEEp"; });
   REQUIRE(j.begin_run(false).ok());
@@ -1156,23 +1156,16 @@ TEST_CASE("fake: journal rows are cleared by deletions, metadata fixes and vanis
   REQUIRE(run_sync(src, dst, o, r4, &j).ok());
   REQUIRE(j.end_run(true).ok());
   REQUIRE(j.failures().value().size() == 1);
-  dst.modify("f0", [](FakeEndpoint::Node&) {});
-  FakeEndpoint src2;
-  populate(src2);
-  src2.add_dir("other");
-  REQUIRE(j.begin_run(false).ok());
-  // Remove f0 from the source and from the target.
-  FakeEndpoint src3, dst3;
+  // Gone from the source and from the target: the retry drops the row.
+  FakeEndpoint src3;
   populate(src3);
   REQUIRE(src3.remove("f0", EntryType::File).ok());
-  for (const RelPath& p : dst.paths()) {
-    auto n = dst.get(p);
-    if (n->entry.type == EntryType::File) dst3.add_file(p, n->content, n->entry.mode, n->entry.mtime);
-  }
+  REQUIRE(dst.remove("f0", EntryType::File).ok());
+  REQUIRE(j.begin_run(false).ok());
   Report r5;
   Engine engine(src3, dst, o, r5, &j, cancel);
-  REQUIRE(dst.remove("f0", EntryType::File).ok());
   REQUIRE(engine.run(j.failures().value()).ok());
+  REQUIRE(j.end_run(true).ok());
   CHECK(j.failures().value().empty());
 }
 
@@ -1206,7 +1199,7 @@ TEST_CASE("fake: every deletion that the cap withholds is journaled, and told on
   SyncOptions o = fake_options();
   o.delete_extra = true;
   o.max_delete = 2;
-  o.max_consecutive_failures = 2;  // which withheld deletions do not count for
+  o.max_consecutive_failures = 2;  // withheld deletions do not count toward it
   REQUIRE(j.begin_run(false).ok());
   Report r;
   StderrCapture err;
@@ -1344,9 +1337,12 @@ TEST_CASE("fake: --delete on a target that follows symlinks it cannot show needs
   CHECK(r2.stats.deleted == 1);
   expect_mirrored(src, dst);
 
-  // Without --delete, nothing is deleted through a symlink.
+  // Without --delete, such a target needs no flag, and nothing is deleted.
+  dst.add_file("extra", "x");
   Report r3;
   REQUIRE(run_sync(src, dst, fake_options(), r3).ok());
+  CHECK(r3.stats.deleted == 0);
+  CHECK(dst.get("extra"));
 }
 
 TEST_CASE("fake: --one-file-system skips directories on other file systems") {
@@ -1683,8 +1679,8 @@ TEST_CASE("fake: temporaries are stale once neither their mtime nor their ctime 
   int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
                     std::chrono::system_clock::now().time_since_epoch())
                     .count();
-  // A leftover of an earlier run; an upload in progress that EOS gave the
-  // source's mtime when it created it; and a temporary being written.
+  // A leftover of an earlier run, an upload in progress that EOS gave the
+  // source's mtime when it created it, and a temporary being written.
   dst.add_file(".tmp-left", "partial", 0600, {now - 7200, 0}).ctime = {now - 7200, 0};
   dst.add_file(".tmp-upload", "in flight", 0600, {1500000000, 0}).ctime = {now - 60, 0};
   dst.add_file(".tmp-written", "in progress", 0600, {now - 10, 0});
@@ -1796,7 +1792,7 @@ TEST_CASE("fake: listed names that cannot be joined into paths are skipped and c
     src.add_file(path, "evil");
     src.modify(path, [&](FakeEndpoint::Node& n) { n.entry.name = bad[i]; });
   }
-  // Files not mirrored: a failure of their directory, as with rsync.
+  // Files not mirrored count as a failure of their directory, as with rsync.
   Report r;
   REQUIRE(run_sync(src, dst, fake_options(), r).ok());
   CHECK(r.stats.invalid_names == bad.size());
@@ -1845,8 +1841,8 @@ TEST_CASE("fake: nothing is deleted where a listing skipped entries, which is a 
   Report mirror;
   REQUIRE(run_sync(src, dst, fake_options(), mirror).ok());
   // The source's listing of d1 leaves out f1 as unsafe, like a line of an EOS
-  // listing that cannot be parsed, and the target's of d1/d2 an entry of its
-  // own: their names may be on the other side.
+  // listing that cannot be parsed, and the target's listing of d1/d2 leaves
+  // out an entry of its own. Their names may be on the other side.
   src.unlistable.insert("d1/f1");
   dst.add_file("d1/extra", "x");
   dst.add_file("d1/d2/extra", "x");
@@ -1868,7 +1864,7 @@ TEST_CASE("fake: nothing is deleted where a listing skipped entries, which is a 
   CHECK(r.summary(false).find("could not be listed, whose target entries were kept: 2") !=
         std::string::npos);
   // Failures of their directories, as with rsync: what the source's listing
-  // left out is not copied, and the deletions held back are withheld.
+  // left out is not copied, and the deletions are withheld.
   CHECK(r.stats.failures == 2);
   auto rows = j.failures().value();
   REQUIRE(rows.size() == 2);
@@ -2254,7 +2250,7 @@ TEST_CASE("fake: entries that vanish from the source before they are handled are
 
   FakeEndpoint src, dst;
   populate(src);
-  // Each after the listing of its directory.
+  // Each vanishes after its directory was listed.
   src.hook = [&](std::string_view op, const RelPath& path) {
     if (op == "open_read" && path == "f0") src.erase("f0");
     if (op == "list" && path == "d1/d2") src.erase("d1/d2");
@@ -2377,11 +2373,11 @@ TEST_CASE("the transfer controller takes back a rise that did not pay") {
   // and no rise for six intervals, however the throughput goes.
   CHECK(c.update(130, 13, false) == 6);
   for (int i = 0; i < 6; ++i) CHECK(c.update(200 + i, 20, false) == 6);
-  // Then it is tried again where throughput improves.
+  // Then it is tried again when throughput improves.
   CHECK(c.update(250, 25, false) == 9);
   // At a plateau, the higher limit stays.
   for (int i = 0; i < 5; ++i) CHECK(c.update(240, 24, false) == 9);
-  // Errors of the target take a quarter away.
+  // Retries on the target take a quarter away.
   CHECK(c.update(240, 24, true) == 7);
 
   // Only a drop in bytes and files takes a rise back, and only right after it.
@@ -2772,8 +2768,8 @@ TEST_CASE("fake: an empty source does not empty the target") {
 TEST_CASE("fake: directories emptied on the source are emptied, or kept with --keep-emptied") {
   FakeEndpoint src, dst;
   populate(src);
-  // An empty directory, as an unmounted automount looks, and an emptied
-  // one deeper down, whose copies are full.
+  // An empty directory, like an unmounted automount, and an emptied one
+  // deeper down, whose copies are full.
   src.add_dir("mnt");
   src.add_dir("d1/d2/sub");
   src.add_file("d1/d2/sub/.tmp-partial", "x");
@@ -2948,7 +2944,7 @@ TEST_CASE("fake: a copy with mtime 0 is made again, whatever the comparison says
     o.checksum = true;
     src.caps.checksum = dst.caps.checksum = ChecksumType::Adler32;
     src.lists_checksums = dst.lists_checksums = true;
-    dst.modify("f0", [](FakeEndpoint::Node& n) { n.content = "root file"; });  // equal even
+    dst.modify("f0", [](FakeEndpoint::Node& n) { n.content = "root file"; });  // even equal
   }
   Report r;
   REQUIRE(run_sync(src, dst, o, r).ok());

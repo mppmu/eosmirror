@@ -68,7 +68,7 @@ void ReadAhead::start(std::unique_lock<std::mutex>& lock, Slot& slot, std::span<
     --in_flight_;
     cv_.notify_all();
   };
-  // Released while submitting, in case a completion comes at once; only
+  // Released while submitting, in case a completion comes at once. Only
   // this thread adds or removes slots.
   lock.unlock();
   Status started = submit_(slot.offset, buf, std::move(done));

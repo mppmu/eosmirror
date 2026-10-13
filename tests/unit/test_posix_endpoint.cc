@@ -138,7 +138,7 @@ TEST_CASE("posix writer commits atomically with metadata") {
   auto st = ep.stat("out.bin");
   REQUIRE(st.ok());
   CHECK(st.value().mode == 0600);
-  // The mtime once a sync has made the copy durable.
+  // The copy gets its mtime only once a sync has made it durable.
   CHECK(st.value().mtime == Timespec{0, 0});
   REQUIRE(ep.flush().ok());
   CHECK(ep.stat("out.bin").value().mtime == Timespec{1600000000, 42});
@@ -201,7 +201,7 @@ TEST_CASE("posix copies get their mtimes once a sync has made them durable") {
   CHECK(ep.stat("a").value().mode == 0640);
   REQUIRE(ep.flush().ok());
   CHECK(ep.stat("a").value().mtime == spec.metadata.mtime);
-  // A copy after a flush waits for the next.
+  // A copy made after a flush waits for the next one.
   CHECK(copy(ep, "a") == Timespec{0, 0});
   REQUIRE(ep.flush().ok());
   CHECK(ep.stat("a").value().mtime == spec.metadata.mtime);
@@ -217,21 +217,21 @@ TEST_CASE("posix copies get their mtimes once a sync has made them durable") {
   CHECK(ep.stat("a").value().mtime == theirs);
   CHECK(ep.stat("d").value().mtime == spec.metadata.mtime);
 
-  // Copies left when the endpoint goes get theirs too.
+  // Copies still waiting when the endpoint is destroyed get their mtimes too.
   {
     PosixEndpoint once(tmp.path());
     CHECK(copy(once, "b") == Timespec{0, 0});
   }
   CHECK(PosixEndpoint(tmp.path()).stat("b").value().mtime == spec.metadata.mtime);
 
-  // Without syncs, at once.
+  // Without syncs, copies get their mtimes at once.
   PosixOptions unsynced;
   unsynced.sync = false;
   PosixEndpoint plain(tmp.path(), unsynced);
   CHECK(copy(plain, "c") == spec.metadata.mtime);
 
-  // A source mtime of 0 could not be told from the provisional one: such a
-  // copy is synced at once and gets its mtime with it.
+  // A source mtime of 0 could not be told apart from the provisional one, so
+  // such a copy is synced at once and gets its mtime with that sync.
   spec.metadata.mtime = {0, 7};
   CHECK(copy(ep, "d") == Timespec{0, 7});
 }
@@ -387,7 +387,8 @@ TEST_CASE("posix mkdir, symlink, metadata and remove") {
 
   REQUIRE(ep.mkdir("d", 0555).ok());
   CHECK(ep.mkdir("d", 0555).error().kind == ErrorKind::Exists);
-  // Created with the owner's rwx bits added, entries can be created inside.
+  // Directories are created with the owner's rwx bits added, so that
+  // entries can be created inside.
   CHECK((ep.stat("d").value().mode & 0700) == 0700);
 
   REQUIRE(ep.symlink("d/l", "target1").ok());

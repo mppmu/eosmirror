@@ -44,9 +44,9 @@ struct DirNode {
   std::atomic<int> pending{1};  // own processing plus unfinished entries
   std::atomic<bool> touched{false};        // entries were created, replaced or removed
   std::atomic<bool> failed{false};         // listing, creation or metadata failed
-  // A failure of the directory is recorded while its entries and metadata
-  // are handled (entries left out of a listing, deletions held back), which
-  // its completion must not clear.
+  // Set when a failure of the directory is recorded while its entries and
+  // metadata are handled (entries left out of a listing, deletions held
+  // back). Its completion must not clear that failure.
   std::atomic<bool> incomplete{false};
   std::atomic<bool> relaxing_tried{false};
   std::atomic<bool> made_writable{false};  // the target's mode was relaxed for changes
@@ -64,7 +64,7 @@ struct CopyJob {
   std::optional<Entry> compare;
 };
 
-// Limits how many transfers run at once; the limit can change while
+// Limits how many transfers run at once. The limit can change while
 // transfers wait.
 class Gate {
  public:
@@ -227,8 +227,9 @@ struct Engine::Impl {
   std::mutex syncer_mutex;
   std::condition_variable syncer_cv;
   bool syncer_stop = false;
-  // Directories finalized since the last sync, to record as such after the
-  // next: a copy may need it to be durable and final (PosixOptions::sync).
+  // Directories finalized since the last sync, to record as finalized after
+  // the next one: a copy may need that sync to become durable and final
+  // (PosixOptions::sync).
   std::mutex finalized_mutex;
   std::vector<RelPath> finalized;
   // A sync failed: copies may keep mtime 0 in directories finalized since,
@@ -296,7 +297,7 @@ struct Engine::Impl {
     return link_target;
   }
 
-  // Ends the run with the error once the workers are done; the first one
+  // Ends the run with the error once the workers are done. The first error
   // counts.
   void end_run(Error error) {
     std::lock_guard lock(end_mutex);
@@ -318,8 +319,8 @@ struct Engine::Impl {
     if (error.kind == ErrorKind::Cancelled) return;
     Failure f{path, type, error};
     if (journal_updates()) journal_write(journal->record_failure(f));
-    // Withheld deletions are recorded, for --retry-failed, but told where
-    // they are withheld, and none is a failure in a row.
+    // Withheld deletions are recorded for --retry-failed, but reported where
+    // they are withheld, and none counts as a failure in a row.
     if (error.kind == ErrorKind::Withheld) {
       report.add_failure(std::move(f), false);
       return;
@@ -329,7 +330,7 @@ struct Engine::Impl {
   }
 
   // An endpoint that has become unusable would fail everything that is
-  // left, and fill the journal with it; a source that has gone away (an
+  // left, and fill the journal with it. A source that has gone away (an
   // unmounted file system) makes everything that is left vanish.
   void in_a_row(const RelPath& path, EntryType type, const std::string& what) {
     if (failures_in_a_row.fetch_add(1) + 1 != options.max_consecutive_failures) return;
@@ -419,8 +420,8 @@ struct Engine::Impl {
 
   // Whether the journal records a failed copy of the file that may have left
   // it in place unverified, with the source's size and mtime: a transient
-  // error other than a change of the source, as a failed verification or
-  // close of an EOS upload whose file could not be taken back ends with.
+  // error other than a change of the source, such as that of a failed
+  // verification or close of an EOS upload that could not be taken back.
   bool copy_in_doubt(const RelPath& path) const {
     auto rows = prior_failures.find(parent_path(path));
     if (rows == prior_failures.end()) return false;
@@ -600,9 +601,9 @@ struct Engine::Impl {
     healthy();
 
     // A source directory that is empty where the target's is not is more
-    // likely an unmounted file system or a broken server than emptied. At
-    // the top, that stops a run with --delete, a retry as well; below, see
-    // may_delete().
+    // likely an unmounted file system or a broken server than emptied. At the
+    // top, that stops a run with --delete, and a retry as well. Further down,
+    // see may_delete().
     bool emptied = empty_source(src_entries) && !empty_target(dst_entries);
     if (options.delete_extra && emptied && node->path.empty()) {
       node->failed = true;
@@ -700,8 +701,8 @@ struct Engine::Impl {
     return !node->deletions_held;
   }
 
-  // Whether the source lacks the extras that would be deleted, as its
-  // listing says, by a stat of each: a listing cut short without saying so
+  // Whether the source lacks the extras that would be deleted, as its listing
+  // says, checked by a stat of each: a listing cut short without saying so
   // would otherwise delete what it left out. Holds back the deletions if not.
   bool absent_on_source(const std::shared_ptr<DirNode>& node,
                         const std::unordered_map<std::string, Entry>& extras) {
@@ -720,9 +721,9 @@ struct Engine::Impl {
     return true;
   }
 
-  // Deletes nothing more in a directory whose listings may be incomplete;
-  // counted and told once. That is a failure of the directory, which
-  // --retry-failed revisits, unless one is recorded already.
+  // Deletes nothing more in a directory whose listings may be incomplete, and
+  // counts and logs that once. Unless the directory has a failure recorded
+  // already, this records one, so that --retry-failed revisits the directory.
   void hold_deletions(const std::shared_ptr<DirNode>& node, const std::string& why) {
     if (node->deletions_held) return;
     node->deletions_held = true;
@@ -841,7 +842,7 @@ struct Engine::Impl {
     child->parent = node;
     child->owned = shard_owns(path);
     if (existing && existing->type != EntryType::Directory) {
-      // The shard that owns the directory replaces the entry; until then,
+      // The shard that owns the directory replaces the entry. Until then,
       // this one cannot walk the subtree, which a later run does.
       if (!node->owned) {
         fail(path, EntryType::Directory,
@@ -879,8 +880,8 @@ struct Engine::Impl {
     bool doubtful = existing && (copy_in_doubt(path) || provisional(e, *existing));
     if (existing && existing->size == e.size && !doubtful) {
       if (options.checksum) {
-        // Stored checksums of one type decide at once, a transfer reads the
-        // files for the others.
+        // Stored checksums of the same type decide at once. Otherwise a
+        // transfer reads the files.
         if (e.checksum.type == ChecksumType::None || e.checksum.type != existing->checksum.type) {
           job.compare = *existing;
           queue(std::move(job));
@@ -1085,7 +1086,7 @@ struct Engine::Impl {
       deletions.fetch_sub(1);
       Error withheld{ErrorKind::Withheld, "deletion cap of " + std::to_string(options.max_delete) +
                                               " reached (--max-delete), not deleting " + path};
-      // Each one is a failure, but told once.
+      // Each one is a failure, but logged once.
       if (!delete_cap_reported.exchange(true))
         log::warn(withheld.describe(),
                   "; the deletions withheld after it are failures too, not logged");
@@ -1180,10 +1181,10 @@ struct Engine::Impl {
   }
 
   // Compares a file of the source's size on the target by checksum: by the
-  // ones stored on both sides where they are of a type, else by the type
-  // that the target stores (or the source, or adler32), computed by reading
-  // the files that store none of it. Whether it differs and is to be copied;
-  // one that matches is unchanged.
+  // ones stored on both sides where they are of the same type, else by the
+  // type that the target stores (or the source, or adler32), computed by
+  // reading the files that store none of it. Whether it differs and is to be
+  // copied. One that matches is unchanged.
   bool differs_by_checksum(const CopyJob& job, BufferPool& pool) {
     RelPath path = join(job.dir->path, job.source.name);
     const Entry& existing = *job.compare;
@@ -1212,7 +1213,7 @@ struct Engine::Impl {
   }
 
   // A comparison that failed. A source file that is gone has vanished, a
-  // target file that is gone is copied anew, other errors are failures.
+  // target file that is gone is copied anew, and other errors are failures.
   // Whether the file is to be copied.
   bool compare_failed(const RelPath& path, const Error& error, bool on_source) {
     if (error.kind != ErrorKind::NotFound) {
@@ -1256,8 +1257,8 @@ struct Engine::Impl {
         target_failed = true;
         if (is_transient(e.kind)) target_errors.fetch_add(1);
       };
-      // A copy that is in place before it is confirmed is journaled as in
-      // doubt first, which a run that ends in between leaves for the next.
+      // A copy that is in place before it is confirmed is first journaled as
+      // in doubt. A run that ends in between leaves that row for the next.
       bool pending = false;
       if (journal && confirms_after_commit)
         job_options.before_commit = [&] {
@@ -1269,7 +1270,7 @@ struct Engine::Impl {
           journal_write(recorded);
           return recorded;
         };
-      // The pending row goes once the copy is settled; a failure replaces it.
+      // The pending row goes once the copy is settled. A failure replaces it.
       auto settled = [&] {
         if (pending) journal_write(journal->clear_failure(path));
       };
@@ -1399,10 +1400,11 @@ struct Engine::Impl {
     return {};
   }
 
-  // The entries of a directory that is gone from the source, or no directory
-  // there any more, are not retried. The rows of those gone from the target
-  // too are dropped, nothing is left to retry; the others stay, a copy among
-  // them may be in doubt, until a run removes the entries or sees them gone.
+  // The entries of a directory that is gone from the source, or is no
+  // directory there any more, are not retried. The rows of those also gone
+  // from the target are dropped, since nothing is left to retry. The others
+  // stay until a run removes the entries or sees them gone: a copy among
+  // them may be in doubt.
   void retry_without_source(const RelPath& dir, const std::set<std::string>& names) {
     for (const auto& name : names) {
       RelPath path = join(dir, name);
@@ -1462,7 +1464,7 @@ struct Engine::Impl {
       roots_pending = roots.size();
     }
     size_t transfers = max_transfers();
-    // A thread that cannot be started ends the run before it begins, with
+    // If a thread cannot be started, the run ends before it begins, and so do
     // the threads started so far.
     bool started = false;
     try {
@@ -1537,7 +1539,7 @@ Status Engine::run(const std::vector<Failure>& entries) {
   std::set<RelPath> retried;
   for (const Failure& f : entries) retried.insert(f.path);
 
-  // The rest is grouped by parent directory; each group becomes a node that
+  // The rest is grouped by parent directory. Each group becomes a node that
   // handles only those names, recursing into directories among them.
   std::map<RelPath, std::set<std::string>> groups;
   bool whole_tree = false;
@@ -1563,7 +1565,7 @@ Status Engine::run(const std::vector<Failure>& entries) {
       impl_->retry_without_source(dir, names);
       continue;
     }
-    // Starting below the top takes the directories above for directories.
+    // Starting below the top takes the paths above for directories.
     Status above = src.ok() ? impl_->ancestors_are_directories(impl_->source, dir) : Status();
     if (above.ok()) above = impl_->ancestors_are_directories(impl_->target, dir);
     auto node = !above.ok() ? Result<std::shared_ptr<DirNode>>(above.error())

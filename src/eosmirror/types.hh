@@ -61,8 +61,9 @@ struct Entry {
   ModeBits mode = 0;
   std::string link_target;  // symlinks only
   // Identifies a directory however it was reached (such as device and inode),
-  // to find cycles in listings that follow symlinks, and a file of an EOS stat
-  // (its file id), to tell another file under its name; empty where unknown.
+  // to find cycles in listings that follow symlinks. For a file from an EOS
+  // stat, it is the file id, which tells another file under the same name
+  // apart. Empty where unknown.
   std::string id;
   // The checksum stored with a file, where listings carry one (EOS); None
   // otherwise.

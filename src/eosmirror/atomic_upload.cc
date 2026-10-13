@@ -88,7 +88,7 @@ Result<CommitInfo> AtomicUploadWriter::commit(const CommitSpec& spec) {
 }
 
 // Removes the upload where it is, in place or still under its hidden name
-// (a close that timed out can still commit it); one in place that cannot be
+// (a close that timed out can still commit it). One in place that cannot be
 // removed gets mtime 0 instead, so that the next run copies it again. Another
 // file in place is left alone, and so is one that cannot be told apart from
 // the upload, or that was moved elsewhere.
@@ -146,7 +146,7 @@ Error AtomicUploadWriter::rejected(const CommitSpec& spec, Error e) {
 
 // XrdCl reports the close of a file whose connection is gone as done
 // (XrdClFileStateHandler.cc, Close), and the storage node then discards the
-// upload; or another writer replaced it since.
+// upload. Or another writer may have replaced it since.
 Error AtomicUploadWriter::not_committed() const {
   return Error{ErrorKind::IO, "the upload of " + name_ +
                                   " is not in place (the connection to the storage node was "

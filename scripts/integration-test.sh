@@ -3,9 +3,10 @@
 # containers: a plain XRootD server and a single-host EOS instance.
 #
 # Usage: scripts/integration-test.sh PLATFORM [SANITIZER] [ctest-option...]
-# Env:   EOSMIRROR_BUILD_ROOT, EOSMIRROR_EOS_IMAGE, EOSMIRROR_EOS_STATE as for
-#        the other scripts. EOSMIRROR_KEEP_EOS=1 leaves the EOS instance
-#        running afterwards (it takes a while to start).
+# Env:   EOSMIRROR_BUILD_ROOT, EOSMIRROR_EOS_IMAGE, EOSMIRROR_EOS_STATE and
+#        EOSMIRROR_EOS_SUBNET as for the other scripts. EOSMIRROR_KEEP_EOS=1
+#        leaves the EOS instance running afterwards (it takes a while to
+#        start).
 set -euo pipefail
 
 here=$(dirname "$(readlink -f "$0")")
@@ -29,8 +30,8 @@ trap cleanup EXIT
 "$repo/tests/integration/xrootd-server.sh" start
 
 # The test container authenticates with the instance's root key, which EOS
-# maps to root, the test of a sudoer with its daemon key, and resolves the
-# daemons through /etc/hosts.
+# maps to root, and the test of a sudoer with the daemon key. The container
+# resolves the daemons through /etc/hosts.
 podman_opts=(
   --network=eosmirror-test
   --add-host=eosmirror-mgm.eosmirror.test:$subnet.12 --add-host=eosmirror-fst.eosmirror.test:$subnet.13

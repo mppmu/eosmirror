@@ -10,9 +10,9 @@
 namespace eosmirror {
 
 // The file that an upload created, as it is now: in place under the
-// upload's name, or still under another name in the same directory (an
-// upload not committed yet), with that name, or elsewhere, with an empty
-// name. The size, mtime and checksum are those the endpoint stores (None
+// upload's name (in_place), still under another name in the same directory
+// (an upload not committed yet, named file.name), or elsewhere (file.name
+// empty). The size, mtime and checksum are those the endpoint stores (None
 // where it stores no checksum, or one of a type that cannot be computed).
 struct UploadFile {
   Entry file;
@@ -24,16 +24,18 @@ struct UploadFile {
 // docs/design.md), and confirms afterwards that the file in place is this
 // upload: the file the upload created (known by its id), with the size and
 // mtime of the copy and, where the endpoint stores one of the type computed
-// while copying, its checksum. A close can report success for an upload
-// that the storage node discarded, which leaves the previous file or none
-// in place; a node can commit an upload whose close failed, also later; and
-// another writer can replace the file meanwhile. The upload carries the
-// source's size and mtime, so that it would pass for a good copy: one that
-// fails its verification, or whose close failed, is taken away again:
-// removed where it is, in place or still under its hidden name, or else
-// given mtime 0. Any other file in place is left alone, and so is one that
-// cannot be told apart from the upload. Owner and mode are applied once the
-// file is confirmed, and the mtime where the upload could not carry it.
+// while copying, its checksum.
+//
+// A close can report success for an upload that the storage node discarded,
+// which leaves the previous file or none in place. A node can also commit
+// an upload whose close failed, even later, and another writer can replace
+// the file meanwhile. Since the upload carries the source's size and mtime,
+// it would pass for a good copy. One that fails its verification, or whose
+// close failed, is therefore taken away again: removed where it is, in
+// place or still under its hidden name, or else given mtime 0. Any other
+// file in place is left alone, and so is one that cannot be told apart from
+// the upload. Owner and mode are applied once the file is confirmed, and
+// the mtime where the upload could not carry it.
 class AtomicUploadWriter : public FileWriter {
  public:
   // The file that the upload created; NotFound once it is gone.

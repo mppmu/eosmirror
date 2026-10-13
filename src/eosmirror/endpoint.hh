@@ -126,7 +126,8 @@ struct CommitInfo {
 };
 
 // Writer of one file to a temporary location. Nothing is visible under the
-// final name until commit() succeeds.
+// final name before commit(), which puts the file there, except where the
+// endpoint replaces files at their open (Listing::replaces_at_open).
 class FileWriter {
  public:
   virtual ~FileWriter() = default;
@@ -168,8 +169,8 @@ class Endpoint {
   // root (below a mount point); false where the endpoint cannot tell.
   virtual bool other_file_system(const Entry& /*dir*/) const { return false; }
 
-  // A warning, and a note, about writing to this endpoint, shown when a run
-  // starts with it as target; empty if there is none.
+  // A warning and a note about writing to this endpoint, shown when a run
+  // starts with it as target. Each is empty if there is none.
   virtual std::string target_warning() const { return {}; }
   virtual std::string target_note() const { return {}; }
 
@@ -206,7 +207,7 @@ class Endpoint {
 
   // The checksum the endpoint stores for a file, given its entry as listed;
   // None where it stores none, or one of a type that cannot be computed.
-  // EOS lists checksums with the entries, XRootD servers are asked.
+  // EOS lists checksums with the entries, and XRootD servers are asked.
   virtual Result<Checksum> stored_checksum(const RelPath& /*path*/, const Entry& listed) {
     return listed.checksum;
   }

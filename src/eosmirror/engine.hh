@@ -23,13 +23,13 @@ size_t next_transfer_limit(size_t limit, size_t min_limit, size_t max_limit, boo
 // Adapts the number of transfers running at once, interval by interval. The
 // limit starts at min_limit and rises (next_transfer_limit) while the
 // throughput in bytes or files beats the one measured at the previous limit
-// by more than 5 %. A rise after which both fall more than 10 % short of
-// that throughput did not pay: the limit goes back and holds for a minute
-// (6 intervals of 10 s). The limit falls when operations of transfers on the
-// target had to be retried; the interval after that only measures the lower
-// limit. The throughput to beat decays by 0.5 % per interval, so that a
-// record from an earlier part of the tree cannot block growth for good, and
-// a flat throughput tries a higher limit every 100 s or so.
+// by more than 5 %. If both fall more than 10 % short of that throughput
+// after a rise, the rise did not pay: the limit goes back and holds for a
+// minute (6 intervals of 10 s). The limit falls when operations of transfers
+// on the target had to be retried. The interval after that only measures the
+// lower limit. The throughput to beat decays by 0.5 % per interval, so that
+// a record from an earlier part of the tree cannot block growth for good.
+// With a flat throughput, a higher limit is tried every 100 s or so.
 class TransferController {
  public:
   TransferController(size_t min_limit, size_t max_limit);
@@ -57,7 +57,7 @@ class Engine {
 
   // Synchronizes the whole tree. Failures of single entries go to the
   // report. The run fails when it cannot start, cannot list the top
-  // directory, finds the source empty but not the target with deletion on,
+  // directory, finds the source empty but not the target (with deletion on),
   // or is cancelled: by the caller, or (also a Cancelled error) by the
   // engine after max_consecutive_failures failures in a row.
   Status run();

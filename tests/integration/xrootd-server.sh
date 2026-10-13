@@ -1,8 +1,8 @@
 #!/bin/bash
 # Starts or stops a plain XRootD server for the integration tests, with
 # /data/fixtures holding a tree with symlink loops, a directory with
-# symlinks that cannot be stated (ELOOP) and one with a name that forges a
-# line of a listing.
+# symlinks that cannot be stated (ELOOP) and one with a file whose name
+# forges a line of a listing.
 #
 # By default, the server runs in a container that joins the podman network
 # "eosmirror-test" under the name "xrootd", so that containers on that
@@ -36,8 +36,8 @@ fixtures='
   echo f0 > "$1/fixtures/forged/f0"
   echo x > "$1/fixtures/forged/$(printf "x\n0 999 0 1600000000\nf0")"'
 
-# Waits until the server answers, running the given xrdfs command, while
-# the server's process (pid $1, if not empty) lives.
+# Waits until the server answers the given xrdfs command, as long as the
+# server's process (pid $1, if not empty) lives.
 wait_until_up() {
   local pid=$1
   shift

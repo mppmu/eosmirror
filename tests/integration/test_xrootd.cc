@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // Integration tests against a live XRootD server. EOSMIRROR_XROOTD_URL names
-// a writable directory on it, e.g. root://xrootd:1094//data; the tests use a
-// fresh subdirectory of it, and the fixtures that xrootd-server.sh creates.
+// a writable directory on it, e.g. root://xrootd:1094//data. The tests use a
+// fresh subdirectory of it and the fixtures that xrootd-server.sh creates.
 #include <XrdCl/XrdClDefaultEnv.hh>
 #include <XrdCl/XrdClFileSystem.hh>
 #include <sys/stat.h>

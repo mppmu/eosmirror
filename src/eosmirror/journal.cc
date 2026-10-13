@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS failures (
 CREATE TABLE IF NOT EXISTS done_dirs (path TEXT PRIMARY KEY, run_id INTEGER NOT NULL);
 )";
 
-// The meta rows of the options of the last run are named so.
+// The prefix of the meta rows that hold the options of the last run.
 constexpr std::string_view kOptionKey = "option ";
 
 int64_t now_unix() {
@@ -48,9 +48,9 @@ int step_done(sqlite3_stmt* stmt) {
 }
 
 // The URI that opens a file read-only. A journal without a write-ahead log
-// is opened as immutable, which keeps SQLite from making the log and its
-// index, as it would for a reader of a journal in WAL mode, and leave them:
-// nobody writes a journal without a log.
+// is opened as immutable, since nobody writes a journal without a log. That
+// keeps SQLite from making the log and its index, as it would for a reader
+// of a journal in WAL mode, and leaving them behind.
 std::string read_only_uri(const std::string& file) {
   std::error_code ec;
   bool logged = std::filesystem::exists(file + "-wal", ec);

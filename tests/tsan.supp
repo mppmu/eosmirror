@@ -1,6 +1,6 @@
 # ThreadSanitizer suppressions for the integration tests: XrdCl's threads
-# call XrdSysTimer::TimeZone() at once, whose mktime() sets up the time zone
-# under a lock inside glibc that TSan does not see.
+# call XrdSysTimer::TimeZone() concurrently, and its mktime() sets up the
+# time zone under a lock inside glibc that TSan does not see.
 race:XrdSysTimer::TimeZone
 # XrdCl shares a file's state handler between the File and its requests in
 # flight through shared_ptr, whose reference counts live in the

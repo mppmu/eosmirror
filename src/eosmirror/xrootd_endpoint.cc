@@ -67,7 +67,7 @@ Entry entry_from_stat(std::string name, const XrdCl::StatInfo& info) {
 }
 
 // A checksum reply, "<type> <hex>". EOS replies "none" for files without a
-// checksum; those and types that cannot be computed here come back as None.
+// checksum. Those, and types that cannot be computed here, come back as None.
 Result<Checksum> parse_checksum(const std::string& text, const std::string& context) {
   std::istringstream in(text);
   std::string type, value;
@@ -198,7 +198,8 @@ Result<EndpointUrl> parse_endpoint_url(const std::string& url) {
   while (parts.path.size() > 1 && parts.path.back() == '/') parts.path.pop_back();
   if (parts.path.empty() || parts.path[0] != '/')
     return Error{ErrorKind::Other, "the URL needs an absolute path: " + display_url(url)};
-  // Servers resolve them after symlinks, which comparing roots cannot.
+  // Servers resolve '.' and '..' after following symlinks, which comparing
+  // roots cannot.
   for (std::string_view rest = parts.path; !rest.empty();) {
     std::string_view part = rest.substr(0, rest.find('/'));
     rest.remove_prefix(std::min(rest.size(), part.size() + 1));
@@ -252,7 +253,7 @@ Error XrdEndpoint::xrd_error(const XrdCl::XRootDStatus& st, const std::string& c
     int err = static_cast<int>(st.errNo);
     bool busy = false;
     if (err >= kXR_ArgInvalid) {
-      // Overloaded or failing servers; kXR_FSError is what servers send for
+      // Overloaded or failing servers. kXR_FSError is what servers send for
       // errnos without a protocol code, such as EAGAIN, EBUSY and ESTALE.
       busy = err == kXR_Overloaded || err == kXR_ServerError || err == kXR_noReplicas ||
              err == kXR_inProgress || err == kXR_FSError;
@@ -295,8 +296,8 @@ Error XrdEndpoint::xrd_error(const XrdCl::XRootDStatus& st, const std::string& c
 
 // A file for writing, with XrdCl's write recovery off: after a dropped
 // connection, recovery reopens the file and resends only the pending
-// writes, which can never complete an upload that the server verifies;
-// failing fast and copying the file again is the right recovery.
+// writes, which can never complete an upload that the server verifies.
+// Failing fast and copying the file again is the right recovery.
 std::unique_ptr<XrdCl::File> XrdEndpoint::new_write_file() {
   auto file = new_file();
   file->SetProperty("WriteRecovery", "false");
@@ -442,7 +443,7 @@ Result<std::unique_ptr<XrdEndpoint>> XrdEndpoint::create(const std::string& url,
   if (!st.IsOK() && st.code != XrdCl::errErrorResponse)
     return xrd_error(st, "query the configuration of " + ep->describe());
   if (st.IsOK() && response) {
-    // The response lists the configured types as "0:adler32,1:crc32c"; the
+    // The response lists the configured types as "0:adler32,1:crc32c". The
     // first one is the default. A server without checksums echoes "chksum".
     std::string value = response->ToString();
     std::string first = value.substr(0, value.find_first_of(",\n "));
@@ -488,7 +489,7 @@ XrdCl::FileSystem& XrdEndpoint::fs() {
   int thread = options_.shared_connection ? -1 : thread_number();
   std::lock_guard lock(fs_mutex_);
   std::unique_ptr<XrdCl::FileSystem>& slot = fs_[thread];
-  // The URL's parameters go with the login, such as xrd.wantprot.
+  // The URL's parameters, such as xrd.wantprot, go with the login.
   if (!slot) slot = std::make_unique<XrdCl::FileSystem>(XrdCl::URL(with_cgi(open_url(""), cgi_)));
   return *slot;
 }
@@ -531,11 +532,11 @@ Result<Entry> XrdEndpoint::stat_abs(const std::string& abs) {
 }
 
 // A server ends a listing with stat information at the first entry it cannot
-// stat for another reason than ENOENT, such as a symlink loop, and reports
+// stat for a reason other than ENOENT, such as a symlink loop, and reports
 // success (XrdOssDir::Readdir, XrdOfsDirectory::nextEntry and
 // XrdXrootdProtocol::do_DirStat take the error for the end). A listing of
-// the names alone stats nothing, so it is taken alongside, and its names
-// that the other lacks are stated one by one. Names come one per line,
+// the names alone stats nothing, so one is taken alongside, and the names it
+// has that the other lacks are stated one by one. Names come one per line,
 // unescaped: a name with line breaks can forge lines, so names listed more
 // than once are left out.
 Result<Listing> XrdEndpoint::list(const RelPath& dir) {

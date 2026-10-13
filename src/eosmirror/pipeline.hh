@@ -39,8 +39,8 @@ class ReadAhead {
   ~ReadAhead() { stop(); }
 
   // The chunk at offset, of the pool's buffer size but not beyond end, while
-  // up to `window` chunks are being read from there on. Asking for another
-  // offset than the one after the previous chunk drops what was read ahead.
+  // up to `window` chunks are being read from there on. Asking for an offset
+  // other than the one after the previous chunk drops what was read ahead.
   // After an error, nothing more is read and the error is returned again.
   Result<Chunk> next(uint64_t offset, uint64_t end, BufferPool& pool);
 
@@ -57,7 +57,7 @@ class ReadAhead {
 
   // Starts reads up to the window and end.
   void fill(std::unique_lock<std::mutex>& lock, uint64_t end, BufferPool& pool);
-  // Starts a read into buf for a slot and waits for nothing; the slot gets
+  // Starts a read into buf for a slot without waiting for it. The slot gets
   // the result. The lock is released while the read is submitted.
   void start(std::unique_lock<std::mutex>& lock, Slot& slot, std::span<std::byte> buf);
   // Waits for the reads in flight and drops all slots.
@@ -76,8 +76,8 @@ class ReadAhead {
 
 // Writes of one file kept in flight: the transport-independent part of
 // pipelined writes. Writes are started from the thread that calls write(),
-// each at the end of the previous one, and once a write has failed, no
-// further write is started.
+// each at the end of the previous one. Once a write has failed, no further
+// write is started.
 class WriteWindow {
  public:
   // Called exactly once when the write completes, from any thread.
@@ -97,7 +97,7 @@ class WriteWindow {
   // buffer is released when its write completes.
   Status write(Chunk chunk);
 
-  // Waits until no write is in flight; the first error, if any.
+  // Waits until no write is in flight and returns the first error, if any.
   Status drain();
 
   // The bytes handed to write() so far.

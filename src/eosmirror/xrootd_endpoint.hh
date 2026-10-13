@@ -20,7 +20,7 @@ namespace eosmirror {
 
 struct XrdOptions {
   // Writes and reads of one file kept in flight, each of a chunk of the
-  // buffer size; xrdcp keeps 4 of 8 MiB. Writes are sent in offset order
+  // buffer size. xrdcp keeps 4 of 8 MiB. Writes are sent in offset order
   // over one connection, which erasure-coded EOS files need (see
   // docs/design.md).
   int write_window = 4;
@@ -28,8 +28,8 @@ struct XrdOptions {
   // Each thread sends its requests (file opens and their reads and writes,
   // stats, listings, MGM commands) over connections of its own, to the
   // redirector and to the storage nodes, since a server executes the
-  // requests of one connection one after the other. Shared, XrdCl uses one
-  // connection per server for all of them. A file always goes over one
+  // requests of one connection one after the other. When shared, XrdCl uses
+  // one connection per server for all of them. A file always goes over one
   // connection per server.
   bool shared_connection = false;
 };
@@ -52,9 +52,10 @@ std::string with_cgi(std::string request, std::string_view cgi);
 // paths: a '?' starts the opaque parameters, so paths with one are refused.
 Result<std::string> xrootd_request_path(const std::string& abs_path);
 
-// Renames from to to through move, for servers whose move fails with Exists
-// where to exists: the file there is moved aside to a temporary name first,
-// and removed once from is in place, or moved back if that fails.
+// Renames `from` to `to` through `move`, for servers whose move fails with
+// Exists where `to` exists: the file there is first moved aside to a
+// temporary name, then removed once `from` is in place, or moved back if
+// that fails.
 Status move_replacing(const std::string& from, const std::string& to,
                       const std::function<Status(const std::string&, const std::string&)>& move,
                       const std::function<Status(const std::string&)>& remove);
@@ -64,7 +65,7 @@ Status move_replacing(const std::string& from, const std::string& to,
 // with every request.
 //
 // Plain XRootD has no symlinks, owners or settable mtimes, so this endpoint
-// reports those as missing capabilities; the EOS endpoint adds them through
+// reports those as missing capabilities. The EOS endpoint adds them through
 // MGM commands. Files are written under a temporary name and renamed into
 // place on commit, with the checksum verified by a checksum query when the
 // server computes one.
@@ -75,7 +76,7 @@ class XrdEndpoint : public Endpoint {
   ~XrdEndpoint() override;
 
   std::string describe() const override { return url_; }
-  // The root normalized; EOS resolves it on creation.
+  // The root, normalized. EOS resolves it on creation.
   Location location() const override;
   Capabilities capabilities() const override { return caps_; }
   bool is_temporary(const Entry& entry) const override;
@@ -165,8 +166,8 @@ class XrdReader : public FileReader {
 
  protected:
   // The server's stat of the open file: a fresh one, or else the last one
-  // XrdCl got, which until a fresh one is the one that came with the open
-  // (XrdCl asks every open for it, kXR_retstat).
+  // XrdCl got. Until a fresh one is asked for, that is the one that came with
+  // the open (XrdCl asks every open for it, kXR_retstat).
   Result<Entry> file_stat(bool fresh);
 
  private:
@@ -189,8 +190,8 @@ class XrdFileWriter : public FileWriter {
   Status write(Chunk chunk) override;
 
  protected:
-  // Waits for the writes in flight; an error if one failed or if not size
-  // bytes were written.
+  // Waits for the writes in flight. Fails if one of them failed or if the
+  // number of bytes written is not `size`.
   Status complete(uint64_t size);
   // Closes the file after complete(), which commits it on the server.
   Status close();

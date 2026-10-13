@@ -24,8 +24,8 @@
 
 namespace eosmirror {
 
-// Copies renamed into place with mtime 0, which get their mtimes once a sync
-// of their file system has followed the rename, by flush(). Adding a copy
+// Copies renamed into place with mtime 0, which flush() gives their mtimes
+// once a sync of their file system has followed the rename. Adding a copy
 // never waits for a sync.
 class DeferredMtimes {
  public:
@@ -68,8 +68,9 @@ class DeferredMtimes {
       ++outcome.failed;
       return true;
     });
-    // In several threads where there are many: a run waits for its last
-    // flush. This one takes the shares of those that cannot be started.
+    // Many copies get their mtimes in several threads, since a run waits for
+    // its last flush. This thread takes over the shares of threads that
+    // cannot be started.
     size_t workers = std::min<size_t>(8, (batch.size() + 999) / 1000);
     std::vector<Outcome> outcomes(workers);
     std::vector<std::thread> threads;
@@ -101,7 +102,8 @@ class DeferredMtimes {
     dev_t dev;
     ino_t ino;
   };
-  // Of giving mtimes: the first error, and the copies that keep mtime 0.
+  // The outcome of giving mtimes: the first error, and the number of copies
+  // that keep mtime 0.
   struct Outcome {
     std::optional<Error> first;
     size_t failed = 0;
@@ -280,7 +282,7 @@ class PosixWriter : public FileWriter {
     if (written_ != spec.size)
       return Error{ErrorKind::Changed, "wrote " + std::to_string(written_) + " bytes to " + temp_ +
                                            ", expected " + std::to_string(spec.size)};
-    // Its writeback starts now, which the sync later only has to finish.
+    // The writeback starts now, so that the later sync only has to finish it.
     if (deferred_) sync_file_range(fd_, 0, 0, SYNC_FILE_RANGE_WRITE);
     // Reading the file back is the only verification a local target has.
     if ((options_.verify_readback || spec.require_verification) &&
@@ -291,9 +293,10 @@ class PosixWriter : public FileWriter {
     } else if (spec.require_verification) {
       return Error{ErrorKind::Unsupported, "no checksum to verify " + temp_ + " against"};
     }
-    // Until a sync has made it durable, the copy has mtime 0: a run that
-    // ends before copies it again. A source file with mtime 0 itself could
-    // not be told from such a copy, so its copy is made durable at once.
+    // Until a sync has made it durable, the copy has mtime 0, so that the
+    // next run copies it again if this one ends before the sync. A source
+    // file with mtime 0 itself could not be told apart from such a copy, so
+    // its copy is made durable at once.
     bool deferred = deferred_ && has(spec.fields, MetaFields::Mtime) && spec.metadata.mtime.sec != 0;
     if (options_.sync && !deferred && fsync(fd_) != 0) return errno_error(errno, "fsync " + temp_);
     Entry metadata = spec.metadata;

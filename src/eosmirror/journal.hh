@@ -25,13 +25,13 @@ using RunOptions = std::vector<std::pair<std::string, std::string>>;
 // The SQLite journal of a source/target pair: the entries that failed after
 // retries, and the directories finalized by the current run (for resuming).
 // All methods are thread-safe. A journal that cannot be read or written
-// says so in errors, which a run cannot go on without.
+// returns errors, and a run cannot go on without it.
 class Journal {
  public:
   // Opens or creates the journal. A journal belongs to one source, target
-  // and shard; opening it for another combination fails, and so does
+  // and shard. Opening it for another combination fails, and so does
   // opening a database that is not a journal. Checking the owner and
-  // recording that of a new journal is one transaction, so that runs
+  // recording that of a new journal are one transaction, so that runs
   // started together cannot both take a new journal. A journal serves one
   // run at a time: the object holds an exclusive lock on the file, and
   // opening a journal that another one holds fails.
@@ -57,7 +57,7 @@ class Journal {
 
   // Whether the last run was interrupted, which leaves it to resume.
   Result<bool> interrupted();
-  // The names of the given options that the last run had otherwise; an
+  // The names of the given options that the last run had otherwise. An
   // option it has no record of was off then (older journals predate it).
   Result<std::vector<std::string>> differing_options(const RunOptions& options);
 

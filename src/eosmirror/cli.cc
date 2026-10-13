@@ -36,7 +36,7 @@ Result<long long> parse_integer(const std::string& text, const std::string& opti
 }
 
 constexpr long long kMaxInt = std::numeric_limits<int>::max();
-// Threads of each pool at most.
+// The most threads a pool may have.
 constexpr long long kMaxThreads = 1024;
 
 }  // namespace
@@ -45,7 +45,7 @@ Result<uint64_t> parse_size(const std::string& text) {
   char* end = nullptr;
   errno = 0;
   unsigned long long value = std::strtoull(text.c_str(), &end, 10);
-  // strtoull takes a sign, and wraps a minus around.
+  // strtoull accepts a sign and wraps negative numbers around.
   if (text.empty() || !std::isdigit(static_cast<unsigned char>(text[0])) || errno == ERANGE)
     return usage_error("invalid size: " + text);
   uint64_t factor = 1;
@@ -67,7 +67,7 @@ Result<uint64_t> parse_size(const std::string& text) {
 
 RunOptions result_options(const CliOptions& opts) {
   auto yes = [](bool on) { return std::string(on ? "yes" : "no"); };
-  // Lengths first, so that no two lists of rewrites read the same.
+  // Length-prefixed, so that no two lists of rewrites give the same string.
   std::string rewrites;
   for (const auto& [from, to] : opts.sync.link_rewrites)
     rewrites += std::to_string(from.size()) + ":" + from + std::to_string(to.size()) + ":" + to;
@@ -94,9 +94,9 @@ sync replicates the tree at SOURCE to TARGET: copies files that are missing
 or differ in size or mtime, recreates symlinks, and sets owners, modes and
 mtimes. selftest checks, in a temporary directory under TARGET, that
 everything a run needs works there. Endpoints are local paths or XRootD
-URLs (root://host//path, roots:// for TLS); an EOS instance is recognized,
+URLs (root://host//path, roots:// for TLS). EOS instances are recognized,
 or named with eos://. Paths below /eos are on the EOS instance of --mgm or
-EOS_MGM_URL, not on a local FUSE mount (name that as file:///eos/...).
+EOS_MGM_URL, not on a local FUSE mount (name a mount as file:///eos/...).
 
 Options:
   -n, --dry-run            report what would be done, change nothing
@@ -108,7 +108,7 @@ Options:
                            recorded in the journal (a verification)
       --delete             delete entries on the target that the source lacks
       --keep-emptied       with --delete, delete nothing in directories that are
-                           empty on the source, as an unmounted file system looks
+                           empty on the source, like an unmounted file system
       --max-delete N       stop deleting after N entries (default unlimited)
       --target-without-symlinks
                            state that a plain XRootD target has no symlinks,
@@ -117,52 +117,55 @@ Options:
       --no-owner           do not set owners and groups
       --no-mode            do not set modes
       --no-verify          do not compute checksums
-      --require-checksum   fail copies that neither the target nor the source can
-                           verify by checksum
+      --require-checksum   fail copies that neither the target nor the source
+                           can verify by checksum
       --verify-readback    read files on local targets back to verify them
       --no-fsync           give copies on local targets their mtimes at once,
                            without syncing; by default they have mtime 0 until a
                            sync of their file system (every 30 s and at the end)
                            has made them durable
-      --rewrite-links A=B  rewrite symlink targets starting with A to start with B
+      --rewrite-links A=B  replace a leading A in symlink targets with B
   -x, --one-file-system    skip directories of a local source that are on other
-                           file systems than SOURCE, which are kept on the target
+                           file systems than SOURCE, keeping them on the target
                            (no effect on remote sources)
       --checkers N         directory workers (default 8, at most 1024)
       --min-transfers N    copies running at once at the start, and at least
-                           (default 4); the limit rises while throughput improves,
-                           and falls back when a rise did not pay or the target
-                           fails operations
+                           (default 4); the limit rises while throughput
+                           improves, and falls back when a rise did not pay or
+                           the target fails operations
       --max-transfers N    copies running at once at most (default 64, at most
                            1024); with the default windows and buffer size, 64
                            copies hold up to 64 x 9 x 8 MiB = 4.5 GiB of buffers
       --transfers N        exactly N copies running at once
-      --write-window N     writes per file in flight to XRootD and EOS (default 4),
-                           in order; safe for erasure-coded EOS files only while
-                           the FSTs keep EOS's default "xrootd.async off";
+      --write-window N     writes per file in flight to XRootD and EOS, in order
+                           (default 4); safe for erasure-coded EOS files only
+                           while the FSTs keep EOS's default "xrootd.async off";
                            --write-window 1 opts out
       --read-window N      reads per file in flight from XRootD and EOS sources
                            (default 4)
-      --shared-connection  send the requests of all transfers and directory workers
-                           over one connection per XRootD or EOS server, instead
-                           of over connections of each one's own
-      --max-backlog N      queued copies before directory workers wait (default 10000)
-      --buffer-size SIZE   size of the chunks read and written, e.g. 8M (default);
-                           a transfer holds at most both windows plus one
+      --shared-connection  send the requests of all transfers and directory
+                           workers over one connection per XRootD or EOS server
+                           instead of connections of their own
+      --max-backlog N      queued copies before directory workers wait
+                           (default 10000)
+      --buffer-size SIZE   size of the chunks read and written (default 8M); a
+                           transfer holds at most both windows plus one chunk
       --retries N          retries per operation (default 2)
       --retry-delay SEC    delay before the first retry (default 1)
       --max-consecutive-failures N
-                           stop the run after N failures in a row, without a
-                           success in between (default 1000, or "unlimited")
+                           stop the run after N failures or vanished entries
+                           in a row (default 1000, or "unlimited")
       --mgm URL            the EOS MGM for paths below /eos, root://host[:port]
                            (default: EOS_MGM_URL)
       --journal FILE       record failures and finalized directories in FILE
-      --resume             continue an interrupted run, with its options: skip the
-                           directories the journal records as finalized
+      --resume             continue an interrupted run, with its options: skip
+                           the directories the journal records as finalized
       --retry-failed       process only the failures recorded in the journal
-      --shard K/N          handle only the directories of shard K of N (K from 0)
-      --progress SEC       print a progress line every SEC seconds instead of the
-                           live display (which needs a terminal and is off with -q)
+      --shard K/N          handle only the directories of shard K of N
+                           (K from 0)
+      --progress SEC       print a progress line every SEC seconds instead of
+                           the live display (which needs a terminal and is off
+                           with -q)
   -v, --verbose            debug output
   -q, --quiet              warnings and errors only
   -h, --help               this help
@@ -246,7 +249,7 @@ Result<CliOptions> parse_command_line(int argc, char** argv) {
   flag("--delete", [&] { sync.delete_extra = true; });
   flag("--keep-emptied", [&] { sync.keep_emptied = true; });
   flag("--target-without-symlinks", [&] { sync.target_without_symlinks = true; });
-  // An option that takes a count, or "unlimited" for the given value.
+  // An option that takes a count, or "unlimited" to store `unlimited`.
   auto limit = [&](const std::string& name, uint64_t& out, uint64_t unlimited) {
     value(name, [name, &out, unlimited](const std::string& v) -> Status {
       if (v == "unlimited") {
@@ -300,7 +303,7 @@ Result<CliOptions> parse_command_line(int argc, char** argv) {
   });
   // The attempts are one more.
   integer("--retries", 0, kMaxInt - 1, [&](long long n) { retries = static_cast<int>(n); });
-  // In milliseconds.
+  // Kept in milliseconds, hence the bound.
   integer("--retry-delay", 0, std::numeric_limits<long long>::max() / 1000,
           [&](long long n) { sync.retry.initial_delay = std::chrono::seconds(n); });
   value("--mgm", [&](const std::string& v) -> Status {

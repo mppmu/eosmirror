@@ -1,16 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// Randomized differential tests: random trees and random changes of the
-// source (files created, rewritten with or without another size, deleted,
-// renamed, given other modes and mtimes; symlinks; type changes), runs with
-// injected faults, after which the journal must record every entry left
-// behind and a retry of what it records must repair them, then a run
-// without faults, after which the target must equal the source in content
-// and metadata, and a further run must change nothing. Each seed is
-// reproducible: a failure names it, and
-// EOSMIRROR_SEED=<seed> runs that one alone. EOSMIRROR_SEEDS sets how many
-// seeds run (from EOSMIRROR_SEED_BASE, by default the time), and
-// EOSMIRROR_VERBOSE=1 shows the runs' logs.
+// Randomized differential tests. Each seed builds a random source tree and
+// changes it at random (files created, rewritten with the same or another
+// size, deleted, renamed, given other modes and mtimes; symlinks; type
+// changes). With fake endpoints, runs with injected faults follow, after
+// which the journal must record every entry left behind, and a retry of what
+// it records must repair them. Then comes a run without faults, after which
+// the target must equal the source in content and metadata, and a further
+// run must change nothing.
+//
+// Each seed is reproducible: a failure names it, and EOSMIRROR_SEED=<seed>
+// runs that one alone. EOSMIRROR_SEEDS sets how many seeds run (from
+// EOSMIRROR_SEED_BASE, by default the time), and EOSMIRROR_VERBOSE=1 shows
+// the runs' logs.
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -83,7 +85,7 @@ Timespec random_time(Rng& rng) {
 ModeBits random_file_mode(Rng& rng) { return pick_of<ModeBits>(rng, {0600, 0640, 0644, 0444, 0755}); }
 ModeBits random_dir_mode(Rng& rng) { return pick_of<ModeBits>(rng, {0700, 0750, 0755, 0775}); }
 
-// A few names, so that later changes reuse them, also for another type.
+// Few names, so that later changes reuse them, also for other entry types.
 std::string random_name(Rng& rng) {
   static const std::vector<std::string> kNames = {"a", "b", "c", "d", "e", "f", "g", "h"};
   return pick_of(rng, kNames) + (chance(rng, 0.3) ? std::to_string(pick(rng, 3)) : "");
@@ -149,7 +151,7 @@ class FakeTree : public Tree {
   }
   size_t size(const RelPath& path) override { return ep_.get(path)->content.size(); }
 
-  // Owners exist only here.
+  // Owners can be changed only in fake trees.
   void chown(const RelPath& path, uint32_t uid) {
     ep_.modify(path, [&](FakeEndpoint::Node& n) { n.entry.uid = n.entry.gid = uid; });
   }
@@ -169,7 +171,7 @@ class PosixTree : public Tree {
     return result;
   }
   void file(const RelPath& path, const std::string& content, ModeBits mode, Timespec mtime) override {
-    ::chmod(abs(path).c_str(), 0600);  // if it exists, as read-only
+    ::chmod(abs(path).c_str(), 0600);  // in case it exists read-only
     std::ofstream(abs(path), std::ios::binary | std::ios::trunc) << content;
     ::chmod(abs(path).c_str(), mode);
     touch(path, mtime);
@@ -223,7 +225,7 @@ std::vector<RelPath> of_type(Tree& tree, std::initializer_list<EntryType> types)
   return result;
 }
 
-// A new path in a random directory, which may be taken by an entry.
+// A path in a random directory, possibly taken by an existing entry.
 RelPath random_path(Rng& rng, Tree& tree) {
   std::vector<RelPath> dirs = of_type(tree, {EntryType::Directory});
   dirs.push_back("");
@@ -310,7 +312,7 @@ void random_tree(Rng& rng, Tree& tree) {
   for (size_t i = 0, n = 10 + pick(rng, 30); i < n; ++i) random_change(rng, tree);
 }
 
-// Random changes, which leave something in the tree: a run stops at an
+// Random changes that leave something in the tree, since a run stops at an
 // empty source rather than empty the target.
 void random_changes(Rng& rng, Tree& tree) {
   for (size_t i = 0, n = 1 + pick(rng, 12); i < n; ++i) random_change(rng, tree);
@@ -370,8 +372,8 @@ void compare(Endpoint& src, Endpoint& dst, const RelPath& dir, bool owners) {
   if (dir.empty()) CHECK(dst.stat("").value().mtime == src.stat("").value().mtime);
 }
 
-// That no file on the target passes for the source's (same size and mtime)
-// with other content: the next run would keep it.
+// Checks that no file on the target passes for the source's (same size and
+// mtime) with other content, which the next run would keep.
 void no_wrong_files(Endpoint& src, Endpoint& dst, const RelPath& dir) {
   auto s = listing(src, dir);
   auto listed = dst.list(dir);
@@ -517,7 +519,7 @@ TEST_CASE("differential: fake endpoints with faults") {
       src.unlistable.clear();
       dst.unlistable.clear();
       no_wrong_files(src, dst, "");
-      // What a run that completed left behind, it has recorded.
+      // A run that completed has recorded what it left behind.
       if (faulted.ok())
         for (const RelPath& path : outdated(src, dst)) {
           INFO("left behind: ", path);
@@ -527,8 +529,8 @@ TEST_CASE("differential: fake endpoints with faults") {
       SyncOptions clean = random_options(rng);
       Report retried, r, again;
       if (chance(rng, 0.5)) {
-        // With the faulty run's options, the retry must reach what that run
-        // reaches without faults, which leaves a run with them nothing to do.
+        // The retry with the faulty run's options must reach what that run
+        // would without faults, leaving a later run with them nothing to do.
         completed(sync(src, dst, faulty, *journal.value(), retried, /*retry_failed=*/true));
         if (faulted.ok()) {
           Report rest;

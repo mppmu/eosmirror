@@ -13,19 +13,13 @@
 
 namespace eosmirror {
 
-// An endpoint on a local file system (which includes network file systems
-// mounted on the host, such as CephFS or an EOS FUSE mount).
-//
-// Files are written to ".<name>.eosmirror-<random>" in the target directory
-// and renamed into place on commit. Directories are created with the owner's
-// rwx bits added, since their exact mode is applied when they are finalized.
 struct PosixOptions {
   // Read every written file back and compare its checksum before the rename.
   bool verify_readback = false;
   // Make copies durable without waiting for each: a copy is renamed into
   // place with mtime 0, flush() syncs the file systems that copies went to
-  // (syncfs), and the copies renamed before then get their mtimes. Without,
-  // copies get their mtimes before the rename, and nothing is synced.
+  // (syncfs), and the copies renamed before then get their mtimes. Without
+  // it, copies get their mtimes before the rename, and nothing is synced.
   bool sync = true;
   // The mode of copied files when modes are not preserved (0666 & ~umask).
   ModeBits default_mode = 0644;
@@ -33,6 +27,12 @@ struct PosixOptions {
 
 class DeferredMtimes;
 
+// An endpoint on a local file system (which includes network file systems
+// mounted on the host, such as CephFS or an EOS FUSE mount).
+//
+// Files are written to ".<name>.eosmirror-<random>" in the target directory
+// and renamed into place on commit. Directories are created with the owner's
+// rwx bits added, since their exact mode is applied when they are finalized.
 class PosixEndpoint : public Endpoint {
  public:
   explicit PosixEndpoint(std::string root, PosixOptions options = PosixOptions());

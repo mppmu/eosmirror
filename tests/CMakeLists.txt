@@ -32,7 +32,7 @@ if(EOSMIRROR_SANITIZER STREQUAL "thread")
 endif()
 
 add_test(NAME unit COMMAND ${test_launcher} $<TARGET_FILE:eosmirror_tests>)
-# The tests of what users other than root cannot do, as nobody if needed.
+# The tests of what users other than root cannot do, run as nobody if needed.
 add_test(NAME unit_unprivileged
   COMMAND ${test_launcher} sh ${CMAKE_CURRENT_SOURCE_DIR}/unit/unprivileged.sh
           $<TARGET_FILE:eosmirror_tests> --test-suite=unprivileged)
@@ -71,8 +71,9 @@ if(EOSMIRROR_WITH_XROOTD)
   # Under a sanitizer, XRootD's plugins (the security protocols) are loaded
   # through the sanitizer's dlopen, which ignores the library's own search
   # path, so the tests get it in LD_LIBRARY_PATH. Leaks in XRootD's and
-  # OpenSSL's global state are not ours (lsan.supp), nor is a race TSan
-  # sees in glibc's time zone setup (tsan.supp). The unit tests load the
+  # OpenSSL's global state are not ours (lsan.supp), nor are the races TSan
+  # sees in glibc's time zone setup and in XrdCl's file state handler
+  # (tsan.supp). The unit tests load the
   # client library too. UBSan stops at its first finding, with a stack trace.
   if(EOSMIRROR_SANITIZER AND EOSMIRROR_XROOTD_LIBDIR)
     set_tests_properties(unit unit_unprivileged integration integration_sudoer cli_smoke differential crash_consistency

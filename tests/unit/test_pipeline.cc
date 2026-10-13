@@ -171,7 +171,7 @@ TEST_CASE("write windows stop at the first failure and report it once") {
   REQUIRE_FALSE(drained.ok());
   CHECK(drained.error().kind == ErrorKind::IO);
   CHECK(drained.error().message.find("(last write acknowledged ") != std::string::npos);
-  // Reported as it was, and nothing is started once it is known.
+  // The failure is reported as it was. Nothing is started once it is known.
   if (!first.ok()) CHECK(first.error().message == drained.error().message);
   CHECK_FALSE(writes.write(Chunk{offset, 10, pool.acquire()}).ok());
   int after = submitted;

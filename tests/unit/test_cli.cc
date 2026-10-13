@@ -153,7 +153,7 @@ TEST_CASE("usage errors are rejected") {
   CHECK_FALSE(parse({"sync", "--keep-emptied", "a", "b"}).ok());
   CHECK_FALSE(parse({"sync", "--delete", "--delete-emptied", "a", "b"}).ok());
   CHECK_FALSE(parse({"sync", "--max-consecutive-failures", "x", "a", "b"}).ok());
-  // Numbers out of the range of where they go, rather than cut to fit.
+  // Numbers out of range for their destination are rejected, not cut to fit.
   for (std::vector<std::string> args :
        {std::vector<std::string>{"--shard", "4294967296/2"}, {"--shard", "1/4294967298"},
         {"--max-backlog", "-1"}, {"--checkers", "4294967297"}, {"--transfers", "-4294967295"},

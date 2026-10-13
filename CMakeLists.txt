@@ -23,7 +23,7 @@ if(EOSMIRROR_WERROR)
 endif()
 
 # Undefined behavior stops the program, so that it fails the tests rather
-# than print a diagnostic.
+# than only print a diagnostic.
 if(EOSMIRROR_SANITIZER STREQUAL "address")
   add_compile_options(-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer)
   add_link_options(-fsanitize=address,undefined)

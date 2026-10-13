@@ -125,8 +125,9 @@ void ProgressDisplay::loop() {
   }
 }
 
-// Both run under the log mutex, so that log lines and the display never
-// interleave: the lines are rewritten in place, the cursor stays at the top.
+// render() and erase() run under the log mutex, so that log lines and the
+// display never interleave. The lines are rewritten in place, and the cursor
+// stays at the top.
 void ProgressDisplay::render() {
   struct winsize ws{};
   if (ioctl(STDERR_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 20) width_ = ws.ws_col;

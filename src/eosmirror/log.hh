@@ -26,7 +26,7 @@ inline bool enabled(LogLevel l) { return l <= level(); }
 
 void write(LogLevel level, std::string_view message);
 
-// The mutex that serializes output; a terminal display renders under it.
+// The mutex that serializes output. A terminal display renders under it.
 std::unique_lock<std::mutex> lock();
 
 // A terminal display registers how to step aside before a log line is
