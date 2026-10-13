@@ -417,12 +417,15 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
   URL as given is kept for messages and the journal.
 - Listing: `find` (RequestProto field 5, FindProto) with `Files`,
   `Directories`, `Maxdepth=1` (a oneof, so it must be sent), `Path` and
-  `Format="type,size,uid,gid,mode,flags,mtime,ctime,checksum,checksumtype,link"`,
-  plus `SkipVersionDirs`. Each output line is `path="<abs>" type=... size=N
+  `Format="type,size,uid,gid,mode,flags,mtime,ctime,checksum,checksumtype,
+  attr.sys.forced.atomic,attr.user.forced.atomic,link"`, plus
+  `SkipVersionDirs`. Each output line is `path="<abs>" type=... size=N
   uid=U gid=G mode=<octal, directories> flags=<octal, files>
   mtime=<sec>.<nsec> ctime=<sec>.<nsec> checksum=<hex, files> checksumtype=<adler, crc32c, ...,
-  none> target="<link target>"`, the fields in the order of the format and
-  the target only for symlinks (`mgm/proc/user/NewfindCmd.cc`, printFormat).
+  none> attr.<name>="<value>" target="<link target>"`, the fields in the
+  order of the format, the attributes only where set (their values must
+  be quoted, without spaces or quotes) and the target only for symlinks
+  (`mgm/proc/user/NewfindCmd.cc`, printFormat).
   A file's checksum is kept with its entry when its type is adler32; one of
   all zeros (a type without a stored value) counts as none.
   The start directory itself is listed too and skipped; a listing without it
@@ -473,6 +476,18 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
   delete it (`fst/XrdFstOfsFile.cc`): an aborted upload waits for its writes
   in flight, also after a failed one, sends the fctl `delete` (XrdCl
   `File::Fcntl`) and closes, and the previous file stays as it was.
+- A directory whose `sys.forced.atomic`, or without that its
+  `user.forced.atomic`, is 0 makes EOS ignore `eos.atomic`
+  (`mgm/utils/AttrHelper.cc`, checkAtomicUpload, and
+  `XrdMgmOfsFile.cc`): the file in place is removed at the open (or
+  versioned), and the upload is written under the final name. EOS discards
+  an upload that fails there, so a failed replacement leaves no file,
+  which the next run copies. find prints the attributes of directories
+  that its format names (`attr.<name>`), at no cost of a request: the
+  listing of a target directory tells by its own line, and files replaced
+  there are warned about once per directory and counted. Attributes that a
+  directory takes from another through `sys.attr.link` are not printed by
+  find, and not seen.
 - An upload is known by the id of the file it creates, which the MGM names
   in the URL of the storage node it redirects the open to (`mgm.id`, in
   XrdCl's `LastURL`); an open without one fails the copy. After the close,

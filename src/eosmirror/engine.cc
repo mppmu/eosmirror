@@ -39,6 +39,7 @@ struct DirNode {
   // left out, and whether deletions in it are held back.
   size_t unlisted = 0;
   bool deletions_held = false;
+  bool replaces_at_open = false;  // the target replaces files at their open (Listing)
 
   std::atomic<int> pending{1};  // own processing plus unfinished entries
   std::atomic<bool> touched{false};        // entries were created, replaced or removed
@@ -50,6 +51,7 @@ struct DirNode {
   std::atomic<bool> relaxing_tried{false};
   std::atomic<bool> made_writable{false};  // the target's mode was relaxed for changes
   std::atomic<bool> unverified_warned{false};
+  std::atomic<bool> replacing_warned{false};
   std::mutex writable_mutex;
 };
 
@@ -544,6 +546,7 @@ struct Engine::Impl {
       auto dst_listed = retry([&] { return target.list(node->path); });
       if (dst_listed.ok()) {
         node->unlisted += drop_invalid_names(target, node->path, dst_listed.value());
+        node->replaces_at_open = dst_listed.value().replaces_at_open;
         for (Entry& e : dst_listed.value().entries) {
           std::string name = e.name;
           dst_entries.emplace(std::move(name), std::move(e));
@@ -843,6 +846,10 @@ struct Engine::Impl {
     }
     ensure_writable(node);
     if (in_doubt && !invalidate_in_doubt(path, e)) return;
+    if (existing && node->replaces_at_open && !node->replacing_warned.exchange(true))
+      log::warn("replacing files in ", node->path.empty() ? "." : node->path,
+                " without atomic uploads, which the target forces to be non-atomic there: a "
+                "failed replacement leaves no file");
     node->pending.fetch_add(1);
     stats.queued_copies.fetch_add(1);
     if (!copies.push(CopyJob{node, e, existing != nullptr})) {
@@ -1044,9 +1051,11 @@ struct Engine::Impl {
   void run_copy(const CopyJob& job, BufferPool& pool, TransferSlot& slot) {
     RelPath path = join(job.dir->path, job.source.name);
     job.dir->touched = true;
+    bool non_atomic = job.replaces && job.dir->replaces_at_open;
     if (options.dry_run) {
       stats.files_copied.fetch_add(1);
       stats.bytes_copied.fetch_add(job.source.size);
+      if (non_atomic) stats.non_atomic_replacements.fetch_add(1);
       log::debug("would copy ", path);
     } else if (!cancel.requested()) {
       {
@@ -1097,6 +1106,7 @@ struct Engine::Impl {
       if (result.ok()) {
         stats.files_copied.fetch_add(1);
         stats.bytes_copied.fetch_add(result.value().bytes);
+        if (non_atomic) stats.non_atomic_replacements.fetch_add(1);
         log::debug("copied ", path, " (", result.value().bytes, " bytes)");
         if (copy_options.verify && !result.value().verified) {
           stats.files_unverified.fetch_add(1);

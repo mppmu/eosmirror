@@ -32,6 +32,7 @@ struct Stats {
   Counter bytes_written{0};  // every chunk written, including copies still running
   Counter files_unchanged{0};
   Counter files_unverified{0};  // copied where no checksum could be compared
+  Counter non_atomic_replacements{0};  // files replaced where the target forces non-atomic uploads
   Counter symlinks_created{0};
   Counter symlinks_unchanged{0};
   Counter symlinks_skipped{0};  // the target has no symlinks

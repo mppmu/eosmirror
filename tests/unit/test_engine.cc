@@ -1334,6 +1334,42 @@ TEST_CASE("fake: --one-file-system skips directories on other file systems") {
   CHECK(dst.get("mnt/data"));
 }
 
+TEST_CASE("fake: files replaced where the target forces non-atomic uploads are told and counted") {
+  FakeEndpoint src, dst;
+  populate(src);
+  src.add_file("d1/f3", "three");
+  Report mirror;
+  REQUIRE(run_sync(src, dst, fake_options(), mirror).ok());
+  dst.replacing_at_open = {"d1"};
+  // New files there need no warning.
+  src.add_file("d1/new", "new");
+  StderrCapture new_only;
+  Report r;
+  REQUIRE(run_sync(src, dst, fake_options(), r).ok());
+  CHECK(r.stats.files_copied == 1);
+  CHECK(r.stats.non_atomic_replacements == 0);
+  CHECK(new_only.text().find("without atomic uploads") == std::string::npos);
+
+  // Replacing two is told once, and both are replaced all the same.
+  for (const char* path : {"d1/f1", "d1/f3"})
+    src.modify(path, [](FakeEndpoint::Node& n) { n.entry.mtime = {7777, 0}; });
+  src.modify("f0", [](FakeEndpoint::Node& n) { n.entry.mtime = {7777, 0}; });
+  StderrCapture err;
+  Report r2;
+  REQUIRE(run_sync(src, dst, fake_options(), r2).ok());
+  std::string text = err.text();
+  CHECK(r2.stats.files_copied == 3);
+  CHECK(r2.stats.non_atomic_replacements == 2);
+  CHECK(r2.stats.failures == 0);
+  size_t told = 0;
+  for (size_t at = 0; (at = text.find("without atomic uploads", at)) != std::string::npos; ++at) ++told;
+  CHECK(told == 1);
+  CHECK(text.find("replacing files in d1 without atomic uploads") != std::string::npos);
+  CHECK(r2.summary(false).find("files replaced without atomic uploads (forced by the target): 2") !=
+        std::string::npos);
+  expect_mirrored(src, dst);
+}
+
 TEST_CASE("fake: owners of a source without owners are left alone") {
   FakeEndpoint src, dst;
   src.caps.has_owners = false;

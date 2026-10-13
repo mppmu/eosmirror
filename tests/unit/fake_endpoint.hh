@@ -77,6 +77,9 @@ class FakeEndpoint : public eosmirror::Endpoint {
   // Entries that listings leave out without saying so, like a plain XRootD
   // server's listing that ends at an entry it cannot stat.
   std::set<RelPath> unlisted;
+  // Directories whose listings say that they replace files at the open, like
+  // EOS directories that force uploads to be non-atomic.
+  std::set<RelPath> replacing_at_open;
 
   // ---- test setup -----------------------------------------------------------
 
@@ -184,6 +187,7 @@ class FakeEndpoint : public eosmirror::Endpoint {
     if (it->second.entry.type != eosmirror::EntryType::Directory)
       return Error{ErrorKind::NotADirectory, "list " + dir};
     eosmirror::Listing result;
+    result.replaces_at_open = replacing_at_open.count(dir) > 0;
     for (const auto& [p, n] : nodes_) {
       if (p.empty() || parent_of(p) != dir || unlisted.count(p)) continue;
       if (unlistable.count(p))

@@ -55,6 +55,10 @@ struct Capabilities {
 struct Listing {
   std::vector<Entry> entries;
   size_t skipped = 0;
+  // A file written into the directory replaces the one there when it is
+  // opened, not once it is complete (EOS directories that force uploads to
+  // be non-atomic): a failed replacement leaves no file.
+  bool replaces_at_open = false;
 };
 
 // Where the tree of an endpoint is, for comparing endpoints: the server

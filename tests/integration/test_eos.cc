@@ -635,6 +635,48 @@ TEST_CASE("EOS to FS: files are read with the listing's metadata, without MGM st
   }
 }
 
+TEST_CASE("FS to EOS: files replaced where EOS forces uploads to be non-atomic") {
+  if (!base_url()) return;
+  RemoteDir dir("nonatomic");
+  EosEndpoint& ep = *dir.endpoint;
+  REQUIRE(ep.mkdir("d", 0755).ok());
+  auto set = ep.proc("mgm.cmd=attr&mgm.subcmd=set&mgm.attr.key=user.forced.atomic&mgm.attr.value=0"
+                     "&mgm.path=" + ep.location().path + "/d");
+  REQUIRE(set.ok());
+  REQUIRE(set.value().retc == 0);
+  TempDir tmp;
+  tmp.write_file("src/d/f", "first");
+  PosixEndpoint src(tmp.sub("src"));
+  SyncOptions options = test_options();
+  options.preserve_owner = false;
+  Cancellation cancel;
+
+  // A new file there needs no warning.
+  StderrCapture new_file;
+  Report r;
+  {
+    Engine engine(src, ep, options, r, nullptr, cancel);
+    REQUIRE(engine.run().ok());
+  }
+  CHECK(r.stats.files_copied == 1);
+  CHECK(r.stats.non_atomic_replacements == 0);
+  CHECK(new_file.text().find("without atomic uploads") == std::string::npos);
+
+  // A replacement is warned about, counted, and replaces the file.
+  tmp.write_file("src/d/f", "the second version");
+  StderrCapture replaced;
+  Report r2;
+  {
+    Engine engine(src, ep, options, r2, nullptr, cancel);
+    REQUIRE(engine.run().ok());
+  }
+  CHECK(r2.stats.files_copied == 1);
+  CHECK(r2.stats.non_atomic_replacements == 1);
+  CHECK(r2.stats.failures == 0);
+  CHECK(replaced.text().find("replacing files in d without atomic uploads") != std::string::npos);
+  CHECK(get(ep, "d/f") == "the second version");
+}
+
 TEST_CASE("FS to EOS: an upload is confirmed by one query of the MGM") {
   if (!base_url()) return;
   std::string mgm = XrdCl::URL(base_url()).GetHostName();

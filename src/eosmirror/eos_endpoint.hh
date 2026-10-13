@@ -118,11 +118,17 @@ Result<GetfmdReply> parse_getfmd_reply(std::string_view reply);
 // returned whole as output.
 EosEndpoint::ProcResult parse_proc_reply(const std::string& reply);
 
-// One line of the find listing of the directory abs_dir (see docs/design.md)
-// as an entry named relative to abs_dir; nothing for abs_dir itself. A line
-// that cannot be parsed unambiguously or names no valid entry of abs_dir is
-// an error.
-Result<std::optional<Entry>> parse_find_line(std::string_view line, std::string_view abs_dir);
+// One line of the find listing of the directory abs_dir (see docs/design.md):
+// an entry named relative to abs_dir (abs_dir itself with an empty name),
+// and for a directory whether EOS forces the uploads into it to be
+// non-atomic (sys.forced.atomic, else user.forced.atomic, is 0). A line that
+// cannot be parsed unambiguously or names no valid entry of abs_dir is an
+// error.
+struct FindEntry {
+  Entry entry;
+  bool non_atomic = false;
+};
+Result<FindEntry> parse_find_line(std::string_view line, std::string_view abs_dir);
 
 // The names of the subdirectories of abs_dir that a find left out because the
 // identity may not read them, from the find's error output. Nothing if the

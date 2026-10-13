@@ -18,8 +18,8 @@ Entry listed(std::string_view line, std::string_view dir = "/eos/d") {
   INFO("line ", line);
   auto parsed = parse_find_line(line, dir);
   REQUIRE(parsed.ok());
-  REQUIRE(parsed.value());
-  return *parsed.value();
+  REQUIRE_FALSE(parsed.value().entry.name.empty());
+  return parsed.value().entry;
 }
 
 bool refused(std::string_view line, std::string_view dir = "/eos/d") {
@@ -300,7 +300,39 @@ TEST_CASE("find listing lines") {
            std::pair{R"(path="/" type=directory  size=0 uid=0 gid=0 mode=40755 mtime=1.0)", "/"}}) {
     auto self = parse_find_line(line, dir);
     REQUIRE(self.ok());
-    CHECK_FALSE(self.value());
+    CHECK(self.value().entry.name.empty());
+    CHECK(self.value().entry.type == EntryType::Directory);
+    CHECK_FALSE(self.value().non_atomic);
+  }
+}
+
+TEST_CASE("find listing lines tell directories that force uploads to be non-atomic") {
+  auto non_atomic = [](std::string_view attributes) {
+    std::string line =
+        std::string(R"(path="/eos/d/" type=directory  size=0 uid=0 gid=0 mode=40755 mtime=1.0 )") +
+        std::string(attributes);
+    INFO("line ", line);
+    auto parsed = parse_find_line(line, "/eos/d");
+    REQUIRE(parsed.ok());
+    return parsed.value().non_atomic;
+  };
+  CHECK(non_atomic(R"(attr.user.forced.atomic="0")"));
+  CHECK(non_atomic(R"(attr.sys.forced.atomic="0")"));
+  CHECK_FALSE(non_atomic(R"(attr.user.forced.atomic="1")"));
+  CHECK_FALSE(non_atomic(""));
+  // The system attribute decides where it is set.
+  CHECK_FALSE(non_atomic(R"(attr.sys.forced.atomic="1" attr.user.forced.atomic="0")"));
+  CHECK(non_atomic(R"(attr.sys.forced.atomic="0" attr.user.forced.atomic="1")"));
+  // As EOS reads the values: a number that starts them, else 0.
+  CHECK(non_atomic(R"(attr.user.forced.atomic="")"));
+  CHECK(non_atomic(R"(attr.user.forced.atomic="no")"));
+  CHECK_FALSE(non_atomic(R"(attr.user.forced.atomic="2x")"));
+  CHECK_FALSE(non_atomic(R"(attr.user.forced.atomic="-1")"));
+  // Values that would make the rest of the line ambiguous are refused.
+  for (const char* value : {R"("0 size=5")", R"("0)", R"(0)", R"("0"x")"}) {
+    INFO("value ", value);
+    CHECK(refused(std::string(R"(path="/eos/d/s/" type=directory  size=0 uid=0 gid=0 )") +
+                  "mode=40755 mtime=1.0 attr.user.forced.atomic=" + value));
   }
 }
 

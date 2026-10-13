@@ -180,6 +180,14 @@ start.
   target is therefore refused unless `--target-without-symlinks` states
   that it has none. Local and EOS targets show symlinks and remove them
   as such.
+- EOS directories can force uploads to be non-atomic
+  (`sys.forced.atomic=0`, or `user.forced.atomic=0` without the former).
+  EOS then removes a file that eosmirror replaces when the upload starts,
+  and discards an upload that fails, so that a failed replacement leaves
+  no file there until the next run copies it. Runs warn once per such
+  directory where they replace files, and count those files. Attributes
+  that a directory takes from another through `sys.attr.link` are not
+  seen.
 
 ## Building
 

@@ -424,7 +424,15 @@ EosEndpoint::ProcResult parse_proc_reply(const std::string& reply) {
   return result;
 }
 
-Result<std::optional<Entry>> parse_find_line(std::string_view line, std::string_view abs_dir) {
+// Whether EOS takes a forced.atomic attribute's value for on, as a number
+// that starts it and is not 0 (mgm/utils/AttrHelper.cc, checkAtomicUpload).
+bool atomic_on(std::string_view value) {
+  int number = 0;
+  std::from_chars(value.data(), value.data() + value.size(), number);
+  return number != 0;
+}
+
+Result<FindEntry> parse_find_line(std::string_view line, std::string_view abs_dir) {
   constexpr std::string_view kPath = "path=\"";
   constexpr std::string_view kPathEnd = "\" type=";
   auto bad = [&](std::string_view problem) {
@@ -440,9 +448,11 @@ Result<std::optional<Entry>> parse_find_line(std::string_view line, std::string_
   std::string_view path = line.substr(kPath.size(), path_end - kPath.size());
 
   // "type=... size=N uid=U gid=G mode=M flags=F mtime=S.N ctime=S.N
-  // checksum=X checksumtype=T target="..."", the target last.
+  // checksum=X checksumtype=T attr.sys.forced.atomic="A" attr.user.forced.atomic="B"
+  // target="..."", the attributes where set, the target last.
   Entry e;
   std::string_view checksum, checksum_type;
+  std::optional<std::string_view> sys_atomic, user_atomic;
   std::string_view rest = line.substr(path_end + 2);
   while (!rest.empty()) {
     if (rest.front() == ' ') {
@@ -498,6 +508,12 @@ Result<std::optional<Entry>> parse_find_line(std::string_view line, std::string_
       checksum_type = value;
     } else if (key == "target") {
       e.link_target = std::string(value);
+    } else if (key == "attr.sys.forced.atomic" || key == "attr.user.forced.atomic") {
+      // Quoted, without spaces or quotes of its own.
+      valid = value.size() >= 2 && value.front() == '"' && value.back() == '"' &&
+              value.find('"', 1) == value.size() - 1;
+      (key == "attr.sys.forced.atomic" ? sys_atomic : user_atomic) =
+          value.substr(1, value.size() - 2);
     }
     if (!valid) return bad("malformed " + std::string(key) + " in listing line");
   }
@@ -511,7 +527,13 @@ Result<std::optional<Entry>> parse_find_line(std::string_view line, std::string_
     if (path.size() > 1 && path.back() == '/') path.remove_suffix(1);
   }
 
-  if (path == abs_dir) return std::optional<Entry>();
+  FindEntry found;
+  // The system attribute decides where it is set, else the user's.
+  if (auto atomic = sys_atomic ? sys_atomic : user_atomic) found.non_atomic = !atomic_on(*atomic);
+  if (path == abs_dir && e.type == EntryType::Directory) {
+    found.entry = std::move(e);
+    return found;
+  }
   std::string prefix = abs_dir == "/" ? "/" : std::string(abs_dir) + "/";
   if (!path.starts_with(prefix)) return bad("listing line outside the directory");
   std::string_view name = path.substr(prefix.size());
@@ -521,7 +543,8 @@ Result<std::optional<Entry>> parse_find_line(std::string_view line, std::string_
   });
   if (!valid_entry_name(name) || control) return bad("invalid name in listing line");
   e.name = std::string(name);
-  return std::optional<Entry>(std::move(e));
+  found.entry = std::move(e);
+  return found;
 }
 
 std::optional<std::vector<std::string>> parse_find_denials(std::string_view err,
@@ -773,9 +796,12 @@ Result<std::string> EosEndpoint::resolve(const std::string& abs_path) {
 
 Result<Listing> EosEndpoint::list(const RelPath& dir) {
   std::string abs = absolute(dir);
-  // The link target comes last: parse_find_line takes it to the end of the line.
-  std::string request =
-      find_request(abs, "type,size,uid,gid,mode,flags,mtime,ctime,checksum,checksumtype,link");
+  // The link target comes last: parse_find_line takes it to the end of the
+  // line. Directories show the attributes that make uploads non-atomic.
+  std::string request = find_request(abs,
+                                     "type,size,uid,gid,mode,flags,mtime,ctime,checksum,"
+                                     "checksumtype,attr.sys.forced.atomic,attr.user.forced.atomic,"
+                                     "link");
   auto result = proc("mgm.cmd.proto=" + base64(request));
   if (!result.ok()) return result.error();
   const ProcResult& reply = result.value();
@@ -795,6 +821,7 @@ Result<Listing> EosEndpoint::list(const RelPath& dir) {
 
   std::vector<Entry> entries;
   bool listed_itself = false;
+  bool replaces_at_open = false;
   size_t skipped = 0;
   std::string first_problem;
   std::istringstream lines(reply.out);
@@ -806,10 +833,12 @@ Result<Listing> EosEndpoint::list(const RelPath& dir) {
       if (skipped++ == 0) first_problem = parsed.error().message;
       continue;
     }
-    if (parsed.value())
-      entries.push_back(std::move(*parsed.value()));
-    else
+    if (!parsed.value().entry.name.empty()) {
+      entries.push_back(std::move(parsed.value().entry));
+    } else {
       listed_itself = true;
+      replaces_at_open = parsed.value().non_atomic;
+    }
   }
   // find prints paths below the directory's real path, which the root is.
   if (!listed_itself && !truncated)
@@ -847,7 +876,7 @@ Result<Listing> EosEndpoint::list(const RelPath& dir) {
     }
     entries.push_back(std::move(e).value());
   }
-  return Listing{std::move(entries), skipped};
+  return Listing{std::move(entries), skipped, replaces_at_open};
 }
 
 Result<size_t> EosEndpoint::complete_listing(const std::string& abs, std::vector<Entry>& entries) {
