@@ -504,13 +504,15 @@ TEST_CASE("fake: uploads that fail their verification are taken back") {
   dst.caps.checksum = ChecksumType::Adler32;
   populate(src);
   const int attempts = fake_options().retry.attempts;
-  // The data arrived corrupted; the checksum cannot be asked for; and
-  // neither can be removed.
+  // The data arrived corrupted; the upload cannot be confirmed, though it
+  // can be found in place again; and neither can be removed.
+  int confirms = 0;
   dst.hook = [&](std::string_view op, const RelPath& path) {
     if (op == "close" && path == "f0")
       dst.modify("f0", [](FakeEndpoint::Node& n) { n.content[0] = 'R'; });
+    if (op == "confirm" && path == "d1/f1" && confirms++ % 2 == 0)
+      dst.fail("confirm", "d1/f1", Error{ErrorKind::IO, "no answer"});
   };
-  dst.fail("checksum", "d1/f1", Error{ErrorKind::IO, "no answer"}, attempts);
   for (const char* path : {"f0", "d1/f1"})
     dst.fail("remove", path, Error{ErrorKind::Permission, "locked"}, attempts);
   Report r;
@@ -526,14 +528,14 @@ TEST_CASE("fake: uploads that fail their verification are taken back") {
 
 TEST_CASE("fake: a file that cannot be told from a failed upload is left alone") {
   FakeEndpoint src, dst;
-  dst.atomic_uploads = true;  // confirmed by size and mtime: no checksums
+  dst.atomic_uploads = true;
   populate(src);
   dst.add_file("f0", "previous", 0644, {2500, 0});
   // The storage node discards the upload, the close reports success, and the
-  // stats that would show the previous file in place time out.
+  // queries that would show the previous file in place time out.
   const int attempts = fake_options().retry.attempts;
   dst.fail("lost", "f0", Error{ErrorKind::IO, "connection gone"}, attempts);
-  dst.fail("stat", "f0", Error{ErrorKind::Timeout, "no answer"}, 2 * attempts);
+  dst.fail("confirm", "f0", Error{ErrorKind::Timeout, "no answer"}, 2 * attempts);
   Report r;
   REQUIRE(run_sync(src, dst, fake_options(), r).ok());
   REQUIRE(r.stats.failures == 1);
@@ -541,6 +543,51 @@ TEST_CASE("fake: a file that cannot be told from a failed upload is left alone")
   REQUIRE(dst.get("f0"));
   CHECK(dst.get("f0")->content == "previous");
   CHECK(dst.get("f0")->entry.mtime == Timespec{2500, 0});
+}
+
+TEST_CASE("fake: an upload is confirmed by its file, not by what is in its place") {
+  FakeEndpoint src, dst;
+  dst.atomic_uploads = true;
+  dst.caps.checksum = ChecksumType::Adler32;
+  populate(src);
+  Report mirror;
+  REQUIRE(run_sync(src, dst, fake_options(), mirror).ok());
+
+  SUBCASE("a lost upload, whose file in place has its checksum") {
+    // The same content, other mtime: copied, and the first upload is lost.
+    dst.modify("f0", [](FakeEndpoint::Node& n) { n.entry.mtime = {2500, 0}; });
+    dst.fail("lost", "f0", Error{ErrorKind::IO, "connection gone"});
+    Report r;
+    REQUIRE(run_sync(src, dst, fake_options(), r).ok());
+    CHECK(r.stats.retries == 1);
+    CHECK(r.stats.failures == 0);
+    CHECK(dst.get("f0")->entry.mtime == src.get("f0")->entry.mtime);
+  }
+  SUBCASE("a failed upload that another writer replaced meanwhile") {
+    src.modify("f0", [](FakeEndpoint::Node& n) { n.entry.mtime = {3500, 0}; });
+    // The first upload arrives corrupted, and before it is taken back,
+    // another run puts a good copy in its place, which stays.
+    bool corrupted = false;
+    int confirms = 0;
+    dst.hook = [&](std::string_view op, const RelPath& path) {
+      if (path != "f0") return;
+      if (op == "close" && !corrupted) {
+        corrupted = true;
+        dst.modify("f0", [](FakeEndpoint::Node& n) { n.content[0] = 'R'; });
+      }
+      if (op == "confirm" && ++confirms == 2)
+        dst.modify("f0", [](FakeEndpoint::Node& n) {
+          n.content = "root file";
+          n.entry.id = "another run's";
+        });
+    };
+    Report r;
+    REQUIRE(run_sync(src, dst, fake_options(), r).ok());
+    CHECK(dst.count("remove") == 0);
+    CHECK(r.stats.retries == 1);
+    CHECK(r.stats.failures == 0);
+    expect_mirrored(src, dst);
+  }
 }
 
 TEST_CASE("fake: files whose last copy failed are copied again, whatever their size and mtime") {
@@ -592,7 +639,7 @@ TEST_CASE("fake: a file in doubt is not taken for its new copy when that does no
   REQUIRE(journal.ok());
   Journal& j = *journal.value();
   FakeEndpoint src, dst;
-  dst.atomic_uploads = true;  // confirmed by size and mtime: no checksums
+  dst.atomic_uploads = true;  // without checksums
   populate(src);
   Report mirror;
   REQUIRE(run_sync(src, dst, fake_options(), mirror).ok());

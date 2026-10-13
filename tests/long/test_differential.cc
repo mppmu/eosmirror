@@ -421,7 +421,7 @@ void random_faults(Rng& rng, FakeEndpoint& src, FakeEndpoint& dst) {
   static const std::vector<std::string> kSourceOps = {"list", "open_read", "read", "stat"};
   static const std::vector<std::string> kTargetOps = {
       "list",   "mkdir",        "open_write", "write",    "commit", "close",
-      "remove", "set_metadata", "symlink",    "checksum", "stat"};
+      "remove", "set_metadata", "symlink",    "confirm",  "stat"};
   static const std::vector<ErrorKind> kKinds = {ErrorKind::IO,         ErrorKind::IO,
                                                 ErrorKind::Timeout,    ErrorKind::Permission,
                                                 ErrorKind::NoSpace,    ErrorKind::Checksum,

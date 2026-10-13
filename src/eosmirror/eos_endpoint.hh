@@ -50,6 +50,11 @@ class EosEndpoint : public XrdEndpoint {
   // as a single query; it replies "<command>: retc=<errno>".
   Status fsctl(const std::string& abs_path, const std::string& command, const std::string& args);
 
+  // The file with the given id while it is the one at an absolute path, with
+  // size, mtime and stored checksum, by one query (the MGM's getfmd);
+  // NotFound if it is gone or elsewhere.
+  Result<Entry> file_by_id(const std::string& abs_path, uint64_t fid);
+
   struct ProcResult {
     int retc = 0;
     std::string out;
@@ -95,6 +100,17 @@ std::string symlink_request(const std::string& abs_path, const std::string& targ
 // the target must not start like a file or container id ("fid:", "fxid:",
 // "cid:", "cxid:") and must not contain a line break.
 bool symlink_safe(std::string_view abs_path, std::string_view target);
+
+// A file as the MGM's getfmd describes it, "getfmd: retc=0 name=<name>&id=<id>
+// &...&mtime=<sec>&mtime_ns=<nsec>&size=<size>&...&lid=<layout>&...
+// &checksum=<hex>&container=<parent>/", with its path, in which EOS writes
+// '&' as "#AND#". The errno of "getfmd: retc=<errno>" as an error, and an
+// error for a reply of another form.
+struct GetfmdReply {
+  std::string path;
+  Entry file;
+};
+Result<GetfmdReply> parse_getfmd_reply(std::string_view reply);
 
 // Splits the reply to an MGM command, "mgm.proc.stdout=...&mgm.proc.stderr=...
 // &mgm.proc.retc=N". The output can contain anything, file names included,

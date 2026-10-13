@@ -1,20 +1,30 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "eosmirror/atomic_upload.hh"
 
+#include <cstdio>
 #include <utility>
 
 #include "eosmirror/log.hh"
 
 namespace eosmirror {
 
+namespace {
+
+std::string describe_mtime(const Timespec& t) {
+  char buf[40];
+  std::snprintf(buf, sizeof buf, "%lld.%09d", static_cast<long long>(t.sec), t.nsec);
+  return buf;
+}
+
+}  // namespace
+
 AtomicUploadWriter::AtomicUploadWriter(Endpoint& ep, RelPath path, std::string name,
-                                       std::unique_ptr<FileWriter> upload,
-                                       ChecksumQuery stored_checksum)
+                                       std::unique_ptr<FileWriter> upload, Placed placed)
     : ep_(ep),
       path_(std::move(path)),
       name_(std::move(name)),
       upload_(std::move(upload)),
-      stored_checksum_(std::move(stored_checksum)) {}
+      placed_(std::move(placed)) {}
 
 Result<CommitInfo> AtomicUploadWriter::commit(const CommitSpec& spec) {
   CommitSpec upload_spec = spec;
@@ -22,26 +32,27 @@ Result<CommitInfo> AtomicUploadWriter::commit(const CommitSpec& spec) {
   upload_spec.require_verification = false;
   auto closed = upload_->commit(upload_spec);
   if (!closed.ok()) return failed(take_back(spec), closed.error());
+  auto placed = placed_();
+  if (!placed.ok())
+    return placed.error().kind == ErrorKind::NotFound ? not_committed()
+                                                      : rejected(spec, placed.error());
+  const Entry& file = placed.value();
+  if (file.size != spec.size)
+    return rejected(spec, Error{ErrorKind::IO, name_ + " is in place with " +
+                                                   std::to_string(file.size) +
+                                                   " bytes instead of " +
+                                                   std::to_string(spec.size)});
+  if (has(spec.fields, MetaFields::Mtime) && file.mtime != spec.metadata.mtime)
+    return rejected(spec, Error{ErrorKind::IO, name_ + " is in place with mtime " +
+                                                   describe_mtime(file.mtime) + " instead of " +
+                                                   describe_mtime(spec.metadata.mtime)});
   bool verified = false;
-  if (spec.checksum.type != ChecksumType::None) {
-    auto stored = stored_checksum_();
-    if (!stored.ok())
-      return stored.error().kind == ErrorKind::NotFound ? not_committed()
-                                                        : rejected(spec, stored.error());
-    if (stored.value().type == spec.checksum.type) {
-      if (stored.value() != spec.checksum)
-        return rejected(spec, Error{ErrorKind::Checksum, name_ + " has checksum " +
-                                                             stored.value().hex + " instead of " +
-                                                             spec.checksum.hex});
-      verified = true;
-    }
-  }
-  if (!verified) {
-    // Nothing compared, so the file in place must be told by its size and
-    // mtime.
-    auto ours = in_place(spec);
-    if (!ours.ok()) return rejected(spec, ours.error());
-    if (!ours.value()) return not_committed();
+  if (spec.checksum.type != ChecksumType::None && file.checksum.type == spec.checksum.type) {
+    if (file.checksum != spec.checksum)
+      return rejected(spec, Error{ErrorKind::Checksum, name_ + " has checksum " +
+                                                           file.checksum.hex + " instead of " +
+                                                           spec.checksum.hex});
+    verified = true;
   }
   if (spec.require_verification && !verified)
     return rejected(spec, Error{ErrorKind::Unsupported,
@@ -60,26 +71,17 @@ Result<CommitInfo> AtomicUploadWriter::commit(const CommitSpec& spec) {
   return CommitInfo{verified};
 }
 
-Result<bool> AtomicUploadWriter::in_place(const CommitSpec& spec) {
-  auto st = ep_.stat(path_);
-  if (!st.ok()) {
-    if (st.error().kind == ErrorKind::NotFound) return false;
-    return st.error();
-  }
-  return st.value().type == EntryType::File && st.value().size == spec.size &&
-         (!has(spec.fields, MetaFields::Mtime) || st.value().mtime == spec.metadata.mtime);
-}
-
 // Removes the upload, or else sets its mtime to 0 so that the next run copies
-// it again. A file in place that is not the upload is left alone, and so is
-// one that cannot be told apart from it.
+// it again. Another file in place is left alone, and so is one that cannot
+// be told apart from the upload.
 AtomicUploadWriter::Gone AtomicUploadWriter::take_back(const CommitSpec& spec) {
-  auto ours = in_place(spec);
-  if (!ours.ok()) {
-    log::error("cannot tell whether ", name_, " is the failed upload: ", ours.error().describe());
+  auto placed = placed_();
+  if (!placed.ok()) {
+    if (placed.error().kind == ErrorKind::NotFound) return Gone::NotInPlace;
+    log::error("cannot tell whether ", name_, " is the failed upload: ",
+               placed.error().describe());
     return Gone::Stuck;
   }
-  if (!ours.value()) return Gone::NotInPlace;
   Status removed = ep_.remove(path_, EntryType::File);
   if (removed.ok() || removed.error().kind == ErrorKind::NotFound) return Gone::TakenBack;
   Entry md = spec.metadata;
@@ -108,11 +110,11 @@ Error AtomicUploadWriter::rejected(const CommitSpec& spec, Error e) {
 
 // XrdCl reports the close of a file whose connection is gone as done
 // (XrdClFileStateHandler.cc, Close), and the storage node then discards the
-// upload.
+// upload; or another writer replaced it since.
 Error AtomicUploadWriter::not_committed() const {
   return Error{ErrorKind::IO, "the upload of " + name_ +
-                                  " was not committed (the connection to the storage node "
-                                  "was lost before the close)"};
+                                  " is not in place (the connection to the storage node was "
+                                  "lost before the close, or another writer replaced it)"};
 }
 
 }  // namespace eosmirror

@@ -202,6 +202,19 @@ uint64_t opened_file_id(const XrdCl::File& file) {
   return parse_number<uint64_t>(id->second, 16).value_or(0);
 }
 
+// A path as EOS writes it in replies, with '&' as "#AND#"
+// (common/StringConversion.cc, SealXrdPath).
+std::string sealed(std::string_view path) {
+  std::string out;
+  for (char c : path) {
+    if (c == '&')
+      out += "#AND#";
+    else
+      out += c;
+  }
+  return out;
+}
+
 std::string format_timespec(const Timespec& t) {
   char buf[40];
   std::snprintf(buf, sizeof buf, "%lld.%09d", static_cast<long long>(t.sec), t.nsec);
@@ -331,6 +344,51 @@ std::string symlink_request(const std::string& abs_path, const std::string& targ
   std::string request;
   put_bytes(request, 29, file);  // RequestProto.file
   return request;
+}
+
+Result<GetfmdReply> parse_getfmd_reply(std::string_view reply) {
+  while (!reply.empty() && (reply.back() == '\0' || reply.back() == '\n')) reply.remove_suffix(1);
+  constexpr std::string_view kRetc = "getfmd: retc=";
+  auto bad = [&] {
+    return Error{ErrorKind::Other, "unexpected getfmd reply: " + std::string(reply)};
+  };
+  if (!reply.starts_with(kRetc)) return bad();
+  std::string_view rest = reply.substr(kRetc.size());
+  std::string_view retc = rest.substr(0, rest.find(' '));
+  auto err = parse_number<int>(retc);
+  if (!err) return bad();
+  if (*err != 0) return errno_error(*err, "getfmd");
+  rest.remove_prefix(std::min(rest.size(), retc.size() + 1));
+  // Names and the parent are sealed, so '&' separates the fields.
+  std::unordered_map<std::string_view, std::string_view> fields;
+  while (!rest.empty()) {
+    std::string_view field = rest.substr(0, rest.find('&'));
+    rest.remove_prefix(std::min(rest.size(), field.size() + 1));
+    auto eq = field.find('=');
+    if (eq == std::string_view::npos) return bad();
+    fields[field.substr(0, eq)] = field.substr(eq + 1);
+  }
+  auto number = [&](std::string_view key) { return parse_number<uint64_t>(fields[key]); };
+  auto id = number("id"), size = number("size"), mtime = number("mtime"),
+       mtime_ns = number("mtime_ns"), lid = number("lid");
+  std::string_view name = fields["name"], container = fields["container"];
+  if (!id || !size || !mtime || !mtime_ns || *mtime_ns >= 1000000000 || !lid || name.empty() ||
+      !container.starts_with('/'))
+    return bad();
+  GetfmdReply result;
+  result.path = std::string(container);
+  if (!result.path.ends_with('/')) result.path += '/';
+  result.path += name;
+  Entry& e = result.file;
+  e.name = std::string(name);
+  e.type = EntryType::File;
+  e.id = std::to_string(*id);
+  e.size = *size;
+  e.mtime = {static_cast<int64_t>(*mtime), static_cast<int32_t>(*mtime_ns)};
+  // The checksum type is the low four bits of the layout (common/LayoutId.hh).
+  constexpr uint64_t kAdler = 2;
+  if ((*lid & 0xf) == kAdler) e.checksum = listed_checksum("adler", fields["checksum"]);
+  return result;
 }
 
 bool symlink_safe(std::string_view abs_path, std::string_view target) {
@@ -893,6 +951,27 @@ Status EosEndpoint::fsctl(const std::string& abs, const std::string& command,
   return {};
 }
 
+Result<Entry> EosEndpoint::file_by_id(const std::string& abs, uint64_t fid) {
+  XrdCl::Buffer arg;
+  arg.FromString(request_path(abs).value() + "&mgm.pcmd=getfmd&mgm.getfmd.fid=" +
+                 std::to_string(fid));
+  XrdCl::Buffer* response = nullptr;
+  XrdCl::XRootDStatus st = fs().Query(XrdCl::QueryCode::OpaqueFile, arg, response);
+  if (!st.IsOK()) return xrd_error(st, "getfmd " + url_of(abs));
+  std::unique_ptr<XrdCl::Buffer> owned(response);
+  auto reply = parse_getfmd_reply(response ? response->ToString() : "");
+  if (!reply.ok()) {
+    Error e = reply.error();
+    e.message += " (" + url_of(abs) + ")";
+    return e;
+  }
+  if (reply.value().path != sealed(abs))
+    return Error{ErrorKind::NotFound, url_of(abs) + ": the file of the upload is elsewhere"};
+  Entry file = std::move(reply.value().file);
+  file.name = name_of(abs);
+  return file;
+}
+
 Result<Checksum> EosEndpoint::stored_checksum(const RelPath& path, const Entry& listed) {
   return Endpoint::stored_checksum(path, listed);
 }
@@ -918,10 +997,18 @@ Result<std::unique_ptr<FileWriter>> EosEndpoint::open_write(const RelPath& path,
   XrdCl::XRootDStatus st = file->Open(url, XrdCl::OpenFlags::Delete | XrdCl::OpenFlags::Write,
                                       static_cast<XrdCl::Access::Mode>(mode & 0777));
   if (!st.IsOK()) return xrd_error(st, "create " + url_of(abs));
+  // The id of the file the upload creates, by which it is told from any
+  // other file in place afterwards.
+  uint64_t fid = opened_file_id(*file);
   std::unique_ptr<FileWriter> upload(
       new EosUploadWriter(std::move(file), url_of(abs), options_.write_window));
+  if (fid == 0) {
+    upload->abort();
+    return Error{ErrorKind::Unsupported,
+                 "create " + url_of(abs) + ": the MGM names no id for the file of the upload"};
+  }
   return std::unique_ptr<FileWriter>(new AtomicUploadWriter(
-      *this, path, url_of(abs), std::move(upload), [this, abs] { return query_checksum(abs); }));
+      *this, path, url_of(abs), std::move(upload), [this, abs, fid] { return file_by_id(abs, fid); }));
 }
 
 }  // namespace eosmirror

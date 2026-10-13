@@ -21,7 +21,8 @@ client for now. See [docs/design.md](docs/design.md).
   and symlinks) the modification time are fixed.
 - Copies are atomic (temporary name plus rename, or EOS atomic uploads), set
   the source's modification time, and verify a checksum end to end where the
-  endpoint supports it.
+  endpoint supports it. An EOS upload is done once the file it created,
+  known by its id, is in place with the right size, mtime and checksum.
 - Symlinks are recreated as symlinks and never followed. Hard links are copied
   as separate files. Special files are skipped and reported.
 - Extra entries on the target are only deleted with an explicit option

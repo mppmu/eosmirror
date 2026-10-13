@@ -16,7 +16,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <map>
 #include <utility>
+#include <vector>
 
 #include "doctest/doctest.h"
 #include "eosmirror/copy.hh"
@@ -631,6 +633,43 @@ TEST_CASE("EOS to FS: files are read with the listing's metadata, without MGM st
     CHECK(RequestLog::count(sent, mgm, "kXR_open") == kFiles + 1 + 2);
     CHECK(RequestLog::count(sent, mgm, "kXR_stat", false) == kFiles);
   }
+}
+
+TEST_CASE("FS to EOS: an upload is confirmed by one query of the MGM") {
+  if (!base_url()) return;
+  std::string mgm = XrdCl::URL(base_url()).GetHostName();
+  // The requests to the MGM of runs that upload 10 and 30 files.
+  std::map<int, std::vector<std::string>> sent;
+  for (int files : {10, 30}) {
+    TempDir tmp;
+    for (int i = 0; i < files; ++i) tmp.write_file("src/d/f" + std::to_string(i), pattern(100));
+    PosixEndpoint src(tmp.sub("src"));
+    RemoteDir dir("confirmed");
+    SyncOptions options = test_options();
+    options.preserve_owner = false;
+    Cancellation cancel;
+    Report r;
+    RequestLog::start();
+    {
+      Engine upload(src, *dir.endpoint, options, r, nullptr, cancel);
+      REQUIRE(upload.run().ok());
+    }
+    sent[files] = RequestLog::stop();
+    CHECK(r.stats.files_copied == files);
+    CHECK(r.stats.files_unverified == 0);
+  }
+  // Per file, the open, which redirects to the storage node, and one query
+  // that confirms the upload by its file id, size, mtime and checksum
+  // (getfmd); no stats (owners are not set here, and new files get their
+  // mode with the open).
+  auto per_file = [&](std::string_view request) {
+    return (RequestLog::count(sent[30], mgm, request) - RequestLog::count(sent[10], mgm, request)) /
+           20.0;
+  };
+  CHECK(per_file("kXR_open") == 1);
+  CHECK(per_file("kXR_query") == 1);
+  CHECK(per_file("kXR_stat") == 0);
+  CHECK(per_file("kXR_read") == 0);
 }
 
 namespace {

@@ -466,19 +466,29 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
   delete it (`fst/XrdFstOfsFile.cc`): an aborted upload waits for its writes
   in flight, also after a failed one, sends the fctl `delete` (XrdCl
   `File::Fcntl`) and closes, and the previous file stays as it was.
-- After the close, a checksum query on the file tells the type EOS stored
-  and its value; they are compared when the type is the one computed while
-  copying (adler32). Files without checksums (`none`, the default without
-  `sys.forced.checksum`) or with another type (from the directory or a space
-  policy) are counted as unverified, and refused with `--require-checksum`.
-  A file that does not match, cannot be queried or is refused is removed
-  again, or else gets mtime 0, since it already carries the size and mtime
-  of the source and would pass for a good copy. So is the upload after a
-  close that failed, if a file with its size and mtime is in place: the
-  storage node may have committed it all the same. Where a stat cannot tell
-  whether the file in place is the upload, it is left alone, since it may be
-  the previous file, and the copy fails as an I/O error, which keeps it in
-  doubt (see the journal above). Owner and mode are applied
+- An upload is known by the id of the file it creates, which the MGM names
+  in the URL of the storage node it redirects the open to (`mgm.id`, in
+  XrdCl's `LastURL`); an open without one fails the copy. After the close,
+  one query by that id (`mgm.pcmd=getfmd`, `mgm/ofs/fsctl/Getfmd.cc`, which
+  any identity may send) tells the file's name and parent, size, mtime,
+  layout and checksum. The upload is in place when the file with its id is
+  the one under its name; its size and mtime must be those of the copy,
+  and its checksum is compared where its type (the layout's) is the one
+  computed while copying (adler32). Files without checksums (`none`, the
+  default without `sys.forced.checksum`) or with another type (from the
+  directory or a space policy) are counted as unverified, and refused with
+  `--require-checksum`. Any other file in place (the previous one, or
+  another writer's) is never taken for the upload, however much it looks
+  like it: the copy fails as not committed (an I/O error), is retried, and
+  that file is left alone. An upload in place that does not match, or is
+  refused, is removed again, or else gets mtime 0, since it already carries
+  the size and mtime of the source and would pass for a good copy. So is
+  the upload after a close that failed, if it is in place: the storage node
+  may have committed it all the same. The query by id comes right before
+  the removal; another writer can still replace the file between the two
+  requests. Where the query cannot tell whether the upload is in place, the
+  file in place is left alone, and the copy fails as an I/O error, which
+  keeps it in doubt (see the journal above). Owner and mode are applied
   after the close, since an upload runs under the client's identity: the
   file is briefly visible with the uploader's owner. The mode is passed in
   the open, which gives a new file that mode plus the owner's read and
@@ -490,8 +500,8 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
   for owners that equal the identity's: a directory's `sys.owner.auth`
   makes EOS create files as the directory's owner, also for root.
 - Per copied file, the MGM sees the open (which redirects to a storage
-  node), the checksum query after the close (and a stat where it compares
-  nothing) and the chown, plus the chmod in the cases above; per created
+  node), the query by id after the close and the chown, plus the chmod in
+  the cases above; per created
   directory the mkdir and, when it is finalized, utimes, chown and chmod;
   per listed directory one find (an open, two reads and a close). An EOS
   source adds only the open per file, which redirects to a storage node
@@ -561,10 +571,15 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
   `mgm/ofs/XrdMgmOfsFile.cc` is overwritten right after it is set).
 - XrdCl reports the close of a file whose connection is gone as done
   (`XrdClFileStateHandler.cc`, `Close`), while the storage node discards
-  the upload. A commit is therefore confirmed: by the checksum query where
-  it compares, else by a stat (size and mtime). When the file in place is
-  not the upload (it is the previous one, or none), the copy fails with an
-  I/O error and is retried; that file is never removed.
+  the upload. A commit is therefore confirmed by the file id, see above:
+  the checksum of the file in place under the name, or its size and
+  mtime, would take a previous file of the same content, or another
+  writer's copy, for the upload. The query by id costs one request per
+  file, as a checksum query by path does; a stat with that query would
+  take two, and `fileinfo -m` through the proc interface an open, two
+  reads and a close. Uploads of 20,000 files of 4 KiB to the single-host
+  test instance took 45-46 s with each of these (55 s now and then with
+  any of them), bound by the instance's namespace.
 - A POSIX target on an EOS FUSE mount (`fuse.eosxd` for the longest mount
   point above the target in `/proc/self/mountinfo`; more cautiously, a FUSE
   mount of unknown kind, or any FUSE file system where that table is

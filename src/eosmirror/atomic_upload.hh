@@ -11,34 +11,35 @@ namespace eosmirror {
 
 // Writes a file through an upload that the endpoint renames into place
 // itself when it is closed, such as EOS's atomic uploads (see
-// docs/design.md), and confirms what is in place afterwards: by the stored
-// checksum where it is of the type computed while copying, else by size and
-// mtime. A close can report success for an upload that the storage node
-// discarded, which leaves the previous file or none in place; and a node can
-// commit an upload whose close failed. The upload carries the source's size
-// and mtime, so that it would pass for a good copy: one that fails its
+// docs/design.md), and confirms afterwards that the file in place is this
+// upload: the file the upload created (known by its id), with the size and
+// mtime of the copy and, where the endpoint stores one of the type computed
+// while copying, its checksum. A close can report success for an upload
+// that the storage node discarded, which leaves the previous file or none
+// in place; a node can commit an upload whose close failed; and another
+// writer can replace the file meanwhile. The upload carries the source's
+// size and mtime, so that it would pass for a good copy: one that fails its
 // verification, or whose close failed, is taken away again if it is in
-// place, removed or else given mtime 0. A file in place that cannot be told
-// apart from it is left alone. Owner and mode are applied once the file is
-// confirmed.
+// place, removed or else given mtime 0. Any other file in place is left
+// alone, and so is one that cannot be told apart from the upload. Owner and
+// mode are applied once the file is confirmed.
 class AtomicUploadWriter : public FileWriter {
  public:
-  // The checksum the endpoint stores for the file in place; None if it
-  // stores none or one of a type that cannot be computed.
-  using ChecksumQuery = std::function<Result<Checksum>()>;
+  // The file that the upload created as it is now (size, mtime, and the
+  // checksum the endpoint stores, None if it stores none or one of a type
+  // that cannot be computed); NotFound unless it is in place under its name.
+  using Placed = std::function<Result<Entry>()>;
 
   // path: the file's path on ep; name: the file for messages. The upload's
   // commit() closes it.
   AtomicUploadWriter(Endpoint& ep, RelPath path, std::string name,
-                     std::unique_ptr<FileWriter> upload, ChecksumQuery stored_checksum);
+                     std::unique_ptr<FileWriter> upload, Placed placed);
 
   Status write(Chunk chunk) override { return upload_->write(std::move(chunk)); }
   Result<CommitInfo> commit(const CommitSpec& spec) override;
   void abort() override { upload_->abort(); }
 
  private:
-  // Whether the file in place is this upload, by size and mtime.
-  Result<bool> in_place(const CommitSpec& spec);
   // Takes the upload away if it is in place. Stuck: it is, or may be, and
   // stays.
   enum class Gone { NotInPlace, TakenBack, Stuck };
@@ -55,7 +56,7 @@ class AtomicUploadWriter : public FileWriter {
   RelPath path_;
   std::string name_;
   std::unique_ptr<FileWriter> upload_;
-  ChecksumQuery stored_checksum_;
+  Placed placed_;
 };
 
 }  // namespace eosmirror

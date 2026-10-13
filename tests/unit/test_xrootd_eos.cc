@@ -172,6 +172,45 @@ TEST_CASE("subdirectories that find leaves out for lack of permission") {
   CHECK_FALSE(parse_find_denials("", "/eos/d"));
 }
 
+TEST_CASE("getfmd replies describe a file by its id, with its path") {
+  // As EOS 5.5.2 replies, '&' in names written as "#AND#".
+  auto reply = parse_getfmd_reply(
+      "getfmd: retc=0 name=probe a#AND#b.txt&id=227423&ctime=1791876727&ctime_ns=653271963"
+      "&mtime=1791876727&mtime_ns=656643000&size=5&cid=18&uid=0&gid=0&lid=6553874&flags=416"
+      "&link=&location=7,1,&checksum=062c0215&container=/eos/test/replica2/");
+  REQUIRE(reply.ok());
+  CHECK(reply.value().path == "/eos/test/replica2/probe a#AND#b.txt");
+  const Entry& f = reply.value().file;
+  CHECK(f.type == EntryType::File);
+  CHECK(f.id == "227423");
+  CHECK(f.size == 5);
+  CHECK(f.mtime == Timespec{1791876727, 656643000});
+  CHECK(f.checksum == Checksum{ChecksumType::Adler32, "062c0215"});
+
+  // A layout without checksum (kNone), or another type: no checksum.
+  for (const char* lid : {"6553873", "6553875"}) {
+    auto other = parse_getfmd_reply(
+        std::string("getfmd: retc=0 name=x&id=1&mtime=2&mtime_ns=3&size=4&lid=") + lid +
+        "&checksum=00000000&container=/eos/");
+    REQUIRE(other.ok());
+    CHECK(other.value().file.checksum.type == ChecksumType::None);
+  }
+  auto gone = parse_getfmd_reply(std::string("getfmd: retc=2\0", 15));
+  REQUIRE_FALSE(gone.ok());
+  CHECK(gone.error().kind == ErrorKind::NotFound);
+  for (const char* bad : {"", "getfmd: retc=x", "stat: retc=0",
+                          "getfmd: retc=0 name=x&id=1&mtime=2&mtime_ns=3&lid=2&container=/eos/",
+                          "getfmd: retc=0 name=x&id=-1&mtime=2&mtime_ns=3&size=4&lid=2&container=/",
+                          "getfmd: retc=0 name=x&id=1&mtime=2&mtime_ns=3&size=4&lid=2&container=e",
+                          "getfmd: retc=0 name=x&id=1&mtime=2&mtime_ns=3000000000&size=4&lid=2"
+                          "&container=/"}) {
+    INFO("reply ", bad);
+    auto parsed = parse_getfmd_reply(bad);
+    REQUIRE_FALSE(parsed.ok());
+    CHECK(parsed.error().kind == ErrorKind::Other);
+  }
+}
+
 TEST_CASE("MGM replies are split from the end") {
   auto r = parse_proc_reply("mgm.proc.stdout=hello\nworld&mgm.proc.stderr=warning&mgm.proc.retc=0");
   CHECK(r.out == "hello\nworld");
