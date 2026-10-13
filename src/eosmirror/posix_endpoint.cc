@@ -16,6 +16,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -67,13 +68,19 @@ class DeferredMtimes {
       return true;
     });
     // In several threads where there are many: a run waits for its last
-    // flush.
+    // flush. This one takes the shares of those that cannot be started.
     size_t workers = std::min<size_t>(8, (batch.size() + 999) / 1000);
     std::vector<Outcome> outcomes(workers);
     std::vector<std::thread> threads;
-    for (size_t w = 1; w < workers; ++w)
-      threads.emplace_back([&, w] { apply(batch, w, workers, outcomes[w]); });
+    size_t started = 1;
+    try {
+      for (; started < workers; ++started)
+        threads.emplace_back([&, w = started] { apply(batch, w, workers, outcomes[w]); });
+    } catch (const std::system_error& e) {
+      log::warn("giving copies their mtimes in fewer threads: ", e.what());
+    }
     if (workers > 0) apply(batch, 0, workers, outcomes[0]);
+    for (size_t w = started; w < workers; ++w) apply(batch, w, workers, outcomes[w]);
     for (auto& t : threads) t.join();
     for (const Outcome& o : outcomes) {
       if (!outcome.first) outcome.first = o.first;

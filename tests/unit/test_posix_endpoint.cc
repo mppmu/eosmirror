@@ -11,6 +11,7 @@
 #include "doctest/doctest.h"
 #include "eosmirror/endpoints.hh"
 #include "fake_endpoint.hh"
+#include "no_new_threads.hh"
 #include "temp_dir.hh"
 
 using namespace eosmirror;
@@ -222,6 +223,32 @@ TEST_CASE("posix copies get their mtimes once a sync has made them durable") {
   // copy is synced at once and gets its mtime with it.
   spec.metadata.mtime = {0, 7};
   CHECK(copy(ep, "d") == Timespec{0, 7});
+}
+
+TEST_CASE("posix copies get their mtimes also where no threads can be started for that") {
+  TempDir tmp;
+  PosixEndpoint ep(tmp.path());
+  CommitSpec spec;
+  spec.size = 1;
+  spec.fields = MetaFields::Mtime;
+  spec.metadata.mtime = {1600000000, 7};
+  constexpr int kCopies = 1001;  // enough for two threads
+  for (int i = 0; i < kCopies; ++i) {
+    auto w = ep.open_write(std::to_string(i), spec);
+    REQUIRE(w.ok());
+    REQUIRE(w.value()->write(0, bytes("x")).ok());
+    REQUIRE(w.value()->commit(spec).ok());
+  }
+  Status flushed;
+  {
+    NoNewThreads limit;
+    flushed = ep.flush();
+  }
+  CHECK(flushed.ok());
+  int with_mtime = 0;
+  for (int i = 0; i < kCopies; ++i)
+    with_mtime += ep.stat(std::to_string(i)).value().mtime == spec.metadata.mtime;
+  CHECK(with_mtime == kCopies);
 }
 
 TEST_CASE("posix readback verification catches corruption") {

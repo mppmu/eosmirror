@@ -16,6 +16,7 @@
 #include "eosmirror/copy.hh"
 #include "eosmirror/posix_endpoint.hh"
 #include "fake_endpoint.hh"
+#include "no_new_threads.hh"
 #include "stderr_capture.hh"
 #include "temp_dir.hh"
 
@@ -388,6 +389,16 @@ TEST_CASE("fake: directory mtimes are applied after their entries") {
   REQUIRE(run_sync(src, dst, fake_options(), r2).ok());
   CHECK(r2.stats.files_copied == 1);
   expect_mirrored(src, dst);
+}
+
+TEST_CASE("fake: a run whose threads cannot be started fails, not the process") {
+  FakeEndpoint src, dst;
+  populate(src);
+  Report r;
+  NoNewThreads limit;
+  Status s = run_sync(src, dst, fake_options(), r);
+  CHECK(s.ok() == !limit.binds());
+  if (!s.ok()) CHECK(s.error().message == "start the threads of the run");
 }
 
 TEST_CASE("fake: checksums are verified when the target computes them") {

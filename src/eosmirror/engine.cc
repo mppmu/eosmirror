@@ -1462,23 +1462,34 @@ struct Engine::Impl {
       roots_pending = roots.size();
     }
     size_t transfers = max_transfers();
-    for (int i = 0; i < checkers(); ++i) threads.emplace_back([this] { checker_loop(); });
-    for (size_t i = 0; i < transfers; ++i)
-      threads.emplace_back([this, i] { transfer_loop(i); });
-    if (initial_limit() < transfers) controller = std::thread([this] { controller_loop(); });
-    if (!options.dry_run)
-      syncer = std::thread([this] {
-        // By the system clock: ThreadSanitizer up to GCC 11 misses the
-        // waits on the steady one (pthread_cond_clockwait).
-        std::unique_lock lock(syncer_mutex);
-        while (!syncer_cv.wait_until(lock, std::chrono::system_clock::now() + options.sync_interval,
-                                     [&] { return syncer_stop; })) {
-          lock.unlock();
-          sync_target();
-          lock.lock();
-        }
-      });
-    for (auto& root : roots) dirs.push(root);
+    // A thread that cannot be started ends the run before it begins, with
+    // the threads started so far.
+    bool started = false;
+    try {
+      for (int i = 0; i < checkers(); ++i) threads.emplace_back([this] { checker_loop(); });
+      for (size_t i = 0; i < transfers; ++i)
+        threads.emplace_back([this, i] { transfer_loop(i); });
+      if (initial_limit() < transfers) controller = std::thread([this] { controller_loop(); });
+      if (!options.dry_run)
+        syncer = std::thread([this] {
+          // By the system clock: ThreadSanitizer up to GCC 11 misses the
+          // waits on the steady one (pthread_cond_clockwait).
+          std::unique_lock lock(syncer_mutex);
+          while (!syncer_cv.wait_until(lock,
+                                       std::chrono::system_clock::now() + options.sync_interval,
+                                       [&] { return syncer_stop; })) {
+            lock.unlock();
+            sync_target();
+            lock.lock();
+          }
+        });
+      started = true;
+    } catch (const std::system_error& e) {
+      end_run(errno_error(e.code().value(), "start the threads of the run"));
+      cancel.request();
+    }
+    if (started)
+      for (auto& root : roots) dirs.push(root);
 
     {
       std::unique_lock lock(done_mutex);
