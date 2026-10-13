@@ -33,16 +33,17 @@ class DeferredMtimes {
     if (Status s = flush(); !s.ok()) log::warn(s.error().describe());
   }
 
-  // A copy renamed into place at path, on the file system of device dev.
-  void add(std::string path, Timespec mtime, dev_t dev) {
+  // A copy renamed into place at path, the file ino on device dev.
+  void add(std::string path, Timespec mtime, dev_t dev, ino_t ino) {
     std::lock_guard lock(mutex_);
-    pending_.push_back({std::move(path), mtime, dev});
+    pending_.push_back({std::move(path), mtime, dev, ino});
   }
 
   // Syncs the file systems of the copies added so far, each through the
   // directory of one of them, and gives those that were synced their mtimes.
   // Copies whose sync or mtime failed keep mtime 0, so that the next run
-  // copies them again.
+  // copies them again. A file that has replaced a copy since (another run's
+  // copy, or a user's file) is left alone.
   Status flush() {
     std::lock_guard flush_lock(flush_mutex_);
     std::vector<Copy> batch;
@@ -98,6 +99,7 @@ class DeferredMtimes {
     std::string path;
     Timespec mtime;
     dev_t dev;
+    ino_t ino;
   };
   // Of giving mtimes: the first error, and the copies that keep mtime 0.
   struct Outcome {
@@ -109,6 +111,11 @@ class DeferredMtimes {
   static void apply(const std::vector<Copy>& batch, size_t k, size_t n, Outcome& outcome) {
     for (size_t i = k; i < batch.size(); i += n) {
       const Copy& c = batch[i];
+      struct stat st{};
+      if (lstat(c.path.c_str(), &st) == 0 && (st.st_dev != c.dev || st.st_ino != c.ino)) {
+        ++outcome.failed;  // replaced
+        continue;
+      }
       struct timespec times[2] = {{0, UTIME_OMIT}, {c.mtime.sec, c.mtime.nsec}};
       if (utimensat(AT_FDCWD, c.path.c_str(), times, AT_SYMLINK_NOFOLLOW) == 0 || errno == ENOENT)
         continue;
@@ -306,7 +313,7 @@ class PosixWriter : public FileWriter {
       unlink(temp_.c_str());
       return errno_error(err, "rename " + temp_ + " to " + final_);
     }
-    if (deferred) deferred_->add(final_, spec.metadata.mtime, st.st_dev);
+    if (deferred) deferred_->add(final_, spec.metadata.mtime, st.st_dev, st.st_ino);
     return {};
   }
 

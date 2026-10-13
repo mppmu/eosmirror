@@ -199,17 +199,20 @@ once the transfers of a run have ended (also after a graceful
 cancellation, before the summary), the engine has the target sync the file
 systems that copies went to (`syncfs`, through a directory on each) and
 then give every copy renamed before that its mtime (`utimensat`, not
-following symlinks, in up to 8 threads); only then are the directories of
-those copies recorded as finalized for `--resume`. Transfers never wait for
-a sync. A run that ends without its last sync (killed, or a crash or power
-loss of the host) leaves copies with mtime 0, which the next run copies
-again whatever it compares by (`--size-only` and `--checksum` included),
-with or without a journal; a run that resumes walks their directories
-again. A source file whose own mtime has seconds 0 could not be told from
-such a copy: its copy is fsynced before the rename and gets its mtime at
-once. Once a sync has failed in a run, copies may keep mtime 0 in any
-directory: no directory is recorded as finalized any more, and the top
-directory is a failure, so that `--retry-failed` walks the whole tree.
+following symlinks, in up to 8 threads), unless another file has taken its
+place since (told by device and inode: another run's copy, which that
+run's sync has yet to make durable, or a user's file), which keeps its
+own; only then are the directories of those copies recorded as finalized
+for `--resume`. Transfers never wait for a sync. A run that ends without
+its last sync (killed, or a crash or power loss of the host) leaves copies
+with mtime 0, which the next run copies again whatever it compares by
+(`--size-only` and `--checksum` included), with or without a journal; a
+run that resumes walks their directories again. A source file whose own
+mtime has seconds 0 could not be told from such a copy: its copy is
+fsynced before the rename and gets its mtime at once. Once a sync has
+failed in a run, copies may keep mtime 0 in any directory: no directory is
+recorded as finalized any more, and the top directory is a failure, so
+that `--retry-failed` walks the whole tree.
 
 Data and metadata reach the disk separately: the rename that puts a copy
 in place goes through the file system's journal, its data is written when

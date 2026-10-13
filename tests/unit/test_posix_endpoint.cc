@@ -206,6 +206,17 @@ TEST_CASE("posix copies get their mtimes once a sync has made them durable") {
   REQUIRE(ep.flush().ok());
   CHECK(ep.stat("a").value().mtime == spec.metadata.mtime);
 
+  // A file that replaces a copy before the flush (another run's, or a
+  // user's) keeps its mtime.
+  CHECK(copy(ep, "a") == Timespec{0, 0});
+  CHECK(copy(ep, "d") == Timespec{0, 0});
+  tmp.write_file("theirs", "other");
+  Timespec theirs = set_mtime(tmp.sub("theirs"), 1700000000, 3);
+  REQUIRE(rename(tmp.sub("theirs").c_str(), tmp.sub("a").c_str()) == 0);
+  REQUIRE(ep.flush().ok());
+  CHECK(ep.stat("a").value().mtime == theirs);
+  CHECK(ep.stat("d").value().mtime == spec.metadata.mtime);
+
   // Copies left when the endpoint goes get theirs too.
   {
     PosixEndpoint once(tmp.path());
