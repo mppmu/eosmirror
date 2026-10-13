@@ -143,7 +143,8 @@ TEST_CASE("usage errors are rejected") {
         {"--max-backlog", "-1"}, {"--checkers", "4294967297"}, {"--transfers", "-4294967295"},
         {"--retries", "2147483647"}, {"--retry-delay", "-1"}, {"--progress", "-5"},
         {"--write-window", "4294967297"}, {"--max-delete", "99999999999999999999"},
-        {"--buffer-size", "-1"}}) {
+        {"--buffer-size", "-1"}, {"--checkers", "1025"}, {"--transfers", "1025"},
+        {"--min-transfers", "1025"}, {"--max-transfers", "1025"}}) {
     std::string given = args[0] + " " + args[1];
     INFO(given);
     args.insert(args.begin(), "sync");
@@ -153,6 +154,7 @@ TEST_CASE("usage errors are rejected") {
   }
   CHECK(parse({"sync", "--retries", "2147483646", "a", "b"}).value().sync.retry.attempts ==
         2147483647);
+  CHECK(parse({"sync", "--checkers", "1024", "--transfers", "1024", "a", "b"}).ok());
   CHECK_FALSE(parse({"failures"}).ok());
 
   CHECK(parse({"--version"}).value().command == Command::Version);

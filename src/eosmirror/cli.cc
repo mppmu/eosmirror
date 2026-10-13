@@ -36,6 +36,8 @@ Result<long long> parse_integer(const std::string& text, const std::string& opti
 }
 
 constexpr long long kMaxInt = std::numeric_limits<int>::max();
+// Threads of each pool at most.
+constexpr long long kMaxThreads = 1024;
 
 }  // namespace
 
@@ -107,14 +109,14 @@ Options:
       --verify-readback    read files on local targets back to verify them
       --fsync              fsync files on local targets before renaming them
       --rewrite-links A=B  rewrite symlink targets starting with A to start with B
-      --checkers N         directory workers (default 8)
+      --checkers N         directory workers (default 8, at most 1024)
       --min-transfers N    copies running at once at the start, and at least
                            (default 4); the limit rises while throughput improves,
                            and falls back when a rise did not pay or the target
                            fails operations
-      --max-transfers N    copies running at once at most (default 64); with the
-                           default windows and buffer size, 64 copies hold up to
-                           64 x 9 x 8 MiB = 4.5 GiB of buffers
+      --max-transfers N    copies running at once at most (default 64, at most
+                           1024); with the default windows and buffer size, 64
+                           copies hold up to 64 x 9 x 8 MiB = 4.5 GiB of buffers
       --transfers N        exactly N copies running at once
       --write-window N     writes per file in flight to XRootD and EOS (default 4),
                            in order; safe for erasure-coded EOS files only while
@@ -249,13 +251,15 @@ Result<CliOptions> parse_command_line(int argc, char** argv) {
     sync.link_rewrites.emplace_back(v.substr(0, eq), v.substr(eq + 1));
     return Status();
   });
-  integer("--checkers", 1, kMaxInt, [&](long long n) { sync.checkers = static_cast<int>(n); });
+  integer("--checkers", 1, kMaxThreads, [&](long long n) { sync.checkers = static_cast<int>(n); });
   // Given on the command line: --transfers N, or --min-transfers and
   // --max-transfers.
   std::optional<int> transfers, min_transfers, max_transfers;
-  integer("--transfers", 1, kMaxInt, [&](long long n) { transfers = static_cast<int>(n); });
-  integer("--min-transfers", 1, kMaxInt, [&](long long n) { min_transfers = static_cast<int>(n); });
-  integer("--max-transfers", 1, kMaxInt, [&](long long n) { max_transfers = static_cast<int>(n); });
+  integer("--transfers", 1, kMaxThreads, [&](long long n) { transfers = static_cast<int>(n); });
+  integer("--min-transfers", 1, kMaxThreads,
+          [&](long long n) { min_transfers = static_cast<int>(n); });
+  integer("--max-transfers", 1, kMaxThreads,
+          [&](long long n) { max_transfers = static_cast<int>(n); });
   integer("--write-window", 1, kMaxInt,
           [&](long long n) { opts.endpoints.xrootd.write_window = static_cast<int>(n); });
   integer("--read-window", 1, kMaxInt,
