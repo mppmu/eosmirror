@@ -54,6 +54,8 @@ struct SyncOptions {
   bool verify = true;  // compute and compare checksums where possible
   bool require_checksum = false;  // fail copies the target cannot verify
   bool resume = false;  // skip directories the journal records as finalized
+  // Skip directories of the source on other file systems than its root.
+  bool one_file_system = false;
 
   RetryPolicy retry;
   // The run stops after this many failures without a success in between

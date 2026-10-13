@@ -37,6 +37,7 @@ struct Stats {
   Counter symlinks_skipped{0};  // the target has no symlinks
   Counter metadata_fixed{0};
   Counter specials_skipped{0};
+  Counter other_fs_skipped{0};  // directories on other file systems (--one-file-system)
   Counter vanished{0};  // listed on the source, but gone when handled
   Counter extras{0};
   Counter deleted{0};

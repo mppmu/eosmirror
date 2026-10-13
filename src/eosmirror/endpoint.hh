@@ -156,6 +156,10 @@ class Endpoint {
   // other.
   virtual bool is_temporary(const Entry& /*entry*/) const { return false; }
 
+  // Whether a directory from a listing is on another file system than the
+  // root (below a mount point); false where the endpoint cannot tell.
+  virtual bool other_file_system(const Entry& /*dir*/) const { return false; }
+
   // A warning, and a note, about writing to this endpoint, shown when a run
   // starts with it as target; empty if there is none.
   virtual std::string target_warning() const { return {}; }

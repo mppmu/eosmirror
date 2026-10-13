@@ -158,6 +158,8 @@ class FakeEndpoint : public eosmirror::Endpoint {
   bool is_temporary(const Entry& e) const override {
     return e.type == eosmirror::EntryType::File && e.name.starts_with(".tmp-");
   }
+  // Directories with the id "other-fs" are on another file system.
+  bool other_file_system(const Entry& e) const override { return e.id == "other-fs"; }
   std::string target_warning() const override { return warning; }
   std::string target_note() const override { return note; }
 

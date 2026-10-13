@@ -74,6 +74,7 @@ RunOptions result_options(const CliOptions& opts) {
   return {{"--size-only", yes(opts.sync.size_only)},
           {"--delete", yes(opts.sync.delete_extra)},
           {"--keep-emptied", yes(opts.sync.keep_emptied)},
+          {"--one-file-system", yes(opts.sync.one_file_system)},
           {"--no-owner", yes(!opts.sync.preserve_owner)},
           {"--no-mode", yes(!opts.sync.preserve_mode)},
           {"--no-verify", yes(!opts.sync.verify)},
@@ -116,6 +117,9 @@ Options:
       --verify-readback    read files on local targets back to verify them
       --fsync              fsync files on local targets before renaming them
       --rewrite-links A=B  rewrite symlink targets starting with A to start with B
+  -x, --one-file-system    skip directories of a local source that are on other
+                           file systems than SOURCE, which are kept on the target
+                           (no effect on remote sources)
       --checkers N         directory workers (default 8, at most 1024)
       --min-transfers N    copies running at once at the start, and at least
                            (default 4); the limit rises while throughput improves,
@@ -248,6 +252,8 @@ Result<CliOptions> parse_command_line(int argc, char** argv) {
   };
   limit("--max-delete", sync.max_delete, UINT64_MAX);
   limit("--max-consecutive-failures", sync.max_consecutive_failures, 0);
+  flag("-x", [&] { sync.one_file_system = true; });
+  flag("--one-file-system", [&] { sync.one_file_system = true; });
   flag("--no-owner", [&] { sync.preserve_owner = false; });
   flag("--no-mode", [&] { sync.preserve_mode = false; });
   flag("--no-verify", [&] { sync.verify = false; });

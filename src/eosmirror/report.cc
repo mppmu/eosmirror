@@ -111,6 +111,9 @@ std::string Report::summary(bool dry_run) const {
   if (stats.incomplete_dirs.load() > 0)
     s << "  directories with entries that could not be listed, whose target entries were kept: "
       << stats.incomplete_dirs.load() << "\n";
+  if (stats.other_fs_skipped.load() > 0)
+    s << "  directories on other file systems skipped (--one-file-system): "
+      << stats.other_fs_skipped.load() << "\n";
   if (stats.invalid_names.load() > 0)
     s << "  entries with invalid names skipped: " << stats.invalid_names.load() << "\n";
   auto failures = this->failures();

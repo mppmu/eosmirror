@@ -348,6 +348,17 @@ TEST_CASE("posix mkdir, symlink, metadata and remove") {
   }
 }
 
+TEST_CASE("posix directories on other file systems than the root are told by their device") {
+  TempDir tmp;
+  fs::create_directories(tmp.sub("root/sub"));
+  PosixEndpoint ep(tmp.sub("root"));
+  CHECK_FALSE(ep.other_file_system(ep.stat("sub").value()));
+  // /proc is a file system of its own.
+  PosixEndpoint top("/");
+  CHECK(top.other_file_system(top.stat("proc").value()));
+  CHECK_FALSE(top.other_file_system(top.stat("").value()));
+}
+
 TEST_CASE("the file system type of a path comes from the longest mount point above it") {
   std::string table =
       "22 1 0:21 / / rw,relatime shared:1 - ext4 /dev/sda1 rw\n"

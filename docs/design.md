@@ -19,6 +19,11 @@ A run walks the source tree directory by directory and makes the target match:
 - A directory is created when missing; its owner, mode and mtime are set once
   all its entries have been processed, since changing entries changes mtimes.
 - Special files (devices, sockets, fifos) are skipped and counted.
+- With `--one-file-system` (`-x`), directories of the source on other file
+  systems than its top directory (below mount points) are skipped, as by
+  rsync: neither walked nor created, and kept on the target as they are,
+  counted. The endpoint tells by the directory's device (POSIX); remote
+  sources cannot tell and are walked whole.
 - Entries that exist only on the target are counted, and deleted only with
   `--delete`, which follows rsync wherever there is a choice: it deletes in
   directories that are empty on the source as in any other, and up to

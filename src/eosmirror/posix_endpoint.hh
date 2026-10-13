@@ -35,6 +35,7 @@ class PosixEndpoint : public Endpoint {
   Location location() const override { return {"", root_}; }
   Capabilities capabilities() const override;
   bool is_temporary(const Entry& entry) const override;
+  bool other_file_system(const Entry& dir) const override;
   // Warns about EOS FUSE mounts.
   std::string target_warning() const override;
   // Probes the mtime resolution, which capabilities() reports as full
@@ -59,6 +60,8 @@ class PosixEndpoint : public Endpoint {
   PosixOptions options_;
   std::once_flag probe_once_;
   std::atomic<int32_t> mtime_resolution_{1};
+  mutable std::once_flag device_once_;
+  mutable std::string device_;  // of the root, as in directory ids
 };
 
 // The type of the file system that a path is on, from a mount table in the

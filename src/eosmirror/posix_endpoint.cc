@@ -53,6 +53,9 @@ Result<std::string> read_link(int dirfd, const char* name, const std::string& co
   }
 }
 
+// The device in a directory's id.
+std::string_view device_of(std::string_view id) { return id.substr(0, id.find(':')); }
+
 std::string parent_of(const std::string& path) {
   auto slash = path.rfind('/');
   return slash == std::string::npos ? "." : path.substr(0, slash);
@@ -277,6 +280,15 @@ void PosixEndpoint::probe_target() {
 bool PosixEndpoint::is_temporary(const Entry& entry) const {
   return (entry.type == EntryType::File || entry.type == EntryType::Symlink) &&
          is_temporary_name(entry.name);
+}
+
+bool PosixEndpoint::other_file_system(const Entry& dir) const {
+  std::call_once(device_once_, [&] {
+    struct stat st{};
+    if (::stat(root_.c_str(), &st) == 0) device_ = std::to_string(st.st_dev);
+  });
+  return dir.type == EntryType::Directory && !device_.empty() && !dir.id.empty() &&
+         device_of(dir.id) != device_;
 }
 
 std::optional<std::string> mount_type(std::string_view mountinfo, std::string_view path) {

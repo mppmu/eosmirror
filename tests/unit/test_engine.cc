@@ -1208,6 +1208,40 @@ TEST_CASE("fake: --delete on a target that follows symlinks it cannot show needs
   REQUIRE(run_sync(src, dst, fake_options(), r3).ok());
 }
 
+TEST_CASE("fake: --one-file-system skips directories on other file systems") {
+  FakeEndpoint src, dst;
+  populate(src);
+  src.add_dir("mnt");
+  src.add_file("mnt/data", "elsewhere");
+  src.modify("mnt", [](FakeEndpoint::Node& n) { n.entry.id = "other-fs"; });
+  dst.add_dir("mnt");
+  dst.add_file("mnt/old", "kept");
+  SyncOptions o = fake_options();
+  o.delete_extra = true;
+  o.one_file_system = true;
+  Report r;
+  REQUIRE(run_sync(src, dst, o, r).ok());
+  CHECK(r.stats.other_fs_skipped == 1);
+  CHECK(r.stats.failures == 0);
+  CHECK(r.stats.deleted == 0);
+  CHECK(dst.get("mnt/old"));
+  CHECK_FALSE(dst.get("mnt/data"));
+  CHECK(dst.get("d1/d2/f2"));
+  CHECK(r.summary(false).find("other file systems skipped (--one-file-system): 1") !=
+        std::string::npos);
+
+  // Nor is it created where the target lacks it.
+  dst.erase("mnt");
+  Report r2;
+  REQUIRE(run_sync(src, dst, o, r2).ok());
+  CHECK_FALSE(dst.get("mnt"));
+
+  o.one_file_system = false;
+  Report r3;
+  REQUIRE(run_sync(src, dst, o, r3).ok());
+  CHECK(dst.get("mnt/data"));
+}
+
 TEST_CASE("fake: owners of a source without owners are left alone") {
   FakeEndpoint src, dst;
   src.caps.has_owners = false;

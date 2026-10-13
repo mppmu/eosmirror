@@ -583,7 +583,15 @@ struct Engine::Impl {
       auto it = dst_entries.find(e.name);
       const Entry* existing = it == dst_entries.end() ? nullptr : &it->second;
       switch (e.type) {
-        case EntryType::Directory: handle_dir(node, e, existing); break;
+        case EntryType::Directory:
+          // Neither walked nor deleted on the target.
+          if (options.one_file_system && source.other_file_system(e)) {
+            stats.other_fs_skipped.fetch_add(1);
+            log::info("skipping ", join(node->path, e.name), ": on another file system");
+          } else {
+            handle_dir(node, e, existing);
+          }
+          break;
         case EntryType::File:
           if (node->owned) handle_file(node, e, existing);
           break;

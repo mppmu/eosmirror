@@ -138,7 +138,10 @@ transfers had nothing to copy while every directory worker was busy: more
 `eosmirror sync --help` lists the options: dry runs, deletion of extra
 entries with a cap, parallelism (`--min-transfers`, `--max-transfers`,
 `--transfers`), retries, resuming an interrupted run,
-sharding a tree over several hosts (`--shard K/N`) and symlink rewriting.
+sharding a tree over several hosts (`--shard K/N`), symlink rewriting and
+staying on the file system of a local source (`-x`, as with rsync:
+directories on other file systems are neither walked nor deleted on the
+target).
 The exit status is 0 when everything succeeded, 1 when some entries failed
 after retries, 2 for usage errors, 3 when the run could not start (or found
 the source empty but not the target, with `--delete`, or source and target
