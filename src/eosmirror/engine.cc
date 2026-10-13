@@ -410,7 +410,10 @@ struct Engine::Impl {
     // reapplied afterwards.
     if (mode_matters && has(fields, MetaFields::Owner) && (src.mode & 06000))
       fields = fields | MetaFields::Mode;
-    if (use_mtimes && src.type != EntryType::File && !same_mtime(src.mtime, dst.mtime))
+    // The mtime of a file that differs decides a copy, unless comparing by
+    // size alone.
+    if (use_mtimes && (src.type != EntryType::File || options.size_only) &&
+        !same_mtime(src.mtime, dst.mtime))
       fields = fields | MetaFields::Mtime;
     return fields;
   }
@@ -821,7 +824,7 @@ struct Engine::Impl {
     }
     bool in_doubt = existing && copy_in_doubt(path);
     if (existing && !in_doubt && existing->size == e.size &&
-        (!use_mtimes || same_mtime(existing->mtime, e.mtime))) {
+        (options.size_only || same_mtime(existing->mtime, e.mtime))) {
       stats.files_unchanged.fetch_add(1);
       MetaFields fields = differences(e, *existing);
       if (!apply_metadata(path, e, fields)) return;
@@ -1110,6 +1113,10 @@ struct Engine::Impl {
     if (options.preserve_owner && !target.capabilities().can_set_owner)
       return Error{ErrorKind::Permission,
                    "cannot set owners on " + target.describe() + " (use --no-owner to copy anyway)"};
+    if (!target.capabilities().can_set_mtime && !options.size_only)
+      return Error{ErrorKind::Unsupported, target.describe() +
+                                               " stores no mtimes, so that files can be compared "
+                                               "by size only: use --size-only"};
     // Deleting through a symlink there deletes what it points to.
     if (options.delete_extra && target.capabilities().follows_symlinks &&
         !options.target_without_symlinks)
@@ -1143,8 +1150,6 @@ struct Engine::Impl {
     }
     relax_modes = !dst.can_set_owner && options.preserve_mode;
     copy_options.preserve_mtime = use_mtimes;
-    if (!use_mtimes)
-      log::warn(target.describe(), " stores no mtimes: files are compared by size only");
     if (!use_symlinks) log::warn(target.describe(), " has no symlinks: symlinks are skipped");
     if (mtime_resolution > 1)
       log::info("comparing mtimes at a resolution of ", mtime_resolution, " ns");

@@ -70,6 +70,7 @@ SyncOptions test_options() {
   o.retry.attempts = 2;
   o.retry.initial_delay = std::chrono::milliseconds(10);
   o.preserve_owner = false;
+  o.size_only = true;  // which a target without mtimes needs
   return o;
 }
 
@@ -193,7 +194,17 @@ TEST_CASE("FS to xrootd and back") {
   RemoteDir dir("sync");
   XrdEndpoint& dst = *dir.endpoint;
 
+  // A server stores no mtimes: files can only be compared by size, which
+  // needs to be asked for.
   Cancellation cancel;
+  SyncOptions by_mtime = test_options();
+  by_mtime.size_only = false;
+  Report refused;
+  Engine refusing(src, dst, by_mtime, refused, nullptr, cancel);
+  Status s = refusing.run();
+  REQUIRE_FALSE(s.ok());
+  CHECK(s.error().message.find("--size-only") != std::string::npos);
+
   Report r;
   Engine engine(src, dst, test_options(), r, nullptr, cancel);
   REQUIRE(engine.run().ok());

@@ -11,6 +11,9 @@ A run walks the source tree directory by directory and makes the target match:
 - A file is copied when it is missing on the target or differs in size or
   mtime (compared at the coarser mtime resolution of the two endpoints).
   Otherwise only its owner, group and mode are fixed when they differ.
+  `--size-only` compares sizes alone, as a target that stores no mtimes
+  needs (a run against one refuses to start without it); where the target
+  stores mtimes, those of files that match are fixed then, as rsync does.
 - A symlink is recreated when it is missing or points elsewhere, and its
   owner and mtime are fixed when they differ. Symlinks are never followed.
 - A directory is created when missing; its owner, mode and mtime are set once
@@ -124,7 +127,7 @@ it on the target, by writing a file there, so never on a source or in a dry
 run), whether entries have owners at all, whether owners,
 modes (and which mode bits of files and of directories) and mtimes can be
 set, whether symlinks exist and have owners, which checksum it computes. The
-engine adapts: comparison granularity, size-only comparison without mtimes,
+engine adapts: comparison granularity, `--size-only` needed without mtimes,
 skipped symlinks, masked mode comparison, no owners from a source that has
 none (with a warning), which checksum to compute, what the preflight checks.
 Without the privilege to set owners, the engine makes read-only target
@@ -308,8 +311,9 @@ permission bits of modes, and compute a checksum only when configured
 symlinks, and removing a symlink removes the file it points to
 (`XrdOssUnlink.cc`, BreakLink): `--delete` on such a target, which would
 delete through symlinks it cannot see, is refused unless
-`--target-without-symlinks` states that there are none. The endpoint reports these as capabilities; the engine then
-compares files by size only, skips symlinks (counted), applies no mtimes,
+`--target-without-symlinks` states that there are none. The endpoint
+reports these as capabilities; the engine then needs `--size-only` to
+compare files by size only, skips symlinks (counted), applies no mtimes,
 ignores owners of such a source, and detects directory cycles. A server
 ends a listing with stat information at the first entry that it cannot
 stat for another reason than its absence, such as a symlink loop, and

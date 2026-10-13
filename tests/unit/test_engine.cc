@@ -1129,13 +1129,21 @@ TEST_CASE("fake: retry rows under a failed directory are handled once") {
   CHECK(r.stats.files_checked == 2);
 }
 
-TEST_CASE("fake: targets without mtimes compare sizes, targets without symlinks skip them") {
+TEST_CASE("fake: targets without mtimes need --size-only, targets without symlinks skip them") {
   FakeEndpoint src, dst;
   dst.caps.can_set_mtime = false;
   dst.caps.has_symlinks = false;
   populate(src);
+  Report refused;
+  Status s = run_sync(src, dst, fake_options(), refused);
+  REQUIRE_FALSE(s.ok());
+  CHECK(s.error().message.find("--size-only") != std::string::npos);
+  CHECK(dst.paths().empty());
+
+  SyncOptions o = fake_options();
+  o.size_only = true;
   Report r;
-  REQUIRE(run_sync(src, dst, fake_options(), r).ok());
+  REQUIRE(run_sync(src, dst, o, r).ok());
   CHECK(r.stats.files_copied == 3);
   CHECK(r.stats.symlinks_skipped == 1);
   CHECK(r.stats.symlinks_created == 0);
@@ -1144,10 +1152,35 @@ TEST_CASE("fake: targets without mtimes compare sizes, targets without symlinks 
 
   src.modify("f0", [](FakeEndpoint::Node& n) { n.entry.mtime = {9999, 0}; });  // same size
   Report r2;
-  REQUIRE(run_sync(src, dst, fake_options(), r2).ok());
+  REQUIRE(run_sync(src, dst, o, r2).ok());
   CHECK(r2.stats.files_copied == 0);
   CHECK(r2.stats.files_unchanged == 3);
   CHECK(r2.stats.metadata_fixed == 0);
+}
+
+TEST_CASE("fake: --size-only on a target with mtimes copies by size and sets mtimes") {
+  FakeEndpoint src, dst;
+  populate(src);
+  Report mirror;
+  REQUIRE(run_sync(src, dst, fake_options(), mirror).ok());
+  src.modify("f0", [](FakeEndpoint::Node& n) {
+    n.content = "root fil3";  // the same size
+    n.entry.mtime = {9999, 0};
+  });
+  src.modify("d1/d2/f2", [](FakeEndpoint::Node& n) {
+    n.content = "deeper";
+    n.entry.size = 6;
+  });
+  SyncOptions o = fake_options();
+  o.size_only = true;
+  Report r;
+  REQUIRE(run_sync(src, dst, o, r).ok());
+  CHECK(r.stats.files_copied == 1);
+  CHECK(r.stats.files_unchanged == 2);
+  CHECK(r.stats.metadata_fixed == 2);  // f0, and d1/d2 after its copy
+  CHECK(dst.get("f0")->content == "root file");
+  CHECK(dst.get("f0")->entry.mtime == Timespec{9999, 0});
+  CHECK(dst.get("d1/d2/f2")->content == "deeper");
 }
 
 TEST_CASE("fake: --delete on a target that follows symlinks it cannot show needs to be told") {

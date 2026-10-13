@@ -102,8 +102,10 @@ eosmirror sync --journal migration.db --retry-failed /data/project root://eos.ex
 
 Setting owners on EOS needs an identity that EOS treats as root (a sudoer cannot);
 the run refuses to start otherwise unless `--no-owner` is given. Plain
-XRootD servers store no mtimes and have no symlinks, so against them files
-are compared by size only and symlinks are skipped (both are reported).
+XRootD servers store no mtimes and have no symlinks: a run against one
+needs `--size-only`, which compares files by size alone (as with rsync,
+it does so on any target, and sets the mtimes of files that match where
+the target stores them), and symlinks are skipped and counted.
 
 Each file is copied in chunks of `--buffer-size` (8 MiB) with up to 4 reads
 and 4 writes in flight (`--read-window`, `--write-window`). Writes go out in

@@ -71,7 +71,8 @@ RunOptions result_options(const CliOptions& opts) {
   std::string rewrites;
   for (const auto& [from, to] : opts.sync.link_rewrites)
     rewrites += std::to_string(from.size()) + ":" + from + std::to_string(to.size()) + ":" + to;
-  return {{"--delete", yes(opts.sync.delete_extra)},
+  return {{"--size-only", yes(opts.sync.size_only)},
+          {"--delete", yes(opts.sync.delete_extra)},
           {"--keep-emptied", yes(opts.sync.keep_emptied)},
           {"--no-owner", yes(!opts.sync.preserve_owner)},
           {"--no-mode", yes(!opts.sync.preserve_mode)},
@@ -97,6 +98,8 @@ EOS_MGM_URL, not on a local FUSE mount (name that as file:///eos/...).
 
 Options:
   -n, --dry-run            report what would be done, change nothing
+      --size-only          compare files by size only, not by mtime, as targets
+                           that store no mtimes need (plain XRootD)
       --delete             delete entries on the target that the source lacks
       --keep-emptied       with --delete, delete nothing in directories that are
                            empty on the source, as an unmounted file system looks
@@ -225,6 +228,7 @@ Result<CliOptions> parse_command_line(int argc, char** argv) {
 
   flag("-n", [&] { sync.dry_run = true; });
   flag("--dry-run", [&] { sync.dry_run = true; });
+  flag("--size-only", [&] { sync.size_only = true; });
   flag("--delete", [&] { sync.delete_extra = true; });
   flag("--keep-emptied", [&] { sync.keep_emptied = true; });
   flag("--target-without-symlinks", [&] { sync.target_without_symlinks = true; });
