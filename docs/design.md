@@ -482,7 +482,10 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
   none> attr.<name>="<value>" target="<link target>"`, the fields in the
   order of the format, the attributes only where set (their values must
   be quoted, without spaces or quotes) and the target only for symlinks
-  (`mgm/proc/user/NewfindCmd.cc`, printFormat).
+  (`mgm/proc/user/NewfindCmd.cc`, printFormat). No field may repeat, and
+  none may be unknown: attribute values are printed raw, so one whose
+  quote ends it early would otherwise go on as fields that override the
+  size or checksum before them.
   A file's checksum is kept with its entry when its type is adler32; one of
   all zeros (a type without a stored value) counts as none.
   The start directory itself is listed too and skipped; a listing without it
@@ -563,14 +566,24 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
   refused, is removed again, or else gets mtime 0, since it already carries
   the size and mtime of the source and would pass for a good copy. So is
   the upload after a close that failed, if it is in place: the storage node
-  may have committed it all the same. The query by id comes right before
-  the removal; another writer can still replace the file between the two
-  requests. Where the query cannot tell whether the upload is in place, the
-  file in place is left alone, and the copy fails as an I/O error, which
-  keeps it in doubt (see the journal above). A run with a journal records
-  each upload as in doubt before its close, until it is confirmed or its
-  failure recorded: a run that ends in between leaves it to the next run,
-  which copies it again. Owner and mode are applied
+  may have committed it all the same. One that the query finds still under
+  its hidden name in its directory (after a close that timed out while the
+  storage node was still committing it) is removed there, so that it
+  cannot be committed later; one moved elsewhere is left alone. The query
+  by id comes right before the removal; another writer can still replace
+  the file between the two requests. A name with `&`, which EOS writes as
+  `#AND#` in replies, like a literal `#AND#`, takes a stat of the path,
+  whose id tells. Where the query cannot tell whether the upload is in
+  place, the file in place is left alone, and the copy fails as an I/O
+  error, which keeps it in doubt (see the journal above). A run with a
+  journal records each upload as in doubt before its close, until it is
+  confirmed or its failure recorded: a run that ends in between leaves it
+  to the next run, which copies it again. The MGM takes an `eos.mtime`
+  whose seconds are 0 for none and gives the file the time of the open
+  instead (`XrdMgmOfsFile.cc`): such an mtime is not compared, and set
+  with the owner and mode after the confirmation (`utimes` stores it as
+  it is, also before 1970, which the getfmd reply writes signed). Owner and
+  mode are applied
   after the close, since an upload runs under the client's identity: the
   file is briefly visible with the uploader's owner. The mode is passed in
   the open, which gives a new file that mode plus the owner's read and

@@ -83,6 +83,10 @@ class FakeEndpoint : public eosmirror::Endpoint {
   // Listings carry the checksums of files, of the type of `caps.checksum`,
   // like EOS's.
   bool lists_checksums = false;
+  // With `atomic_uploads`: this many commits leave the upload under its
+  // hidden name (".tmp-<name>"), like an EOS close that timed out while the
+  // storage node was still committing.
+  int hidden_uploads = 0;
 
   // ---- test setup -----------------------------------------------------------
 
@@ -362,12 +366,17 @@ class FakeEndpoint : public eosmirror::Endpoint {
         auto it = ep_.nodes_.find(path_);
         if (it != ep_.nodes_.end() && it->second.entry.type == eosmirror::EntryType::Directory)
           return Error{ErrorKind::IsADirectory, "commit " + path_};
-        Entry e = ep_.base(path_, eosmirror::EntryType::File, 0600, ep_.tick());
+        RelPath at = path_;
+        if (!id_.empty() && ep_.hidden_uploads > 0) {
+          --ep_.hidden_uploads;
+          at = eosmirror::join(parent_of(path_), ".tmp-" + name_of(path_));
+        }
+        Entry e = ep_.base(at, eosmirror::EntryType::File, 0600, ep_.tick());
         e.size = content_.size();
         e.id = id_;
         ep_.apply(e, spec.metadata, spec.fields);
-        ep_.nodes_[path_] = Node{e, content_};
-        ep_.touch_parent(path_);
+        ep_.nodes_[at] = Node{e, content_};
+        ep_.touch_parent(at);
       }
       if (auto err = ep_.check("close", path_)) return *err;
       return eosmirror::CommitInfo{verified};
@@ -394,16 +403,21 @@ class FakeEndpoint : public eosmirror::Endpoint {
 
   static Error not_found(const RelPath& path) { return Error{ErrorKind::NotFound, "no " + path}; }
 
-  // The file of an upload while it is in place, with the checksum of
-  // `caps.checksum`.
-  Result<Entry> placed(const RelPath& path, const std::string& id) {
+  // The file of an upload as it is now, in place or wherever it was moved,
+  // with the checksum of `caps.checksum`.
+  Result<eosmirror::UploadFile> placed(const RelPath& path, const std::string& id) {
     if (auto err = check("confirm", path)) return *err;
     std::lock_guard lock(mutex_);
-    auto it = nodes_.find(path);
-    if (it == nodes_.end() || it->second.entry.id != id) return not_found(path);
-    Entry e = it->second.entry;
-    e.checksum = checksum_of(it->second.content);
-    return e;
+    for (const auto& [p, n] : nodes_) {
+      if (n.entry.id != id) continue;
+      eosmirror::UploadFile found;
+      found.file = n.entry;
+      found.file.checksum = checksum_of(n.content);
+      found.in_place = p == path;
+      if (!found.in_place && parent_of(p) != parent_of(path)) found.file.name.clear();
+      return found;
+    }
+    return not_found(path);
   }
 
   // The checksum of the type of `caps.checksum`; none without.

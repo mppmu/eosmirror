@@ -187,6 +187,12 @@ TEST_CASE("getfmd replies describe a file by its id, with its path") {
   CHECK(f.mtime == Timespec{1791876727, 656643000});
   CHECK(f.checksum == Checksum{ChecksumType::Adler32, "062c0215"});
 
+  // The seconds are signed.
+  auto old = parse_getfmd_reply(
+      "getfmd: retc=0 name=x&id=1&mtime=-2&mtime_ns=500000000&size=4&lid=2&container=/eos/");
+  REQUIRE(old.ok());
+  CHECK(old.value().file.mtime == Timespec{-2, 500000000});
+
   // A layout without checksum (kNone), or another type: no checksum.
   for (const char* lid : {"6553873", "6553875"}) {
     auto other = parse_getfmd_reply(
@@ -328,8 +334,11 @@ TEST_CASE("find listing lines tell directories that force uploads to be non-atom
   CHECK(non_atomic(R"(attr.user.forced.atomic="no")"));
   CHECK_FALSE(non_atomic(R"(attr.user.forced.atomic="2x")"));
   CHECK_FALSE(non_atomic(R"(attr.user.forced.atomic="-1")"));
-  // Values that would make the rest of the line ambiguous are refused.
-  for (const char* value : {R"("0 size=5")", R"("0)", R"(0)", R"("0"x")"}) {
+  // Values that would make the rest of the line ambiguous are refused, and
+  // so is a value whose quote ends it early to forge fields after it, which
+  // repeats a field, and so are fields that are not in the format.
+  for (const char* value : {R"("0 size=5")", R"("0)", R"(0)", R"("0"x")",
+                            R"("1" size=0 checksum=00000001)", R"("1" etag=1)"}) {
     INFO("value ", value);
     CHECK(refused(std::string(R"(path="/eos/d/s/" type=directory  size=0 uid=0 gid=0 )") +
                   "mode=40755 mtime=1.0 attr.user.forced.atomic=" + value));

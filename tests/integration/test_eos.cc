@@ -1518,3 +1518,19 @@ TEST_CASE("selftest against EOS") {
     CHECK(dir.endpoint->list("").value().entries.empty());
   }
 }
+
+TEST_CASE("eos endpoint: uploads with mtimes that the open cannot carry") {
+  if (!base_url()) return;
+  RemoteDir dir("mtimes");
+  EosEndpoint& ep = *dir.endpoint;
+  // The MGM takes seconds of 0 in eos.mtime for none, and writes seconds
+  // before 1970 signed in its replies.
+  for (Timespec mtime : {Timespec{0, 0}, Timespec{0, 5}, Timespec{-2, 500000000}}) {
+    INFO("mtime ", mtime.sec, ".", mtime.nsec);
+    std::string content = "epoch " + std::to_string(mtime.sec) + "." + std::to_string(mtime.nsec);
+    put(ep, "f", content, mtime);
+    CHECK(get(ep, "f") == content);
+    CHECK(must(ep.stat("f")).mtime == mtime);
+    CHECK(ep.list("").value().entries.size() == 1);
+  }
+}

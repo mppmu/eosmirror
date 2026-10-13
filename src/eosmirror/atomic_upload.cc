@@ -16,15 +16,22 @@ std::string describe_mtime(const Timespec& t) {
   return buf;
 }
 
+RelPath parent_path(const RelPath& path) {
+  auto slash = path.rfind('/');
+  return slash == std::string::npos ? RelPath() : path.substr(0, slash);
+}
+
 }  // namespace
 
 AtomicUploadWriter::AtomicUploadWriter(Endpoint& ep, RelPath path, std::string name,
-                                       std::unique_ptr<FileWriter> upload, Placed placed)
+                                       std::unique_ptr<FileWriter> upload, Locate locate,
+                                       bool mtime_at_open)
     : ep_(ep),
       path_(std::move(path)),
       name_(std::move(name)),
       upload_(std::move(upload)),
-      placed_(std::move(placed)) {}
+      locate_(std::move(locate)),
+      mtime_at_open_(mtime_at_open) {}
 
 Result<CommitInfo> AtomicUploadWriter::commit(const CommitSpec& spec) {
   CommitSpec upload_spec = spec;
@@ -32,17 +39,25 @@ Result<CommitInfo> AtomicUploadWriter::commit(const CommitSpec& spec) {
   upload_spec.require_verification = false;
   auto closed = upload_->commit(upload_spec);
   if (!closed.ok()) return failed(take_back(spec), closed.error());
-  auto placed = placed_();
-  if (!placed.ok())
-    return placed.error().kind == ErrorKind::NotFound ? not_committed()
-                                                      : rejected(spec, placed.error());
-  const Entry& file = placed.value();
+  auto located = locate_();
+  if (!located.ok())
+    return located.error().kind == ErrorKind::NotFound ? not_committed()
+                                                       : rejected(spec, located.error());
+  const UploadFile& upload = located.value();
+  if (!upload.in_place)
+    return rejected(spec, Error{ErrorKind::IO, name_ + " is not in place after its close: the "
+                                                   "upload is still " +
+                                                   (upload.file.name.empty()
+                                                        ? "elsewhere"
+                                                        : "under " + upload.file.name)});
+  const Entry& file = upload.file;
   if (file.size != spec.size)
     return rejected(spec, Error{ErrorKind::IO, name_ + " is in place with " +
                                                    std::to_string(file.size) +
                                                    " bytes instead of " +
                                                    std::to_string(spec.size)});
-  if (has(spec.fields, MetaFields::Mtime) && file.mtime != spec.metadata.mtime)
+  bool mtime_carried = mtime_at_open_ && has(spec.fields, MetaFields::Mtime);
+  if (mtime_carried && file.mtime != spec.metadata.mtime)
     return rejected(spec, Error{ErrorKind::IO, name_ + " is in place with mtime " +
                                                    describe_mtime(file.mtime) + " instead of " +
                                                    describe_mtime(spec.metadata.mtime)});
@@ -60,6 +75,7 @@ Result<CommitInfo> AtomicUploadWriter::commit(const CommitSpec& spec) {
                                     std::string(to_string(spec.checksum.type)) +
                                     " checksum to verify " + name_ + " against"});
   MetaFields fields = spec.fields & (MetaFields::Owner | MetaFields::Mode);
+  if (!mtime_carried) fields = fields | (spec.fields & MetaFields::Mtime);
   // A new file has the mode of the open, plus the owner's read and write
   // bits that XRootD adds. One that replaced a file may have been given the
   // old file's mode by EOS's versioning.
@@ -71,27 +87,47 @@ Result<CommitInfo> AtomicUploadWriter::commit(const CommitSpec& spec) {
   return CommitInfo{verified};
 }
 
-// Removes the upload, or else sets its mtime to 0 so that the next run copies
-// it again. Another file in place is left alone, and so is one that cannot
-// be told apart from the upload.
+// Removes the upload where it is, in place or still under its hidden name
+// (a close that timed out can still commit it); one in place that cannot be
+// removed gets mtime 0 instead, so that the next run copies it again. Another
+// file in place is left alone, and so is one that cannot be told apart from
+// the upload, or that was moved elsewhere.
 AtomicUploadWriter::Gone AtomicUploadWriter::take_back(const CommitSpec& spec) {
-  auto placed = placed_();
-  if (!placed.ok()) {
-    if (placed.error().kind == ErrorKind::NotFound) return Gone::NotInPlace;
-    log::error("cannot tell whether ", name_, " is the failed upload: ",
-               placed.error().describe());
+  for (int round = 0;; ++round) {
+    auto located = locate_();
+    if (!located.ok()) {
+      if (located.error().kind == ErrorKind::NotFound) return Gone::NotInPlace;
+      log::error("cannot tell whether ", name_, " is the failed upload: ",
+                 located.error().describe());
+      return Gone::Stuck;
+    }
+    const UploadFile& upload = located.value();
+    if (!upload.in_place && upload.file.name.empty()) {
+      log::warn("the failed upload of ", name_, " was moved elsewhere: left alone");
+      return Gone::NotInPlace;
+    }
+    RelPath at = upload.in_place ? path_ : join(parent_path(path_), upload.file.name);
+    Status removed = ep_.remove(at, EntryType::File);
+    if (removed.ok()) return Gone::TakenBack;
+    // Gone since, or renamed into place by a close that went on: once more.
+    if (removed.error().kind == ErrorKind::NotFound) {
+      if (round == 0) continue;
+      return Gone::TakenBack;
+    }
+    if (upload.in_place && spec.metadata.mtime != Timespec{0, 0}) {
+      Entry md = spec.metadata;
+      md.type = EntryType::File;
+      md.mtime = {0, 0};
+      Status reset = ep_.set_metadata(path_, md, MetaFields::Mtime);
+      if (reset.ok()) return Gone::TakenBack;
+      log::error("cannot remove ", name_, " after a failed upload, nor reset its mtime: ",
+                 removed.error().describe(), "; ", reset.error().describe());
+      return Gone::Stuck;
+    }
+    log::error("cannot remove the failed upload of ", name_, " (", at,
+               "): ", removed.error().describe());
     return Gone::Stuck;
   }
-  Status removed = ep_.remove(path_, EntryType::File);
-  if (removed.ok() || removed.error().kind == ErrorKind::NotFound) return Gone::TakenBack;
-  Entry md = spec.metadata;
-  md.type = EntryType::File;
-  md.mtime = {0, 0};
-  Status reset = ep_.set_metadata(path_, md, MetaFields::Mtime);
-  if (reset.ok()) return Gone::TakenBack;
-  log::error("cannot remove ", name_, " after a failed upload, nor reset its mtime: ",
-             removed.error().describe(), "; ", reset.error().describe());
-  return Gone::Stuck;
 }
 
 Error AtomicUploadWriter::failed(Gone gone, Error e) const {

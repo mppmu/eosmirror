@@ -277,8 +277,9 @@ class EosReader : public XrdReader {
 };
 
 // An upload through EOS's atomic upload: the file is created under its final
-// name with eos.atomic=1 and eos.mtime=..., and EOS stores it under a hidden
-// name and renames it at close. Its commit only closes it; the
+// name with eos.atomic=1 and eos.mtime=... (unless the seconds are 0, which
+// the MGM takes for none), and EOS stores it under a hidden name and renames
+// it at close. Its commit only closes it; the
 // AtomicUploadWriter around it confirms what is in place. Up to `window`
 // writes are in flight, sent in offset order over the file's one connection,
 // each at the end of the previous one, as erasure-coded layouts need (see
@@ -369,8 +370,11 @@ Result<GetfmdReply> parse_getfmd_reply(std::string_view reply) {
     fields[field.substr(0, eq)] = field.substr(eq + 1);
   }
   auto number = [&](std::string_view key) { return parse_number<uint64_t>(fields[key]); };
-  auto id = number("id"), size = number("size"), mtime = number("mtime"),
-       mtime_ns = number("mtime_ns"), lid = number("lid");
+  auto id = number("id"), size = number("size"), mtime_ns = number("mtime_ns"), lid = number("lid");
+  // The seconds are signed (namespace/ns_quarkdb/FileMD.cc, getEnv).
+  std::string_view seconds = fields["mtime"];
+  bool before_1970 = seconds.starts_with('-');
+  auto mtime = parse_number<int64_t>(before_1970 ? seconds.substr(1) : seconds);
   std::string_view name = fields["name"], container = fields["container"];
   if (!id || !size || !mtime || !mtime_ns || *mtime_ns >= 1000000000 || !lid || name.empty() ||
       !container.starts_with('/'))
@@ -384,7 +388,7 @@ Result<GetfmdReply> parse_getfmd_reply(std::string_view reply) {
   e.type = EntryType::File;
   e.id = std::to_string(*id);
   e.size = *size;
-  e.mtime = {static_cast<int64_t>(*mtime), static_cast<int32_t>(*mtime_ns)};
+  e.mtime = {before_1970 ? -*mtime : *mtime, static_cast<int32_t>(*mtime_ns)};
   // The checksum type is the low four bits of the layout (common/LayoutId.hh).
   constexpr uint64_t kAdler = 2;
   if ((*lid & 0xf) == kAdler) e.checksum = listed_checksum("adler", fields["checksum"]);
@@ -453,6 +457,10 @@ Result<FindEntry> parse_find_line(std::string_view line, std::string_view abs_di
   Entry e;
   std::string_view checksum, checksum_type;
   std::optional<std::string_view> sys_atomic, user_atomic;
+  // Attribute values are printed raw as well: one with a quote and a space
+  // would continue as further fields, so none may repeat, and none may be
+  // unknown.
+  std::vector<std::string_view> keys;
   std::string_view rest = line.substr(path_end + 2);
   while (!rest.empty()) {
     if (rest.front() == ' ') {
@@ -462,6 +470,9 @@ Result<FindEntry> parse_find_line(std::string_view line, std::string_view abs_di
     auto eq = rest.find('=');
     if (eq == std::string_view::npos) return bad("unparsable listing line");
     std::string_view key = rest.substr(0, eq);
+    if (std::find(keys.begin(), keys.end(), key) != keys.end())
+      return bad("repeated field in listing line");
+    keys.push_back(key);
     rest.remove_prefix(eq + 1);
     std::string_view value;
     if (key == "target") {
@@ -514,6 +525,8 @@ Result<FindEntry> parse_find_line(std::string_view line, std::string_view abs_di
               value.find('"', 1) == value.size() - 1;
       (key == "attr.sys.forced.atomic" ? sys_atomic : user_atomic) =
           value.substr(1, value.size() - 2);
+    } else {
+      return bad("unknown field in listing line");
     }
     if (!valid) return bad("malformed " + std::string(key) + " in listing line");
   }
@@ -981,7 +994,7 @@ Status EosEndpoint::fsctl(const std::string& abs, const std::string& command,
   return {};
 }
 
-Result<Entry> EosEndpoint::file_by_id(const std::string& abs, uint64_t fid) {
+Result<UploadFile> EosEndpoint::file_by_id(const std::string& abs, uint64_t fid) {
   XrdCl::Buffer arg;
   arg.FromString(request_path(abs).value() + "&mgm.pcmd=getfmd&mgm.getfmd.fid=" +
                  std::to_string(fid));
@@ -995,11 +1008,33 @@ Result<Entry> EosEndpoint::file_by_id(const std::string& abs, uint64_t fid) {
     e.message += " (" + url_of(abs) + ")";
     return e;
   }
-  if (reply.value().path != sealed(abs))
-    return Error{ErrorKind::NotFound, url_of(abs) + ": the file of the upload is elsewhere"};
-  Entry file = std::move(reply.value().file);
-  file.name = name_of(abs);
-  return file;
+  const std::string& path = reply.value().path;  // sealed
+  UploadFile found;
+  found.file = std::move(reply.value().file);
+  std::string want = sealed(abs);
+  // A sealed path with "#AND#" can also be another path's: the file under
+  // the name tells by its id.
+  bool ambiguous = want.find("#AND#") != std::string::npos;
+  if (path == want) {
+    if (ambiguous) {
+      auto under_name = stat_abs(abs);
+      if (!under_name.ok() && under_name.error().kind != ErrorKind::NotFound)
+        return under_name.error();
+      if (!under_name.ok() || under_name.value().id != found.file.id) {
+        found.file.name.clear();
+        return found;
+      }
+    }
+    found.in_place = true;
+    found.file.name = name_of(abs);
+    return found;
+  }
+  // Elsewhere: in the upload's directory, by a name that is not ambiguous,
+  // or anywhere else, nameless.
+  if (parent_of(path) != sealed(parent_of(abs)) ||
+      found.file.name.find("#AND#") != std::string::npos)
+    found.file.name.clear();
+  return found;
 }
 
 Result<Checksum> EosEndpoint::stored_checksum(const RelPath& path, const Entry& listed) {
@@ -1019,8 +1054,11 @@ Result<std::unique_ptr<FileWriter>> EosEndpoint::open_write(const RelPath& path,
                                                             const CommitSpec& spec) {
   std::string abs = absolute(path);
   std::string request = request_path(abs).value() + "&eos.atomic=1";
-  if (has(spec.fields, MetaFields::Mtime))
-    request += "&eos.mtime=" + format_timespec(spec.metadata.mtime);
+  // The MGM takes an eos.mtime whose seconds are 0 for none and sets the
+  // time of the open instead (mgm/XrdMgmOfsFile.cc): such an mtime is set
+  // once the file is confirmed.
+  bool mtime_at_open = has(spec.fields, MetaFields::Mtime) && spec.metadata.mtime.sec != 0;
+  if (mtime_at_open) request += "&eos.mtime=" + format_timespec(spec.metadata.mtime);
   std::string url = open_url(request);
   auto file = new_write_file();
   ModeBits mode = has(spec.fields, MetaFields::Mode) ? spec.metadata.mode : 0644;
@@ -1038,7 +1076,8 @@ Result<std::unique_ptr<FileWriter>> EosEndpoint::open_write(const RelPath& path,
                  "create " + url_of(abs) + ": the MGM names no id for the file of the upload"};
   }
   return std::unique_ptr<FileWriter>(new AtomicUploadWriter(
-      *this, path, url_of(abs), std::move(upload), [this, abs, fid] { return file_by_id(abs, fid); }));
+      *this, path, url_of(abs), std::move(upload), [this, abs, fid] { return file_by_id(abs, fid); },
+      mtime_at_open));
 }
 
 }  // namespace eosmirror

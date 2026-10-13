@@ -8,6 +8,7 @@
 #include <string_view>
 #include <vector>
 
+#include "eosmirror/atomic_upload.hh"
 #include "eosmirror/xrootd_endpoint.hh"
 
 namespace eosmirror {
@@ -50,10 +51,11 @@ class EosEndpoint : public XrdEndpoint {
   // as a single query; it replies "<command>: retc=<errno>".
   Status fsctl(const std::string& abs_path, const std::string& command, const std::string& args);
 
-  // The file with the given id while it is the one at an absolute path, with
-  // size, mtime and stored checksum, by one query (the MGM's getfmd);
-  // NotFound if it is gone or elsewhere.
-  Result<Entry> file_by_id(const std::string& abs_path, uint64_t fid);
+  // The file with the given id, created by an upload to an absolute path, as
+  // it is now (see UploadFile), with size, mtime and stored checksum, by one
+  // query (the MGM's getfmd); NotFound once it is gone. A name that EOS
+  // writes ambiguously in replies ('&' as "#AND#") takes a stat of the path.
+  Result<UploadFile> file_by_id(const std::string& abs_path, uint64_t fid);
 
   struct ProcResult {
     int retc = 0;
