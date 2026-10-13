@@ -22,14 +22,16 @@ if(EOSMIRROR_WERROR)
   add_compile_options(-Werror)
 endif()
 
+# Undefined behavior stops the program, so that it fails the tests rather
+# than print a diagnostic.
 if(EOSMIRROR_SANITIZER STREQUAL "address")
-  add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+  add_compile_options(-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer)
   add_link_options(-fsanitize=address,undefined)
 elseif(EOSMIRROR_SANITIZER STREQUAL "thread")
   add_compile_options(-fsanitize=thread -fno-omit-frame-pointer)
   add_link_options(-fsanitize=thread)
 elseif(EOSMIRROR_SANITIZER STREQUAL "undefined")
-  add_compile_options(-fsanitize=undefined -fno-omit-frame-pointer)
+  add_compile_options(-fsanitize=undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer)
   add_link_options(-fsanitize=undefined)
 elseif(NOT EOSMIRROR_SANITIZER STREQUAL "")
   message(FATAL_ERROR "Unknown EOSMIRROR_SANITIZER '${EOSMIRROR_SANITIZER}'")
