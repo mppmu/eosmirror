@@ -217,6 +217,11 @@ TEST_CASE("posix copies get their mtimes once a sync has made them durable") {
   unsynced.sync = false;
   PosixEndpoint plain(tmp.path(), unsynced);
   CHECK(copy(plain, "c") == spec.metadata.mtime);
+
+  // A source mtime of 0 could not be told from the provisional one: such a
+  // copy is synced at once and gets its mtime with it.
+  spec.metadata.mtime = {0, 7};
+  CHECK(copy(ep, "d") == Timespec{0, 7});
 }
 
 TEST_CASE("posix readback verification catches corruption") {
@@ -293,6 +298,9 @@ TEST_CASE("posix roots have their canonical path, also before they exist") {
   CHECK(PosixEndpoint(tmp.sub("link/./missing/")).describe() == real + "/missing");
   CHECK(PosixEndpoint(tmp.sub("link/missing/deeper")).describe() == real + "/missing/deeper");
   CHECK(PosixEndpoint("/").describe() == "/");
+  // ".." behind a missing component exposes the symlink before it.
+  CHECK(PosixEndpoint(tmp.sub("missing/../link/dir")).describe() == real + "/dir");
+  CHECK(PosixEndpoint(tmp.sub("link/dir/missing/../../missing2/../")).describe() == real);
 }
 
 TEST_CASE("trees that overlap are found by whole path components") {

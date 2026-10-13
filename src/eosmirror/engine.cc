@@ -231,6 +231,9 @@ struct Engine::Impl {
   // next: a copy may need it to be durable and final (PosixOptions::sync).
   std::mutex finalized_mutex;
   std::vector<RelPath> finalized;
+  // A sync failed: copies may keep mtime 0 in directories finalized since,
+  // so no directory is recorded as finalized any more.
+  std::atomic<bool> sync_failed{false};
   bool ran = false;
 
   size_t max_transfers() const { return static_cast<size_t>(std::max(1, options.max_transfers)); }
@@ -268,6 +271,18 @@ struct Engine::Impl {
     return a.truncated(mtime_resolution) == b.truncated(mtime_resolution);
   }
 
+  // Whether a target file is a copy that is not final: renamed into place
+  // with mtime 0 before a sync made it durable (local targets), or given
+  // mtime 0 after a doubtful copy. A source file whose own mtime is 0 cannot
+  // be told from one (local copies of such files are synced at once).
+  bool provisional(const Entry& src, const Entry& dst) const {
+    return use_mtimes && dst.mtime == Timespec{0, 0} && !same_mtime(src.mtime, dst.mtime);
+  }
+
+  // Whether the journal is kept up to date: in a run, or in a dry run that
+  // verifies (--checksum), whose findings a later run repairs.
+  bool journal_updates() const { return journal && (!options.dry_run || options.checksum); }
+
   bool shard_owns(const RelPath& path) const {
     if (options.shard_count <= 1) return true;
     return fnv1a(path) % static_cast<uint64_t>(options.shard_count) ==
@@ -302,7 +317,7 @@ struct Engine::Impl {
   void fail(const RelPath& path, EntryType type, const Error& error) {
     if (error.kind == ErrorKind::Cancelled) return;
     Failure f{path, type, error};
-    if (journal && !options.dry_run) journal_write(journal->record_failure(f));
+    if (journal_updates()) journal_write(journal->record_failure(f));
     // Withheld deletions are recorded, for --retry-failed, but told where
     // they are withheld, and none is a failure in a row.
     if (error.kind == ErrorKind::Withheld) {
@@ -353,7 +368,7 @@ struct Engine::Impl {
   }
 
   void forget_failure(const RelPath& path) {
-    if (!journal || options.dry_run) return;
+    if (!journal_updates()) return;
     auto rows = prior_failures.find(parent_path(path));
     if (rows != prior_failures.end() && rows->second.count(name_of(path)))
       journal_write(journal->clear_failure(path));
@@ -361,20 +376,24 @@ struct Engine::Impl {
 
   // An entry that was listed on the source but is gone when it is handled:
   // the source changed, which is no failure, and the next run sees it gone.
-  // Many in a row, though, mean that the source itself went away.
-  void vanished(const RelPath& path, EntryType type) {
+  // A file whose copy in place (in_place) is in doubt keeps its row: the
+  // source may get the file back. Many in a row, though, mean that the
+  // source itself went away.
+  void vanished(const RelPath& path, EntryType type, bool in_place = false) {
     stats.vanished.fetch_add(1);
     log::info(to_string(type), " ", path, " vanished from the source");
-    forget_failure(path);
+    if (!in_place || !copy_in_doubt(path)) forget_failure(path);
     in_a_row(path, type, "vanished from the source");
   }
 
   // Drops the journal's records of earlier failures of entries in a
   // directory, or below them, whose names are gone from both sides, which
-  // leaves nothing to retry.
-  void clear_vanished(const RelPath& dir, const std::vector<Entry>& src_entries,
+  // leaves nothing to retry. Not where a listing left out entries: a name
+  // among them is not gone.
+  void clear_vanished(const std::shared_ptr<DirNode>& node, const std::vector<Entry>& src_entries,
                       const std::unordered_map<std::string, Entry>& dst_extras) {
-    if (!journal || options.dry_run) return;
+    if (!journal_updates() || node->unlisted > 0) return;
+    const RelPath& dir = node->path;
     std::string prefix = dir.empty() ? "" : dir + "/";
     auto rows = prior_failures.find(dir);
     auto below = prior_failures.lower_bound(prefix);
@@ -492,7 +511,9 @@ struct Engine::Impl {
       // relaxed for creating a subdirectory is restored here.
       if (!apply_metadata(node->path, node->source, MetaFields::Mode)) node->failed = true;
     }
-    bool complete = !node->failed && !node->incomplete;
+    // The top directory stands for the copies that a failed sync left with
+    // mtime 0, wherever they are.
+    bool complete = !node->failed && !node->incomplete && !(node->path.empty() && sync_failed);
     if (complete && !cancel.requested()) succeeded(node->path);
     if (journal && !options.dry_run && complete && !node->only && !cancel.requested()) {
       std::lock_guard lock(finalized_mutex);
@@ -580,9 +601,10 @@ struct Engine::Impl {
 
     // A source directory that is empty where the target's is not is more
     // likely an unmounted file system or a broken server than emptied. At
-    // the top, that stops a run with --delete; below, see may_delete().
+    // the top, that stops a run with --delete, a retry as well; below, see
+    // may_delete().
     bool emptied = empty_source(src_entries) && !empty_target(dst_entries);
-    if (options.delete_extra && emptied && !node->parent && !node->only) {
+    if (options.delete_extra && emptied && node->path.empty()) {
       node->failed = true;
       end_run(Error{ErrorKind::Other, source.describe() + " is empty, but " + target.describe() +
                                           " is not: refusing to delete everything there"});
@@ -593,11 +615,15 @@ struct Engine::Impl {
     for (Entry& e : src_entries) {
       if (cancel.requested()) break;
       if (node->only && !node->only->count(e.name)) continue;
+      auto it = dst_entries.find(e.name);
       if (source.is_temporary(e)) {
+        // Not copied, and not an extra on the target either: a user's file
+        // named like one is left alone on both sides, and counted.
+        stats.source_temps.fetch_add(1);
         log::debug("skipping the source's temporary ", join(node->path, e.name));
+        if (it != dst_entries.end()) dst_entries.erase(it);
         continue;
       }
-      auto it = dst_entries.find(e.name);
       const Entry* existing = it == dst_entries.end() ? nullptr : &it->second;
       switch (e.type) {
         case EntryType::Directory:
@@ -626,7 +652,7 @@ struct Engine::Impl {
     }
 
     // What is left of the target's entries is not in the source.
-    clear_vanished(node->path, src_entries, dst_entries);
+    clear_vanished(node, src_entries, dst_entries);
     if (node->owned && !cancel.requested()) {
       // A retry handles only its own names, among them failed deletions.
       if (node->only)
@@ -848,10 +874,13 @@ struct Engine::Impl {
       existing = nullptr;
     }
     CopyJob job{node, e, existing != nullptr, std::nullopt};
-    if (existing && existing->size == e.size) {
+    // A copy whose last attempt is in doubt, or that is not final, is made
+    // again whatever a comparison would say.
+    bool doubtful = existing && (copy_in_doubt(path) || provisional(e, *existing));
+    if (existing && existing->size == e.size && !doubtful) {
       if (options.checksum) {
         // Stored checksums of one type decide at once, a transfer reads the
-        // files for the others. A copy in doubt is compared all the same.
+        // files for the others.
         if (e.checksum.type == ChecksumType::None || e.checksum.type != existing->checksum.type) {
           job.compare = *existing;
           queue(std::move(job));
@@ -859,32 +888,34 @@ struct Engine::Impl {
         }
         stats.checksums_compared.fetch_add(1);
         if (e.checksum == existing->checksum) {
-          unchanged(path, e, *existing);
+          unchanged(node, path, e, *existing);
           return;
         }
         stats.checksums_differ.fetch_add(1);
         if (!copy_differing(job, *existing, e.checksum, existing->checksum)) return;
-      } else if (!copy_in_doubt(path) &&
-                 (options.size_only || same_mtime(existing->mtime, e.mtime))) {
-        unchanged(path, e, *existing);
+      } else if (options.size_only || same_mtime(existing->mtime, e.mtime)) {
+        unchanged(node, path, e, *existing);
         return;
       } else if (!prepare_copy(job, existing)) {
         return;
       }
     } else {
       if (options.dry_run && options.checksum)
-        differs(path, existing ? std::to_string(e.size) + " bytes on the source, " +
-                                     std::to_string(existing->size) + " on the target"
-                               : "missing on the target");
+        differs(path, !existing ? "missing on the target"
+                      : doubtful ? "the copy on the target is in doubt or not final"
+                                 : std::to_string(e.size) + " bytes on the source, " +
+                                       std::to_string(existing->size) + " on the target");
       if (!prepare_copy(job, existing)) return;
     }
     queue(std::move(job));
   }
 
   // A file that matches, whose metadata is fixed where it differs.
-  void unchanged(const RelPath& path, const Entry& e, const Entry& existing) {
+  void unchanged(const std::shared_ptr<DirNode>& node, const RelPath& path, const Entry& e,
+                 const Entry& existing) {
     stats.files_unchanged.fetch_add(1);
     MetaFields fields = differences(e, existing);
+    if (fields != MetaFields::None) ensure_writable(node);
     if (!apply_metadata(path, e, fields)) return;
     if (fields != MetaFields::None) stats.metadata_fixed.fetch_add(1);
     succeeded(path);
@@ -900,7 +931,7 @@ struct Engine::Impl {
       differs(path, std::string(to_string(on_source.type)) + " " + on_source.hex +
                         " on the source, " + on_target.hex + " on the target (" +
                         std::to_string(job.source.size) + " bytes)");
-    return prepare_copy(job, &existing);
+    return prepare_copy(job, &existing, /*differs_in_place=*/true);
   }
 
   // A file that differs from the source in a dry run that compares by
@@ -908,15 +939,19 @@ struct Engine::Impl {
   // that a run copies it again.
   void differs(const RelPath& path, const std::string& how) {
     Failure f{path, EntryType::File, Error{ErrorKind::Checksum, "differs from the source: " + how}};
-    if (journal) journal_write(journal->record_failure(f));
+    if (journal_updates()) journal_write(journal->record_failure(f));
     report.add_failure(std::move(f));
   }
 
-  // Before a copy is queued or made. Whether it is to be made.
-  bool prepare_copy(const CopyJob& job, const Entry* existing) {
+  // Before a copy is queued or made: a file in place whose last copy is in
+  // doubt, or that is known to differ, gets mtime 0 first unless it has it.
+  // Whether the copy is to be made.
+  bool prepare_copy(const CopyJob& job, const Entry* existing, bool differs_in_place = false) {
     RelPath path = join(job.dir->path, job.source.name);
     ensure_writable(job.dir);
-    if (existing && copy_in_doubt(path) && !invalidate_in_doubt(path, job.source)) return false;
+    if (existing && (differs_in_place || copy_in_doubt(path)) &&
+        !provisional(job.source, *existing) && !invalidate_in_doubt(path, job.source))
+      return false;
     if (existing && job.dir->replaces_at_open && !job.dir->replacing_warned.exchange(true))
       log::warn("replacing files in ", job.dir->path.empty() ? "." : job.dir->path,
                 " without atomic uploads, which the target forces to be non-atomic there: a "
@@ -934,12 +969,12 @@ struct Engine::Impl {
     }
   }
 
-  // Gives a file whose last copy is in doubt mtime 0 before it is copied
-  // again, so that an upload that does not arrive (EOS confirms commits by
-  // size and mtime where it has no checksum) cannot be taken for it. Whether
-  // that worked.
+  // Gives a file in place mtime 0 before it is copied again, as a copy that
+  // is not final (see provisional()): should the new copy not arrive, every
+  // later run still copies the file again, with or without a journal.
+  // Whether that worked.
   bool invalidate_in_doubt(const RelPath& path, const Entry& e) {
-    log::debug("copying ", path, " again: its last copy failed");
+    log::debug("copying ", path, " again: its copy in place is in doubt or differs");
     if (!use_mtimes || options.dry_run) return true;
     Entry md = e;
     md.mtime = {0, 0};
@@ -968,6 +1003,7 @@ struct Engine::Impl {
     if (existing && existing->link_target == link_target) {
       stats.symlinks_unchanged.fetch_add(1);
       MetaFields fields = differences(e, *existing);
+      if (fields != MetaFields::None) ensure_writable(node);
       if (!apply_metadata(path, e, fields)) return;
       if (fields != MetaFields::None) stats.metadata_fixed.fetch_add(1);
       succeeded(path);
@@ -1090,8 +1126,9 @@ struct Engine::Impl {
   }
 
   // Makes the copies so far durable and final, and records the directories
-  // finalized before as such. Where that fails, they are not recorded: a
-  // run that resumes walks them again.
+  // finalized before as such. Once that has failed, copies may keep mtime 0
+  // in any directory: none is recorded any more, and the top directory is
+  // a failure, so that a run that resumes or retries walks them all again.
   void sync_target() {
     std::vector<RelPath> done;
     {
@@ -1099,9 +1136,11 @@ struct Engine::Impl {
       done.swap(finalized);
     }
     if (Status synced = target.flush(); !synced.ok()) {
+      sync_failed = true;
       fail("", EntryType::Directory, synced.error());
       return;
     }
+    if (sync_failed) return;
     for (const RelPath& path : done) journal_write(journal->record_done_dir(path));
   }
 
@@ -1155,17 +1194,17 @@ struct Engine::Impl {
     ChecksumType type = on_target.value().type;
     if (type == ChecksumType::None) type = on_source.value().type;
     if (type == ChecksumType::None) type = ChecksumType::Adler32;
-    auto of = [&](Endpoint& ep, const Checksum& stored) -> Result<Checksum> {
+    auto of = [&](Endpoint& ep, const Entry& listed, const Checksum& stored) -> Result<Checksum> {
       if (stored.type == type) return stored;
-      return retry([&] { return read_checksum(ep, path, job.source.size, type, pool, cancel); });
+      return retry([&] { return read_checksum(ep, path, listed, type, pool, cancel); });
     };
-    auto s = of(source, on_source.value());
+    auto s = of(source, job.source, on_source.value());
     if (!s.ok()) return compare_failed(path, s.error(), true);
-    auto d = of(target, on_target.value());
+    auto d = of(target, existing, on_target.value());
     if (!d.ok()) return compare_failed(path, d.error(), false);
     stats.checksums_compared.fetch_add(1);
     if (s.value() == d.value()) {
-      unchanged(path, job.source, existing);
+      unchanged(job.dir, path, job.source, existing);
       return false;
     }
     stats.checksums_differ.fetch_add(1);
@@ -1181,7 +1220,7 @@ struct Engine::Impl {
       return false;
     }
     if (on_source) {
-      vanished(path, EntryType::File);
+      vanished(path, EntryType::File, /*in_place=*/true);
       return false;
     }
     if (options.dry_run) differs(path, "missing on the target");
@@ -1189,7 +1228,7 @@ struct Engine::Impl {
   }
 
   void run_copy(const CopyJob& job, BufferPool& pool, TransferSlot& slot) {
-    if (job.compare && !differs_by_checksum(job, pool)) return;
+    if (job.compare && (cancel.requested() || !differs_by_checksum(job, pool))) return;
     RelPath path = join(job.dir->path, job.source.name);
     job.dir->touched = true;
     bool non_atomic = job.replaces && job.dir->replaces_at_open;
@@ -1269,7 +1308,7 @@ struct Engine::Impl {
           e = Error{ErrorKind::IO, e.describe() + "; an attempt before: " + doubt->describe()};
         fail(path, EntryType::File, e);
       } else if (result.error().kind == ErrorKind::NotFound && !target_failed) {
-        vanished(path, EntryType::File);
+        vanished(path, EntryType::File, job.replaces);
         settled();
       } else {
         fail(path, EntryType::File, result.error());
@@ -1342,6 +1381,42 @@ struct Engine::Impl {
     if (src.value().type != EntryType::Directory)
       return Error{ErrorKind::NotADirectory, source.describe() + "/" + path + " is not a directory"};
     return src;
+  }
+
+  // Whether every directory above a path is a directory on an endpoint, as
+  // a run that starts below the top takes for granted: a walk from the top
+  // would replace a symlink or file there, a run below it would follow it.
+  Status ancestors_are_directories(Endpoint& ep, const RelPath& path) {
+    for (auto slash = path.find('/'); slash != std::string::npos; slash = path.find('/', slash + 1)) {
+      RelPath ancestor = path.substr(0, slash);
+      auto st = retry([&] { return ep.stat(ancestor); });
+      if (!st.ok()) return st.error();
+      if (st.value().type != EntryType::Directory)
+        return Error{ErrorKind::NotADirectory, ep.describe() + "/" + ancestor + " is a " +
+                                                   std::string(to_string(st.value().type)) +
+                                                   ", not a directory"};
+    }
+    return {};
+  }
+
+  // The entries of a directory that is gone from the source, or no directory
+  // there any more, are not retried. The rows of those gone from the target
+  // too are dropped, nothing is left to retry; the others stay, a copy among
+  // them may be in doubt, until a run removes the entries or sees them gone.
+  void retry_without_source(const RelPath& dir, const std::set<std::string>& names) {
+    for (const auto& name : names) {
+      RelPath path = join(dir, name);
+      auto dst = retry([&] { return target.stat(path); });
+      if (!dst.ok() && dst.error().kind == ErrorKind::NotFound) {
+        if (journal_updates()) journal_write(journal->clear_failure(path));
+        continue;
+      }
+      EntryType type = dst.ok() ? dst.value().type : EntryType::File;
+      report.add_failure(
+          {path, type,
+           Error{ErrorKind::NotFound, "gone from the source while the target has it: not "
+                                      "retried (a run with --delete removes it)"}});
+    }
   }
 
   // Prepares a node for a source directory: stats the target and creates the
@@ -1446,10 +1521,10 @@ Status Engine::run(const std::vector<Failure>& entries) {
   Status pre = impl_->preflight();
   if (!pre.ok()) return pre;
 
-  // Entries below a failed directory are covered by that directory's walk.
-  std::set<RelPath> failed_dirs;
-  for (const Failure& f : entries)
-    if (f.type == EntryType::Directory) failed_dirs.insert(f.path);
+  // Entries below a retried entry are covered by its walk, whatever it was
+  // recorded as: a directory is walked whole, also one that was a file.
+  std::set<RelPath> retried;
+  for (const Failure& f : entries) retried.insert(f.path);
 
   // The rest is grouped by parent directory; each group becomes a node that
   // handles only those names, recursing into directories among them.
@@ -1459,7 +1534,7 @@ Status Engine::run(const std::vector<Failure>& entries) {
     bool covered = false;
     for (RelPath dir = f.path; !dir.empty() && !covered;) {
       dir = parent_path(dir);
-      covered = failed_dirs.count(dir) > 0;
+      covered = retried.count(dir) > 0;
     }
     if (covered) continue;
     if (f.path.empty())
@@ -1472,16 +1547,17 @@ Status Engine::run(const std::vector<Failure>& entries) {
   std::vector<std::shared_ptr<DirNode>> roots;
   for (auto& [dir, names] : groups) {
     auto src = impl_->source_dir(dir);
-    if (!src.ok() && src.error().kind == ErrorKind::NotFound) {
-      // Gone from the source: nothing left to retry.
-      if (impl_->journal && !impl_->options.dry_run)
-        for (const auto& name : names) {
-          if (Status s = impl_->journal->clear_failure(join(dir, name)); !s.ok()) return s;
-        }
+    if (!src.ok() && (src.error().kind == ErrorKind::NotFound ||
+                      src.error().kind == ErrorKind::NotADirectory)) {
+      impl_->retry_without_source(dir, names);
       continue;
     }
-    auto node = src.ok() ? impl_->make_node(dir, src.value())
-                         : Result<std::shared_ptr<DirNode>>(src.error());
+    // Starting below the top takes the directories above for directories.
+    Status above = src.ok() ? impl_->ancestors_are_directories(impl_->source, dir) : Status();
+    if (above.ok()) above = impl_->ancestors_are_directories(impl_->target, dir);
+    auto node = !above.ok() ? Result<std::shared_ptr<DirNode>>(above.error())
+                : src.ok()  ? impl_->make_node(dir, src.value())
+                            : Result<std::shared_ptr<DirNode>>(src.error());
     if (!node.ok()) {
       impl_->fail(dir, EntryType::Directory, node.error());
       continue;

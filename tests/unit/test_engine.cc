@@ -2918,3 +2918,259 @@ TEST_CASE("FS to FS as a user other than root: read-only directories" *
   CHECK_FALSE(fs::exists(tmp.sub("dst/ro/extra")));
   compare_trees(src, dst);
 }
+
+TEST_CASE("fake: a copy with mtime 0 is made again, whatever the comparison says") {
+  FakeEndpoint src, dst;
+  populate(src);
+  Report mirror;
+  REQUIRE(run_sync(src, dst, fake_options(), mirror).ok());
+  // A copy renamed into place before a sync made it durable, or one given
+  // mtime 0 after a doubtful copy: the same size, and here other content.
+  dst.modify("f0", [](FakeEndpoint::Node& n) {
+    n.content = "root fil3";
+    n.entry.mtime = {0, 0};
+  });
+  SyncOptions o = fake_options();
+  SUBCASE("compared by mtime") {}
+  SUBCASE("compared by size") { o.size_only = true; }
+  SUBCASE("compared by checksum") {
+    o.checksum = true;
+    src.caps.checksum = dst.caps.checksum = ChecksumType::Adler32;
+    src.lists_checksums = dst.lists_checksums = true;
+    dst.modify("f0", [](FakeEndpoint::Node& n) { n.content = "root file"; });  // equal even
+  }
+  Report r;
+  REQUIRE(run_sync(src, dst, o, r).ok());
+  CHECK(r.stats.files_copied == 1);
+  CHECK(r.stats.files_unchanged == 2);
+  CHECK(dst.get("f0")->content == "root file");
+  CHECK(dst.get("f0")->entry.mtime == Timespec{3000, 1});
+
+  // A verifying run reports it.
+  dst.modify("f0", [](FakeEndpoint::Node& n) { n.entry.mtime = {0, 0}; });
+  SyncOptions verify = fake_options();
+  verify.dry_run = verify.checksum = true;
+  Report v;
+  REQUIRE(run_sync(src, dst, verify, v).ok());
+  CHECK(v.stats.failures == 1);
+  CHECK(v.stats.files_copied == 1);
+
+  // A source file with mtime 0 itself cannot be told from such a copy.
+  src.modify("f0", [](FakeEndpoint::Node& n) { n.entry.mtime = {0, 0}; });
+  Report same;
+  REQUIRE(run_sync(src, dst, fake_options(), same).ok());
+  CHECK(same.stats.files_copied == 0);
+  CHECK(same.stats.files_unchanged == 3);
+}
+
+TEST_CASE("fake: a copy in doubt is made again with --checksum, and keeps its row while its source is gone") {
+  TempDir tmp;
+  auto journal = Journal::open(tmp.sub("j.sqlite"), "fake", "fake");
+  REQUIRE(journal.ok());
+  Journal& j = *journal.value();
+  FakeEndpoint src, dst;
+  src.caps.checksum = dst.caps.checksum = ChecksumType::Adler32;
+  src.lists_checksums = dst.lists_checksums = true;
+  populate(src);
+  Report mirror;
+  REQUIRE(run_sync(src, dst, fake_options(), mirror).ok());
+  REQUIRE(j.begin_run(false).ok());
+  REQUIRE(j.record_failure({"f0", EntryType::File, Error{ErrorKind::IO, "close failed"}}).ok());
+  REQUIRE(j.end_run(true).ok());
+  SyncOptions o = fake_options();
+  o.checksum = true;
+
+  SUBCASE("copied, not compared, though the stored checksums are equal") {
+    REQUIRE(j.begin_run(false).ok());
+    Report r;
+    REQUIRE(run_sync(src, dst, o, r, &j).ok());
+    REQUIRE(j.end_run(true).ok());
+    CHECK(r.stats.files_copied == 1);
+    CHECK(r.stats.checksums_compared == 2);  // the other two files
+    CHECK(j.failures().value().empty());
+  }
+  SUBCASE("the source vanishes before the copy") {
+    src.fail("open_read", "f0", Error{ErrorKind::NotFound, "gone"}, 3);
+    REQUIRE(j.begin_run(false).ok());
+    Report r;
+    REQUIRE(run_sync(src, dst, o, r, &j).ok());
+    REQUIRE(j.end_run(true).ok());
+    CHECK(r.stats.vanished == 1);
+    CHECK(r.stats.failures == 0);
+    REQUIRE(j.failures().value().size() == 1);
+    CHECK(j.failures().value()[0].path == "f0");
+    CHECK(dst.get("f0")->entry.mtime == Timespec{0, 0});  // not final
+  }
+}
+
+TEST_CASE("fake: a retry stops at an empty source with --delete like a plain run") {
+  TempDir tmp;
+  auto journal = Journal::open(tmp.sub("j.sqlite"), "fake", "fake");
+  REQUIRE(journal.ok());
+  FakeEndpoint src, dst;
+  populate(src);
+  Report mirror;
+  REQUIRE(run_sync(src, dst, fake_options(), mirror).ok());
+  // The source's file system is not mounted: an empty directory.
+  for (const char* p : {"f0", "d1"}) src.erase(p);
+  SyncOptions o = fake_options();
+  o.delete_extra = true;
+  Cancellation cancel;
+  Report r;
+  Engine engine(src, dst, o, r, journal.value().get(), cancel);
+  Status s = engine.run({Failure{"f0", EntryType::File, Error{ErrorKind::IO, "x"}}});
+  REQUIRE_FALSE(s.ok());
+  CHECK(s.error().message.find("is empty") != std::string::npos);
+  CHECK(r.stats.deleted == 0);
+  CHECK(dst.get("f0"));
+}
+
+TEST_CASE("fake: retrying entries whose source directory is gone keeps the rows of what the target has") {
+  TempDir tmp;
+  auto journal = Journal::open(tmp.sub("j.sqlite"), "fake", "fake");
+  REQUIRE(journal.ok());
+  Journal& j = *journal.value();
+  FakeEndpoint src, dst;
+  populate(src);
+  Report mirror;
+  REQUIRE(run_sync(src, dst, fake_options(), mirror).ok());
+  REQUIRE(j.begin_run(false).ok());
+  REQUIRE(j.record_failure({"d1/f1", EntryType::File, Error{ErrorKind::IO, "in doubt"}}).ok());
+  REQUIRE(j.record_failure({"d1/gone", EntryType::File, Error{ErrorKind::IO, "in doubt"}}).ok());
+  REQUIRE(j.end_run(true).ok());
+  src.erase("d1");
+  REQUIRE(j.begin_run(false).ok());
+  Cancellation cancel;
+  Report r;
+  Engine engine(src, dst, fake_options(), r, &j, cancel);
+  REQUIRE(engine.run(j.failures().value()).ok());
+  REQUIRE(j.end_run(true).ok());
+  CHECK(r.stats.failures == 1);
+  REQUIRE(j.failures().value().size() == 1);
+  CHECK(j.failures().value()[0].path == "d1/f1");
+  CHECK(dst.get("d1/f1"));
+}
+
+TEST_CASE("fake: a retry below the top takes no symlink for a directory above it") {
+  std::vector<Failure> rows = {Failure{"d1/d2/f2", EntryType::File, Error{ErrorKind::IO, "x"}}};
+  Cancellation cancel;
+  SUBCASE("on the target") {
+    FakeEndpoint src, dst;
+    populate(src);
+    dst.add_symlink("d1", "/elsewhere");
+    dst.add_dir("d1/d2");
+    Report r;
+    Engine engine(src, dst, fake_options(), r, nullptr, cancel);
+    REQUIRE(engine.run(rows).ok());
+    CHECK(r.stats.failures == 1);
+    CHECK(r.stats.files_copied == 0);
+    CHECK_FALSE(dst.get("d1/d2/f2"));
+  }
+  SUBCASE("on the source") {
+    FakeEndpoint src, dst;
+    src.add_symlink("d1", "/elsewhere");
+    src.add_dir("d1/d2");
+    src.add_file("d1/d2/f2", "deep");
+    dst.add_dir("d1");
+    dst.add_dir("d1/d2");
+    Report r;
+    Engine engine(src, dst, fake_options(), r, nullptr, cancel);
+    REQUIRE(engine.run(rows).ok());
+    CHECK(r.stats.failures == 1);
+    CHECK(r.stats.files_copied == 0);
+  }
+}
+
+TEST_CASE("fake: a user's file named like a temporary is left alone on both sides") {
+  FakeEndpoint src, dst;
+  populate(src);
+  src.add_file(".tmp-user", "theirs", 0644, {100, 0});
+  dst.add_file(".tmp-user", "stale", 0644, {100, 0});
+  SyncOptions o = fake_options();
+  o.delete_extra = true;
+  Report r;
+  REQUIRE(run_sync(src, dst, o, r).ok());
+  CHECK(r.stats.source_temps == 1);
+  CHECK(r.stats.deleted == 0);
+  CHECK(r.stats.stale_temps == 0);
+  CHECK(dst.get(".tmp-user")->content == "stale");
+}
+
+TEST_CASE("fake: --checksum notices a file that changed since it was listed") {
+  FakeEndpoint src, dst;
+  populate(src);
+  Report mirror;
+  REQUIRE(run_sync(src, dst, fake_options(), mirror).ok());
+  // Appended after the listing, before the comparison reads it.
+  src.hook = [&](std::string_view op, const RelPath& path) {
+    if (op == "open_read" && path == "f0")
+      src.modify("f0", [](FakeEndpoint::Node& n) {
+        n.content = "root file, longer";
+        n.entry.size = n.content.size();
+      });
+  };
+  SyncOptions o = fake_options();
+  o.checksum = true;
+  Report r;
+  REQUIRE(run_sync(src, dst, o, r).ok());
+  CHECK(r.stats.failures == 1);
+  CHECK(r.stats.files_unchanged == 2);
+  CHECK(r.stats.checksums_compared == 2);
+}
+
+TEST_CASE("fake: a failed sync keeps the top directory a failure and records no directory as done") {
+  TempDir tmp;
+  auto journal = Journal::open(tmp.sub("j.sqlite"), "fake", "fake");
+  REQUIRE(journal.ok());
+  Journal& j = *journal.value();
+  FakeEndpoint src, dst;
+  populate(src);
+  SyncOptions o = fake_options();
+  o.sync_interval = std::chrono::milliseconds(2);
+  dst.fail("flush", "", Error{ErrorKind::IO, "sync failed"});  // the first, periodic one
+  dst.hook = [](std::string_view op, const RelPath&) {
+    if (op == "commit") std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  };
+  REQUIRE(j.begin_run(false).ok());
+  Report r;
+  REQUIRE(run_sync(src, dst, o, r, &j).ok());
+  REQUIRE(j.end_run(true).ok());
+  CHECK(r.stats.failures == 1);
+  REQUIRE(j.failures().value().size() == 1);
+  CHECK(j.failures().value()[0].path == "");
+  CHECK_FALSE(j.is_done_dir("").value());
+  CHECK_FALSE(j.is_done_dir("d1").value());
+}
+
+TEST_CASE("fake: a verifying dry run journals every failure, type conflicts too") {
+  TempDir tmp;
+  auto journal = Journal::open(tmp.sub("j.sqlite"), "fake", "fake");
+  REQUIRE(journal.ok());
+  Journal& j = *journal.value();
+  FakeEndpoint src, dst;
+  src.add_file("f", "x");
+  dst.add_dir("f");
+  SyncOptions o = fake_options();
+  o.dry_run = o.checksum = true;
+  REQUIRE(j.begin_run(false).ok());
+  Report r;
+  REQUIRE(run_sync(src, dst, o, r, &j).ok());
+  REQUIRE(j.end_run(true).ok());
+  CHECK(r.stats.failures == 1);
+  REQUIRE(j.failures().value().size() == 1);
+  CHECK(j.failures().value()[0].path == "f");
+}
+
+TEST_CASE("fake: an upload still under its hidden name after the close is removed and made again") {
+  FakeEndpoint src, dst;
+  dst.atomic_uploads = true;
+  dst.hidden_uploads = 1;
+  populate(src);
+  Report r;
+  REQUIRE(run_sync(src, dst, fake_options(), r).ok());
+  CHECK(r.stats.failures == 0);
+  CHECK(r.stats.retries == 1);
+  CHECK(r.stats.files_copied == 3);
+  for (const RelPath& p : dst.paths()) CHECK(p.find(".tmp-") == std::string::npos);
+  expect_mirrored(src, dst);
+}

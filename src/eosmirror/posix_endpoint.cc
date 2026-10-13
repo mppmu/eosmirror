@@ -277,9 +277,11 @@ class PosixWriter : public FileWriter {
     } else if (spec.require_verification) {
       return Error{ErrorKind::Unsupported, "no checksum to verify " + temp_ + " against"};
     }
-    // Until a sync has made it durable, the copy has mtime 0, which no
-    // source file has: a run that ends before copies it again.
-    bool deferred = deferred_ && has(spec.fields, MetaFields::Mtime);
+    // Until a sync has made it durable, the copy has mtime 0: a run that
+    // ends before copies it again. A source file with mtime 0 itself could
+    // not be told from such a copy, so its copy is made durable at once.
+    bool deferred = deferred_ && has(spec.fields, MetaFields::Mtime) && spec.metadata.mtime.sec != 0;
+    if (options_.sync && !deferred && fsync(fd_) != 0) return errno_error(errno, "fsync " + temp_);
     Entry metadata = spec.metadata;
     if (deferred) metadata.mtime = {0, 0};
     Status md = apply_metadata_fd(fd_, temp_, metadata, spec.fields, options_.default_mode);
@@ -336,12 +338,20 @@ class PosixWriter : public FileWriter {
 PosixEndpoint::PosixEndpoint(std::string root, PosixOptions options)
     : root_(std::move(root)), options_(options) {
   // The canonical path, so that journals recognize the tree however it was
-  // named. A root that does not exist yet gets the canonical path of its
-  // deepest existing ancestor, which is what it will have once created.
+  // named, and so that the overlap check sees where the tree really is. A
+  // root that does not exist yet gets the canonical path of its deepest
+  // existing ancestor, which is what it will have once created. Normalizing
+  // ".." behind a missing component can expose a symlink before it
+  // ("missing/../link"), so the result is resolved again until it settles.
   std::error_code ec;
   std::filesystem::path absolute = std::filesystem::absolute(root_, ec);
   if (!ec) {
     std::filesystem::path canonical = std::filesystem::weakly_canonical(absolute, ec);
+    for (int i = 0; !ec && i < 40; ++i) {
+      std::filesystem::path again = std::filesystem::weakly_canonical(canonical, ec);
+      if (ec || again == canonical) break;
+      canonical = again;
+    }
     root_ = (ec ? absolute.lexically_normal() : canonical).string();
   }
   while (root_.size() > 1 && root_.back() == '/') root_.pop_back();

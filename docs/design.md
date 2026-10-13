@@ -20,12 +20,14 @@ A run walks the source tree directory by directory and makes the target match:
   decides at once; otherwise a transfer asks the endpoints for stored ones
   (a checksum query on plain XRootD servers that compute them) and reads
   the files that have none of the type taken (the target's, else the
-  source's, else adler32). A copy in doubt is compared like any other,
-  rather than copied. With `--dry-run`, every file that a run would copy
-  is a failure of the kind "checksum mismatch", with both sizes or
-  checksums, which the journal records even then (the only change a dry
-  run makes to it, which is therefore opened for writing), so that a later
-  run with it copies the file again whatever its size and mtime.
+  source's, else adler32). A copy in doubt, or one that is not final
+  (mtime 0, see the durability of local copies), is copied rather than
+  compared. With `--dry-run`, every file that a run would copy is a
+  failure of the kind "checksum mismatch", with both sizes or checksums,
+  and such a dry run keeps the journal up to date like a run does
+  (failures recorded and cleared, no directory finalized; it is opened for
+  writing), so that a later run with it copies the file again whatever
+  its size and mtime.
 - A symlink is recreated when it is missing or points elsewhere, and its
   owner and mtime are fixed when they differ. Symlinks are never followed.
 - A directory is created when missing; its owner, mode and mtime are set once
@@ -122,6 +124,10 @@ names, `.`, `..` and names containing `/`, NUL or a line break are skipped
 with a warning and counted, on both sides and when deleting trees. Listings
 report the entries they left out themselves (lines of an EOS listing that
 cannot be told apart, names a plain XRootD server cannot address).
+Entries of the source named like temporaries of its endpoint (eosmirror's
+own `.<name>.eosmirror-<hex>` files, EOS's `.sys.a#.` uploads in progress)
+are skipped and counted, and a target entry of that name is kept, since
+it is not a leftover.
 Entries left out of the source's listing are not copied, which is a
 failure of their directory, as rsync reports files it could not transfer
 (exit status 23). In a directory where either listing missed entries,
@@ -196,9 +202,14 @@ then give every copy renamed before that its mtime (`utimensat`, not
 following symlinks, in up to 8 threads); only then are the directories of
 those copies recorded as finalized for `--resume`. Transfers never wait for
 a sync. A run that ends without its last sync (killed, or a crash or power
-loss of the host) leaves copies with mtime 0, which no source file has and
-the next run copies again, with or without a journal; a run that resumes
-walks their directories again.
+loss of the host) leaves copies with mtime 0, which the next run copies
+again whatever it compares by (`--size-only` and `--checksum` included),
+with or without a journal; a run that resumes walks their directories
+again. A source file whose own mtime has seconds 0 could not be told from
+such a copy: its copy is fsynced before the rename and gets its mtime at
+once. Once a sync has failed in a run, copies may keep mtime 0 in any
+directory: no directory is recorded as finalized any more, and the top
+directory is a failure, so that `--retry-failed` walks the whole tree.
 
 Data and metadata reach the disk separately: the rename that puts a copy
 in place goes through the file system's journal, its data is written when
@@ -291,14 +302,19 @@ Modes:
 - A plain run with a journal walks everything. Paths that succeed (copied,
   metadata fixed, deleted, vanished from the source, or gone from both sides,
   also with the directory above them) drop out of the failure table, paths
-  that fail replace their row.
+  that fail replace their row. A file whose copy in place is in doubt
+  keeps its row when its source vanishes, since the source may get the
+  file back; and nothing counts as gone from both sides in a directory
+  where a listing left out entries.
 - Files whose row is a transient error other than a change of the source
   (I/O, timeout, checksum) are copied again by any run with the journal,
-  whatever their size and mtime: such a copy may have failed its
-  verification or close in place (EOS) and kept the source's size and mtime
-  when it could be neither removed nor given mtime 0, which then fails it as
-  an I/O error whatever went wrong. Before the new copy, the file gets
-  mtime 0, so that an upload that does not arrive cannot be taken for it.
+  whatever their size and mtime, and without a checksum comparison: such a
+  copy may have failed its verification or close in place (EOS) and kept
+  the source's size and mtime when it could be neither removed nor given
+  mtime 0, which then fails it as an I/O error whatever went wrong. Before
+  the new copy, the file gets mtime 0 unless it has it, as does a file that
+  `--checksum` found to differ, so that a copy that does not arrive cannot
+  be taken for it, with or without a journal.
   An EOS upload gets such a row ("the run ended before the copy was
   confirmed") right before its close, removed once the copy is confirmed
   or replaced by its failure: a run that ends in between (killed, or on a
@@ -317,11 +333,19 @@ Modes:
   `--no-owner`, `--no-mode`, `--no-verify`, `--require-checksum`,
   `--verify-readback`, `--rewrite-links`), which the journal records.
 - `--retry-failed` processes only the recorded failures: each within its
-  parent directory, failed directories as subtree walks (rows below them are
-  covered by that walk), the top directory as a walk of the whole tree, and
-  failed deletions with `--delete`. Rows whose directory is gone from the
-  source are dropped; rows whose target directory cannot be created again
-  (when one above it is gone) are kept, and a plain run recreates it.
+  parent directory, directories as subtree walks (rows below a retried
+  entry are covered by its walk, whatever type it was recorded as), the
+  top directory as a walk of the whole tree, and failed deletions with
+  `--delete`. A retry below the top first checks that the directories
+  above it are directories on both sides, since a walk from the top would
+  replace a symlink or a file there while a run below it would follow it;
+  and it stops at an empty source with `--delete` like a plain run. Rows
+  whose directory is gone from the source, or is no directory there any
+  more, are dropped where the target lacks the entry too, and kept, as
+  failures, where it has it (a copy among them may be in doubt) until a
+  run with `--delete` removes the entry; rows whose target directory
+  cannot be created again (when one above it is gone) are kept, and a
+  plain run recreates it.
 - A journal belongs to one source, target and shard, with local paths in
   canonical form, which it records in the same transaction as it checks
   them, so that runs started together cannot both take a new journal.
@@ -329,9 +353,10 @@ Modes:
   write-ahead log is opened as immutable, since SQLite would otherwise
   leave the files of one behind), go without one that does not exist yet,
   and resume what the run would; those with `--checksum` open it for
-  writing, to record the files that differ, and create it where it does
-  not exist. A journal in the tree of the source or the target is
-  refused, as is a database that is not a journal.
+  writing and keep it up to date like a run does (failures recorded and
+  cleared, no directory finalized), and create it where it does not exist.
+  A journal in the tree of the source or the target is refused, as is a
+  database that is not a journal.
 
 ### Sharding
 
@@ -347,9 +372,9 @@ then and record it as a failure, so that their next run walks it.
 ### Reporting
 
 Counters for everything that happened (directories, files copied with
-bytes, unchanged, metadata fixed, symlinks, skipped special files, entries
-vanished from the source, deleted, skipped invalid names, failed by kind,
-retries) go to a summary at the end
+bytes, unchanged, metadata fixed, symlinks, skipped special files and
+temporaries of the source, entries vanished from the source, deleted,
+skipped invalid names, failed by kind, retries) go to a summary at the end
 and optionally to a periodic progress line. So do the times a transfer
 found no copy to make while every checker was busy ("listing-bound"),
 which shows that listing bounds the run and more `--checkers` may help. Exit status: 0 when everything succeeded, 1 when

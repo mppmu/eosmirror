@@ -24,8 +24,8 @@ client for now. See [docs/design.md](docs/design.md).
   endpoint supports it. On local targets, a copy has mtime 0 until a sync of
   its file system (every 30 s, and at the end of a run) has made it durable,
   so that one that a crash or a killed run left without its data is copied
-  again by the next run; `--no-fsync` sets mtimes at once and syncs
-  nothing. An EOS upload is done once the file it created,
+  again by the next run, whatever it compares by; `--no-fsync` sets mtimes
+  at once and syncs nothing. An EOS upload is done once the file it created,
   known by its id, is in place with the right size, mtime and checksum.
   With a journal, an upload whose run ended before that is copied again by
   the next run.
@@ -179,10 +179,11 @@ otherwise it reads files, which costs as much as copying them.
 With `--dry-run`, that is a verification that changes nothing: every file
 that differs from the source (missing on the target, of another size, or
 with another checksum) is reported, with both sizes or checksums, as a
-failure, so that the run exits with 1, and recorded in the journal, so
-that a later run with it copies those files again; the summary counts the
-files compared by checksum and those that differ. Before the source of a
-migration is retired, for example:
+failure, so that the run exits with 1, and the journal is kept up to date
+as by a run (failures recorded, and those of files that now match
+cleared), so that a later run with it copies those files again; the
+summary counts the files compared by checksum and those that differ.
+Before the source of a migration is retired, for example:
 
 ```
 eosmirror sync --journal migration.db --dry-run --checksum /data/project root://eos.example.org//eos/project

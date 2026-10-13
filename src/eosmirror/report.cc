@@ -117,6 +117,8 @@ std::string Report::summary(bool dry_run) const {
   if (stats.non_atomic_replacements.load() > 0)
     s << "  files " << would << "replaced without atomic uploads (forced by the target): "
       << stats.non_atomic_replacements.load() << "\n";
+  if (stats.source_temps.load() > 0)
+    s << "  temporaries on the source skipped: " << stats.source_temps.load() << "\n";
   if (stats.other_fs_skipped.load() > 0)
     s << "  directories on other file systems skipped (--one-file-system): "
       << stats.other_fs_skipped.load() << "\n";
