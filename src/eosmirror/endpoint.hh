@@ -35,6 +35,10 @@ struct Capabilities {
   bool can_set_mtime = true;
   // Whether symlinks exist on the endpoint.
   bool has_symlinks = true;
+  // Whether listings and removals follow symlinks that the endpoint cannot
+  // show, so that deleting through one deletes what it points to (plain
+  // XRootD servers).
+  bool follows_symlinks = false;
   // Whether symlinks have owners of their own that can be set.
   bool symlink_owner = true;
   // The checksum the endpoint computes itself for stored files (None if it

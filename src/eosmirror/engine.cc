@@ -1110,6 +1110,13 @@ struct Engine::Impl {
     if (options.preserve_owner && !target.capabilities().can_set_owner)
       return Error{ErrorKind::Permission,
                    "cannot set owners on " + target.describe() + " (use --no-owner to copy anyway)"};
+    // Deleting through a symlink there deletes what it points to.
+    if (options.delete_extra && target.capabilities().follows_symlinks &&
+        !options.target_without_symlinks)
+      return Error{ErrorKind::Unsupported,
+                   target.describe() + " cannot show symlinks, and deletes what they point to: " +
+                       "--delete there needs --target-without-symlinks, which states that it has "
+                       "none"};
     if (options.shard_count < 1 || options.shard_index < 0 ||
         options.shard_index >= options.shard_count)
       return Error{ErrorKind::Other, "invalid shard"};

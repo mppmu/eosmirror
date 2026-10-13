@@ -48,6 +48,8 @@ TEST_CASE("the sync command line maps onto the options") {
   CHECK(o.sync.dry_run);
   CHECK(o.sync.delete_extra);
   CHECK(o.sync.keep_emptied);
+  CHECK_FALSE(o.sync.target_without_symlinks);
+  CHECK(parse({"sync", "--target-without-symlinks", "a", "b"}).value().sync.target_without_symlinks);
   CHECK(o.sync.max_delete == 5);
   CHECK_FALSE(o.sync.preserve_owner);
   CHECK(o.sync.preserve_mode);

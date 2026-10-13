@@ -43,6 +43,9 @@ struct SyncOptions {
   // directory of a run never: an empty source stops the run).
   bool keep_emptied = false;
   uint64_t max_delete = UINT64_MAX;
+  // The target has no symlinks, which delete_extra needs to be told for a
+  // target that follows symlinks it cannot show.
+  bool target_without_symlinks = false;
   bool preserve_owner = true;
   bool preserve_mode = true;
   bool verify = true;  // compute and compare checksums where possible

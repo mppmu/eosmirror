@@ -305,7 +305,10 @@ Plain XRootD servers list directories with per-entry stat in one call, store
 no symlinks, report no owners, cannot set owners or mtimes, keep only the
 permission bits of modes, and compute a checksum only when configured
 (`query config chksum` tells which). Their listings and stats follow
-symlinks. The endpoint reports these as capabilities; the engine then
+symlinks, and removing a symlink removes the file it points to
+(`XrdOssUnlink.cc`, BreakLink): `--delete` on such a target, which would
+delete through symlinks it cannot see, is refused unless
+`--target-without-symlinks` states that there are none. The endpoint reports these as capabilities; the engine then
 compares files by size only, skips symlinks (counted), applies no mtimes,
 ignores owners of such a source, and detects directory cycles. A server
 ends a listing with stat information at the first entry that it cannot

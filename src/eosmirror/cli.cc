@@ -101,6 +101,10 @@ Options:
       --keep-emptied       with --delete, delete nothing in directories that are
                            empty on the source, as an unmounted file system looks
       --max-delete N       stop deleting after N entries (default unlimited)
+      --target-without-symlinks
+                           state that a plain XRootD target has no symlinks,
+                           which --delete needs there: XRootD cannot show them,
+                           and deletes what they point to
       --no-owner           do not set owners and groups
       --no-mode            do not set modes
       --no-verify          do not compute checksums
@@ -223,6 +227,7 @@ Result<CliOptions> parse_command_line(int argc, char** argv) {
   flag("--dry-run", [&] { sync.dry_run = true; });
   flag("--delete", [&] { sync.delete_extra = true; });
   flag("--keep-emptied", [&] { sync.keep_emptied = true; });
+  flag("--target-without-symlinks", [&] { sync.target_without_symlinks = true; });
   // An option that takes a count, or "unlimited" for the given value.
   auto limit = [&](const std::string& name, uint64_t& out, uint64_t unlimited) {
     value(name, [name, &out, unlimited](const std::string& v) -> Status {

@@ -163,6 +163,16 @@ sends each write once the previous one has completed and is slower over
 long distances. Runs with an EOS target and a larger window say so at the
 start.
 
+## Known limitations
+
+- Plain XRootD servers cannot show symlinks: their listings follow them,
+  and removing one removes the file it points to (XRootD's
+  `XrdOssUnlink.cc`), so that deleting a directory through a symlink
+  empties the directory it points to. `--delete` against a plain XRootD
+  target is therefore refused unless `--target-without-symlinks` states
+  that it has none. Local and EOS targets show symlinks and remove them
+  as such.
+
 ## Building
 
 Requires a C++20 compiler (gcc 11 or newer), CMake 3.20 or newer, SQLite 3

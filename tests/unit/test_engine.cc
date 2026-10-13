@@ -1150,6 +1150,31 @@ TEST_CASE("fake: targets without mtimes compare sizes, targets without symlinks 
   CHECK(r2.stats.metadata_fixed == 0);
 }
 
+TEST_CASE("fake: --delete on a target that follows symlinks it cannot show needs to be told") {
+  FakeEndpoint src, dst;
+  dst.caps.follows_symlinks = true;  // like a plain XRootD server
+  populate(src);
+  dst.add_file("extra", "x");
+  SyncOptions o = fake_options();
+  o.delete_extra = true;
+  Report r;
+  Status s = run_sync(src, dst, o, r);
+  REQUIRE_FALSE(s.ok());
+  CHECK(s.error().message.find("--target-without-symlinks") != std::string::npos);
+  CHECK(dst.get("extra"));
+  CHECK_FALSE(dst.get("f0"));
+
+  o.target_without_symlinks = true;
+  Report r2;
+  REQUIRE(run_sync(src, dst, o, r2).ok());
+  CHECK(r2.stats.deleted == 1);
+  expect_mirrored(src, dst);
+
+  // Without --delete, nothing is deleted through a symlink.
+  Report r3;
+  REQUIRE(run_sync(src, dst, fake_options(), r3).ok());
+}
+
 TEST_CASE("fake: owners of a source without owners are left alone") {
   FakeEndpoint src, dst;
   src.caps.has_owners = false;

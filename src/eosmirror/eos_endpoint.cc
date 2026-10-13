@@ -501,6 +501,7 @@ EosEndpoint::EosEndpoint(const std::string& url, EndpointUrl parts, XrdOptions o
   caps_.has_owners = true;
   caps_.can_set_mtime = true;
   caps_.has_symlinks = true;
+  caps_.follows_symlinks = false;
   caps_.symlink_owner = false;  // settled by probe_identity()
   caps_.can_set_mode = true;
   // EOS keeps the permission bits of files, and clears setuid on directories

@@ -470,6 +470,7 @@ XrdEndpoint::XrdEndpoint(const std::string& url, EndpointUrl parts, XrdOptions o
   caps_.dir_mode_bits = 0777;
   caps_.can_set_mtime = false;
   caps_.has_symlinks = false;
+  caps_.follows_symlinks = true;
   caps_.checksum = ChecksumType::None;
 }
 
