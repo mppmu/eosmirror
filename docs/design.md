@@ -599,10 +599,14 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
   another writer's) is never taken for the upload, however much it looks
   like it: the copy fails as not committed (an I/O error), is retried, and
   that file is left alone. An upload in place that does not match, or is
-  refused, is removed again, or else gets mtime 0, since it already carries
-  the size and mtime of the source and would pass for a good copy. So is
-  the upload after a close that failed, if it is in place: the storage node
-  may have committed it all the same. One that the query finds still under
+  refused, is taken away again, since it already carries the size and mtime
+  of the source and would pass for a good copy: one that replaced a file
+  gets mtime 0, and the next attempt replaces it (removing it would purge
+  the file's versions, which EOS keeps with `sys.versioning` and deletes
+  with the file, `mgm/ofs/cmds/Rm.inc`); one that replaced nothing is
+  removed. Where the one fails, the other is tried. So is the upload taken
+  away after a close that failed, if it is in place: the storage node may
+  have committed it all the same. One that the query finds still under
   its hidden name in its directory (after a close that timed out while the
   storage node was still committing it) is removed there, so that it
   cannot be committed later; one moved elsewhere is left alone. The query

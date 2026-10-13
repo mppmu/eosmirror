@@ -2,6 +2,7 @@
 #include "eosmirror/atomic_upload.hh"
 
 #include <cstdio>
+#include <optional>
 #include <utility>
 
 #include "eosmirror/log.hh"
@@ -87,11 +88,13 @@ Result<CommitInfo> AtomicUploadWriter::commit(const CommitSpec& spec) {
   return CommitInfo{verified};
 }
 
-// Removes the upload where it is, in place or still under its hidden name
-// (a close that timed out can still commit it). One in place that cannot be
-// removed gets mtime 0 instead, so that the next run copies it again. Another
-// file in place is left alone, and so is one that cannot be told apart from
-// the upload, or that was moved elsewhere.
+// Takes the upload away where it is. One that replaced a file and is in
+// place gets mtime 0, so that the next attempt replaces it again, rather
+// than being removed: EOS purges a file's versions with the file. One that
+// replaced nothing, or is still under its hidden name (a close that timed
+// out can still commit it), is removed. Where that fails, the other way is
+// tried. Another file in place is left alone, and so is one that cannot be
+// told apart from the upload, or that was moved elsewhere.
 AtomicUploadWriter::Gone AtomicUploadWriter::take_back(const CommitSpec& spec) {
   for (int round = 0;; ++round) {
     auto located = locate_();
@@ -106,28 +109,45 @@ AtomicUploadWriter::Gone AtomicUploadWriter::take_back(const CommitSpec& spec) {
       log::warn("the failed upload of ", name_, " was moved elsewhere: left alone");
       return Gone::NotInPlace;
     }
+    // A source mtime of 0 could not mark the file as not final.
+    bool markable = upload.in_place && spec.metadata.mtime != Timespec{0, 0};
+    bool keep_versions = markable && spec.replaces;
+    std::optional<Error> not_reset;
+    if (keep_versions) {
+      Status reset = reset_mtime(spec);
+      if (reset.ok()) return Gone::TakenBack;
+      not_reset = reset.error();
+    }
     RelPath at = upload.in_place ? path_ : join(parent_path(path_), upload.file.name);
     Status removed = ep_.remove(at, EntryType::File);
-    if (removed.ok()) return Gone::TakenBack;
+    if (removed.ok()) {
+      if (not_reset)
+        log::warn("removed ", name_, " after a failed upload, with its versions, since its mtime "
+                  "could not be reset: ", not_reset->describe());
+      return Gone::TakenBack;
+    }
     // Gone since, or renamed into place by a close that went on: once more.
     if (removed.error().kind == ErrorKind::NotFound) {
       if (round == 0) continue;
       return Gone::TakenBack;
     }
-    if (upload.in_place && spec.metadata.mtime != Timespec{0, 0}) {
-      Entry md = spec.metadata;
-      md.type = EntryType::File;
-      md.mtime = {0, 0};
-      Status reset = ep_.set_metadata(path_, md, MetaFields::Mtime);
+    if (markable && !keep_versions) {
+      Status reset = reset_mtime(spec);
       if (reset.ok()) return Gone::TakenBack;
-      log::error("cannot remove ", name_, " after a failed upload, nor reset its mtime: ",
-                 removed.error().describe(), "; ", reset.error().describe());
-      return Gone::Stuck;
+      not_reset = reset.error();
     }
-    log::error("cannot remove the failed upload of ", name_, " (", at,
-               "): ", removed.error().describe());
+    log::error("cannot remove the failed upload of ", name_, " (", at, "): ",
+               removed.error().describe(),
+               not_reset ? "; nor reset its mtime: " + not_reset->describe() : "");
     return Gone::Stuck;
   }
+}
+
+Status AtomicUploadWriter::reset_mtime(const CommitSpec& spec) {
+  Entry md = spec.metadata;
+  md.type = EntryType::File;
+  md.mtime = {0, 0};
+  return ep_.set_metadata(path_, md, MetaFields::Mtime);
 }
 
 Error AtomicUploadWriter::failed(Gone gone, Error e) const {

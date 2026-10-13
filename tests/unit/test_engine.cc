@@ -3181,3 +3181,45 @@ TEST_CASE("fake: an upload still under its hidden name after the close is remove
   for (const RelPath& p : dst.paths()) CHECK(p.find(".tmp-") == std::string::npos);
   expect_mirrored(src, dst);
 }
+
+TEST_CASE("fake: a failed upload that replaced a file gets mtime 0, one that replaced nothing goes") {
+  FakeEndpoint src, dst;
+  dst.atomic_uploads = true;
+  populate(src);
+  Report mirror;
+  REQUIRE(run_sync(src, dst, fake_options(), mirror).ok());
+  src.modify("f0", [](FakeEndpoint::Node& n) {
+    n.content = "root file, v2";
+    n.entry.size = n.content.size();
+    n.entry.mtime = {3100, 1};
+  });
+  src.add_file("new", "fresh", 0644, {3200, 1});
+  // Every close fails after the upload is in place, which EOS can commit
+  // all the same.
+  const int attempts = fake_options().retry.attempts;
+  for (const char* path : {"f0", "new"})
+    dst.fail("close", path, Error{ErrorKind::IO, "close failed"}, attempts);
+  Report r;
+  REQUIRE(run_sync(src, dst, fake_options(), r).ok());
+  CHECK(r.stats.failures == 2);
+  // The replacement stays, as a copy that is not final: removing it would
+  // take the file's versions on EOS with it. The new file goes.
+  REQUIRE(dst.get("f0"));
+  CHECK(dst.get("f0")->content == "root file, v2");
+  CHECK(dst.get("f0")->entry.mtime == Timespec{0, 0});
+  CHECK_FALSE(dst.get("new"));
+  CHECK(dst.count("remove") == attempts);  // "new", once per attempt
+
+  // A replacement whose mtime cannot be reset is removed after all.
+  dst.fail("close", "f0", Error{ErrorKind::IO, "close failed"}, attempts);
+  dst.fail("set_metadata", "f0", Error{ErrorKind::Permission, "locked"}, attempts);
+  Report r2;
+  REQUIRE(run_sync(src, dst, fake_options(), r2).ok());
+  CHECK(r2.stats.failures == 1);
+  CHECK_FALSE(dst.get("f0"));
+
+  Report r3;
+  REQUIRE(run_sync(src, dst, fake_options(), r3).ok());
+  CHECK(r3.stats.failures == 0);
+  expect_mirrored(src, dst);
+}

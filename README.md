@@ -27,8 +27,9 @@ client for now. See [docs/design.md](docs/design.md).
   crash or a killed run left without its data. `--no-fsync` sets mtimes at
   once and syncs nothing. An EOS upload counts as done once the file it
   created, known by its id, is in place with the right size, mtime and
-  checksum. With a journal, the next run copies again an upload whose run
-  ended before that.
+  checksum. A replacement that fails that check stays in place with mtime 0
+  until the next attempt, which keeps the file's versions on EOS. With a
+  journal, the next run copies again an upload whose run ended before that.
 - Symlinks are recreated as symlinks and never followed. Hard links are copied
   as separate files. Special files are skipped and reported.
 - Extra entries on the target are deleted only with an explicit option

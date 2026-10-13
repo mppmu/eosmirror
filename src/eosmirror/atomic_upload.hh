@@ -31,11 +31,12 @@ struct UploadFile {
 // an upload whose close failed, even later, and another writer can replace
 // the file meanwhile. Since the upload carries the source's size and mtime,
 // it would pass for a good copy. One that fails its verification, or whose
-// close failed, is therefore taken away again: removed where it is, in
-// place or still under its hidden name, or else given mtime 0. Any other
-// file in place is left alone, and so is one that cannot be told apart from
-// the upload. Owner and mode are applied once the file is confirmed, and
-// the mtime where the upload could not carry it.
+// close failed, is therefore taken away again: given mtime 0 where it
+// replaced a file (removing it would purge the file's versions on EOS),
+// removed where it replaced nothing or is still under its hidden name. Any
+// other file in place is left alone, and so is one that cannot be told
+// apart from the upload. Owner and mode are applied once the file is
+// confirmed, and the mtime where the upload could not carry it.
 class AtomicUploadWriter : public FileWriter {
  public:
   // The file that the upload created; NotFound once it is gone.
@@ -56,6 +57,8 @@ class AtomicUploadWriter : public FileWriter {
   // still to be committed, and stays.
   enum class Gone { NotInPlace, TakenBack, Stuck };
   Gone take_back(const CommitSpec& spec);
+  // Gives the file in place mtime 0, as a copy that is not final.
+  Status reset_mtime(const CommitSpec& spec);
   // The error e of a copy whose upload was taken back: an I/O error if it
   // may stay in place, so that a journal records the copy as one in doubt.
   Error failed(Gone gone, Error e) const;

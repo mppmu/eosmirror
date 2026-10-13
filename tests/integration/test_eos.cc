@@ -306,7 +306,9 @@ TEST_CASE("eos endpoint: files in a directory without checksums") {
   CHECK(ep.stat("f").value().size == content.size());
   CHECK(ep.query_checksum(ep.absolute("f")).value().type == ChecksumType::None);
 
-  // With verification required, the upload is refused and taken away again.
+  // With verification required, the upload is refused and taken away again:
+  // one that replaced a file stays with mtime 0 for the next attempt, one
+  // that replaced nothing is removed.
   spec.require_verification = true;
   auto w2 = ep.open_write("f", spec);
   REQUIRE(w2.ok());
@@ -314,7 +316,17 @@ TEST_CASE("eos endpoint: files in a directory without checksums") {
   auto refused = w2.value()->commit(spec);
   REQUIRE_FALSE(refused.ok());
   CHECK(refused.error().kind == ErrorKind::Unsupported);
-  CHECK(ep.stat("f").error().kind == ErrorKind::NotFound);
+  CHECK(must(ep.stat("f")).mtime == Timespec{0, 0});
+  spec.replaces = false;
+  auto w2b = ep.open_write("g", spec);
+  REQUIRE(w2b.ok());
+  REQUIRE(w2b.value()->write(0, bytes(content)).ok());
+  auto refused_new = w2b.value()->commit(spec);
+  REQUIRE_FALSE(refused_new.ok());
+  auto gone = ep.stat("g");
+  REQUIRE_FALSE(gone.ok());
+  CHECK(gone.error().kind == ErrorKind::NotFound);
+  spec.replaces = true;
 
   // A directory whose files get another checksum type: not compared either.
   REQUIRE(ep.mkdir("crc", 0755).ok());
