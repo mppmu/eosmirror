@@ -128,21 +128,23 @@ Status check_journal_outside(const std::string& file, const Endpoint& source,
 // Opens the journal of a run, and settles whether it resumes: only an
 // interrupted run with the same options, see RunOptions. A dry run reads
 // the journal but never changes it, and goes without one that does not
-// exist yet.
+// exist yet, except that one comparing by checksum records the files that
+// differ.
 Result<std::unique_ptr<Journal>> open_journal(const CliOptions& opts, const Endpoint& source,
                                               const Endpoint& target, SyncOptions& sync) {
   std::string shard =
       std::to_string(opts.sync.shard_index) + "/" + std::to_string(opts.sync.shard_count);
   std::error_code ec;
-  if (sync.dry_run && !std::filesystem::exists(opts.journal, ec)) {
+  bool read_only = sync.dry_run && !sync.checksum;
+  if (read_only && !std::filesystem::exists(opts.journal, ec)) {
     log::info("the journal ", opts.journal, " does not exist yet; the dry run goes without");
     sync.resume = false;
     return std::unique_ptr<Journal>();
   }
-  auto opened = sync.dry_run ? Journal::open_read_only(opts.journal, source.describe(),
-                                                       target.describe(), shard)
-                             : Journal::open(opts.journal, source.describe(), target.describe(),
-                                             shard);
+  auto opened = read_only ? Journal::open_read_only(opts.journal, source.describe(),
+                                                    target.describe(), shard)
+                          : Journal::open(opts.journal, source.describe(), target.describe(),
+                                          shard);
   if (!opened.ok()) return opened.error();
   Journal& journal = *opened.value();
   RunOptions options = result_options(opts);

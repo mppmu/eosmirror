@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <map>
 #include <thread>
 
 #include "doctest/doctest.h"
@@ -336,6 +337,12 @@ void populate(FakeEndpoint& src) {
   src.add_file("d1/f1", std::string(200000, 'x'), 0600, {3001, 1});
   src.add_file("d1/d2/f2", "deep", 0640, {3002, 1});
   src.add_symlink("d1/l", "f1", {4001, 0});
+}
+
+std::string adler_of(std::string_view data) {
+  Hasher h(ChecksumType::Adler32);
+  h.update({reinterpret_cast<const std::byte*>(data.data()), data.size()});
+  return h.finish().hex;
 }
 
 void expect_mirrored(FakeEndpoint& src, FakeEndpoint& dst) {
@@ -1398,6 +1405,99 @@ TEST_CASE("fake: files replaced where the target forces non-atomic uploads are t
   CHECK(text.find("replacing files in d1 without atomic uploads") != std::string::npos);
   CHECK(r2.summary(false).find("files replaced without atomic uploads (forced by the target): 2") !=
         std::string::npos);
+  expect_mirrored(src, dst);
+}
+
+TEST_CASE("fake: --checksum compares files of the same size by checksum") {
+  FakeEndpoint src, dst;
+  populate(src);
+  Report mirror;
+  REQUIRE(run_sync(src, dst, fake_options(), mirror).ok());
+  // Other content, the same size and mtime; the same content, another mtime.
+  dst.modify("f0", [](FakeEndpoint::Node& n) { n.content = "root fil3"; });
+  dst.modify("d1/d2/f2", [](FakeEndpoint::Node& n) { n.entry.mtime = {1, 0}; });
+  SyncOptions o = fake_options();
+  o.checksum = true;
+
+  SUBCASE("by the checksums that both listings carry") {
+    for (FakeEndpoint* ep : {&src, &dst}) {
+      ep->caps.checksum = ChecksumType::Adler32;
+      ep->lists_checksums = true;
+    }
+    Report r;
+    REQUIRE(run_sync(src, dst, o, r).ok());
+    CHECK(r.stats.checksums_compared == 3);
+    CHECK(r.stats.checksums_differ == 1);
+    CHECK(r.stats.files_copied == 1);
+    CHECK(dst.count("open_read") == 0);
+  }
+  SUBCASE("by reading files that have none") {
+    Report r;
+    REQUIRE(run_sync(src, dst, o, r).ok());
+    CHECK(r.stats.checksums_compared == 3);
+    CHECK(r.stats.checksums_differ == 1);
+    CHECK(r.stats.files_copied == 1);
+    CHECK(dst.count("open_read") == 3);
+  }
+  SUBCASE("by reading the side that has none") {
+    dst.caps.checksum = ChecksumType::Adler32;
+    dst.lists_checksums = true;
+    Report r;
+    REQUIRE(run_sync(src, dst, o, r).ok());
+    CHECK(r.stats.checksums_differ == 1);
+    CHECK(r.stats.files_copied == 1);
+    CHECK(dst.count("open_read") == 0);
+  }
+  // The file that matched got its mtime.
+  CHECK(dst.get("d1/d2/f2")->entry.mtime == src.get("d1/d2/f2")->entry.mtime);
+  expect_mirrored(src, dst);
+}
+
+TEST_CASE("fake: --dry-run --checksum verifies, and a later run repairs what differs") {
+  TempDir tmp;
+  auto journal = Journal::open(tmp.sub("j.sqlite"), "fake", "fake");
+  REQUIRE(journal.ok());
+  Journal& j = *journal.value();
+  FakeEndpoint src, dst;
+  populate(src);
+  Report mirror;
+  REQUIRE(run_sync(src, dst, fake_options(), mirror).ok());
+  dst.modify("f0", [](FakeEndpoint::Node& n) { n.content = "root fil3"; });
+  dst.erase("d1/d2/f2");
+  dst.modify("d1/f1", [](FakeEndpoint::Node& n) {
+    n.content.pop_back();
+    n.entry.size = n.content.size();
+  });
+  SyncOptions o = fake_options();
+  o.checksum = true;
+  o.dry_run = true;
+  Report r;
+  REQUIRE(run_sync(src, dst, o, r, &j).ok());
+  CHECK(r.stats.checksums_compared == 1);
+  CHECK(r.stats.checksums_differ == 1);
+  std::map<RelPath, std::string> reported;
+  for (const Failure& f : r.failures()) {
+    CHECK(f.error.kind == ErrorKind::Checksum);
+    reported[f.path] = f.error.message;
+  }
+  REQUIRE(reported.size() == 3);
+  CHECK(reported["f0"] == "differs from the source: adler32 " + adler_of("root file") +
+                              " on the source, " + adler_of("root fil3") +
+                              " on the target (9 bytes)");
+  CHECK(reported["d1/d2/f2"] == "differs from the source: missing on the target");
+  CHECK(reported["d1/f1"] ==
+        "differs from the source: 200000 bytes on the source, 199999 on the target");
+  CHECK(r.summary(true).find("compared by checksum: 1, differing: 1") != std::string::npos);
+  CHECK(dst.get("f0")->content == "root fil3");
+  CHECK(j.failures().value().size() == 3);
+
+  // A run with the journal repairs them, also without --checksum.
+  REQUIRE(j.begin_run(false).ok());
+  Report repaired;
+  REQUIRE(run_sync(src, dst, fake_options(), repaired, &j).ok());
+  REQUIRE(j.end_run(true).ok());
+  CHECK(repaired.stats.files_copied == 3);
+  CHECK(j.failures().value().empty());
   expect_mirrored(src, dst);
 }
 

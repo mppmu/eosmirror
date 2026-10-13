@@ -72,6 +72,7 @@ RunOptions result_options(const CliOptions& opts) {
   for (const auto& [from, to] : opts.sync.link_rewrites)
     rewrites += std::to_string(from.size()) + ":" + from + std::to_string(to.size()) + ":" + to;
   return {{"--size-only", yes(opts.sync.size_only)},
+          {"--checksum", yes(opts.sync.checksum)},
           {"--delete", yes(opts.sync.delete_extra)},
           {"--keep-emptied", yes(opts.sync.keep_emptied)},
           {"--one-file-system", yes(opts.sync.one_file_system)},
@@ -101,6 +102,10 @@ Options:
   -n, --dry-run            report what would be done, change nothing
       --size-only          compare files by size only, not by mtime, as targets
                            that store no mtimes need (plain XRootD)
+  -c, --checksum           compare files of the same size by checksum instead of
+                           mtime, reading files where none is stored; with
+                           --dry-run, every file that differs is a failure,
+                           recorded in the journal (a verification)
       --delete             delete entries on the target that the source lacks
       --keep-emptied       with --delete, delete nothing in directories that are
                            empty on the source, as an unmounted file system looks
@@ -236,6 +241,8 @@ Result<CliOptions> parse_command_line(int argc, char** argv) {
   flag("-n", [&] { sync.dry_run = true; });
   flag("--dry-run", [&] { sync.dry_run = true; });
   flag("--size-only", [&] { sync.size_only = true; });
+  flag("-c", [&] { sync.checksum = true; });
+  flag("--checksum", [&] { sync.checksum = true; });
   flag("--delete", [&] { sync.delete_extra = true; });
   flag("--keep-emptied", [&] { sync.keep_emptied = true; });
   flag("--target-without-symlinks", [&] { sync.target_without_symlinks = true; });
@@ -379,6 +386,8 @@ Result<CliOptions> parse_command_line(int argc, char** argv) {
   if (sync.buffer_size > (1u << 30)) return usage_error("--buffer-size must be at most 1G");
   if (sync.shard_count < 1 || sync.shard_index < 0 || sync.shard_index >= sync.shard_count)
     return usage_error("--shard K/N needs 0 <= K < N");
+  if (sync.checksum && sync.size_only)
+    return usage_error("--checksum and --size-only exclude each other");
   if (sync.keep_emptied && !sync.delete_extra)
     return usage_error("--keep-emptied needs --delete");
   if ((sync.resume || opts.retry_failed) && opts.journal.empty())

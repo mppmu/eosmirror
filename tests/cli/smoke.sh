@@ -137,6 +137,22 @@ rc=0; "$bin" sync -q "${owner_opt[@]}" --journal "$work/odd.db" "$work/odd" "$wo
 [[ $rc == 1 && -f $work/odd-copy/sub/fine ]] || fail "an entry that cannot be copied: $rc"
 "$bin" failures "$work/odd.db" 2> /dev/null | grep -q $'^directory\tsub\t' || fail "its directory not recorded"
 
+# --checksum: a file rewritten with its size and mtime is found by a dry run
+# (exit 1, recorded in the journal) and copied by the next run with it.
+mkdir -p "$work/ck/src"
+echo "same size" > "$work/ck/src/f"
+echo other > "$work/ck/src/g"
+"$bin" sync -q "${owner_opt[@]}" "$work/ck/src" "$work/ck/dst" > /dev/null || fail "copy to verify"
+echo "SAME SIZE" > "$work/ck/dst/f"
+touch -r "$work/ck/src/f" "$work/ck/dst/f"
+rc=0; "$bin" sync -n -c "${owner_opt[@]}" --journal "$work/ck.db" "$work/ck/src" "$work/ck/dst" > "$work/ck.out" 2>&1 || rc=$?
+[[ $rc == 1 ]] && grep -q 'f: differs from the source: adler32' "$work/ck.out" \
+  && grep -q 'compared by checksum: 2, differing: 1' "$work/ck.out" || fail "verification: $rc $(cat "$work/ck.out")"
+[[ $(cat "$work/ck/dst/f") == "SAME SIZE" ]] || fail "a verification changed the target"
+"$bin" sync -q "${owner_opt[@]}" --journal "$work/ck.db" --retry-failed "$work/ck/src" "$work/ck/dst" > /dev/null || fail "repair"
+[[ $(cat "$work/ck/dst/f") == "same size" ]] || fail "not repaired"
+"$bin" sync -n -c -q "${owner_opt[@]}" --journal "$work/ck.db" "$work/ck/src" "$work/ck/dst" > /dev/null || fail "verified again"
+
 # An empty or missing source does not empty the target.
 mkdir "$work/empty"
 rc=0; "$bin" sync -q "${owner_opt[@]}" --delete "$work/empty" "$work/dst" > /dev/null 2> "$work/empty.err" || rc=$?

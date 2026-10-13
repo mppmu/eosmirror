@@ -159,4 +159,21 @@ Result<CopyOutcome> copy_file(Endpoint& source, Endpoint& target, const RelPath&
   return CopyOutcome{src.size, spec.checksum, committed.value().verified || source_verified};
 }
 
+Result<Checksum> read_checksum(Endpoint& ep, const RelPath& path, uint64_t size, ChecksumType type,
+                               BufferPool& pool, const Cancellation& cancel) {
+  auto opened = ep.open_read(path);
+  if (!opened.ok()) return opened.error();
+  FileReader& reader = *opened.value();
+  Hasher hasher(type);
+  for (uint64_t offset = 0; offset < size;) {
+    if (cancel.requested()) return Error{ErrorKind::Cancelled, "reading " + path + " cancelled"};
+    auto chunk = reader.read_chunk(offset, size, pool);
+    if (!chunk.ok()) return chunk.error();
+    if (chunk.value().size == 0) return Error{ErrorKind::Changed, path + " shrank while it was read"};
+    hasher.update(chunk.value().data());
+    offset += chunk.value().size;
+  }
+  return hasher.finish();
+}
+
 }  // namespace eosmirror

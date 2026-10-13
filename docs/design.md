@@ -14,6 +14,18 @@ A run walks the source tree directory by directory and makes the target match:
   `--size-only` compares sizes alone, as a target that stores no mtimes
   needs (a run against one refuses to start without it); where the target
   stores mtimes, those of files that match are fixed then, as rsync does.
+  `--checksum` compares files of the same size by checksum instead of
+  mtime, as `rsync -c`, which a target without mtimes takes as well: where
+  both listings carry stored checksums of one type (EOS), the checker
+  decides at once; otherwise a transfer asks the endpoints for stored ones
+  (a checksum query on plain XRootD servers that compute them) and reads
+  the files that have none of the type taken (the target's, else the
+  source's, else adler32). A copy in doubt is compared like any other,
+  rather than copied. With `--dry-run`, every file that a run would copy
+  is a failure of the kind "checksum mismatch", with both sizes or
+  checksums, which the journal records even then (the only change a dry
+  run makes to it, which is therefore opened for writing), so that a later
+  run with it copies the file again whatever its size and mtime.
 - A symlink is recreated when it is missing or points elsewhere, and its
   owner and mtime are fixed when they differ. Symlinks are never followed.
 - A directory is created when missing; its owner, mode and mtime are set once
@@ -313,8 +325,10 @@ Modes:
   Dry runs open it read-only and change nothing (a journal without a
   write-ahead log is opened as immutable, since SQLite would otherwise
   leave the files of one behind), go without one that does not exist yet,
-  and resume what the run would. A journal in the tree of the source or
-  the target is refused, as is a database that is not a journal.
+  and resume what the run would; those with `--checksum` open it for
+  writing, to record the files that differ, and create it where it does
+  not exist. A journal in the tree of the source or the target is
+  refused, as is a database that is not a journal.
 
 ### Sharding
 
@@ -685,4 +699,4 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
 ## Not in scope (for now)
 
 Extended attributes, ACLs, hard links (copied as separate files), delta or
-partial updates, checksum-based change detection, id mapping between sites.
+partial updates, id mapping between sites.

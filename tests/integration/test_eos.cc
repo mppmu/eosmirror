@@ -25,6 +25,7 @@
 #include "eosmirror/endpoints.hh"
 #include "eosmirror/engine.hh"
 #include "eosmirror/eos_endpoint.hh"
+#include "eosmirror/journal.hh"
 #include "eosmirror/posix_endpoint.hh"
 #include "eosmirror/selftest.hh"
 #include "request_log.hh"
@@ -675,6 +676,63 @@ TEST_CASE("FS to EOS: files replaced where EOS forces uploads to be non-atomic")
   CHECK(r2.stats.failures == 0);
   CHECK(replaced.text().find("replacing files in d without atomic uploads") != std::string::npos);
   CHECK(get(ep, "d/f") == "the second version");
+}
+
+TEST_CASE("FS to EOS: --checksum finds a file changed in place, and repairs it") {
+  if (!base_url()) return;
+  TempDir tmp;
+  tmp.write_file("src/a", pattern(5000));
+  tmp.write_file("src/b", pattern(7000));
+  PosixEndpoint src(tmp.sub("src"));
+  RemoteDir dir("verified");
+  EosEndpoint& ep = *dir.endpoint;
+  SyncOptions options = test_options();
+  options.preserve_owner = false;
+  Cancellation cancel;
+  Report up;
+  {
+    Engine upload(src, ep, options, up, nullptr, cancel);
+    REQUIRE(upload.run().ok());
+  }
+  REQUIRE(up.stats.files_copied == 2);
+
+  // Rewritten with its size and mtime: only its checksum tells.
+  struct stat before{};
+  REQUIRE(::stat(tmp.sub("src/a").c_str(), &before) == 0);
+  std::string changed = pattern(5000);
+  changed[100] = '#';
+  tmp.write_file("src/a", changed);
+  struct timespec times[2] = {before.st_mtim, before.st_mtim};
+  REQUIRE(utimensat(AT_FDCWD, tmp.sub("src/a").c_str(), times, 0) == 0);
+
+  auto journal = Journal::open(tmp.sub("j.sqlite"), src.describe(), ep.describe());
+  REQUIRE(journal.ok());
+  SyncOptions verify = options;
+  verify.checksum = true;
+  verify.dry_run = true;
+  Report r;
+  {
+    Engine engine(src, ep, verify, r, journal.value().get(), cancel);
+    REQUIRE(engine.run().ok());
+  }
+  CHECK(r.stats.checksums_compared == 2);
+  CHECK(r.stats.checksums_differ == 1);
+  REQUIRE(r.failures().size() == 1);
+  CHECK(r.failures()[0].path == "a");
+  CHECK(r.failures()[0].error.kind == ErrorKind::Checksum);
+  CHECK(journal.value()->failures().value().size() == 1);
+  CHECK(get(ep, "a") == pattern(5000));
+
+  SyncOptions repair = options;
+  repair.checksum = true;
+  Report r2;
+  {
+    Engine engine(src, ep, repair, r2, nullptr, cancel);
+    REQUIRE(engine.run().ok());
+  }
+  CHECK(r2.stats.files_copied == 1);
+  CHECK(r2.stats.failures == 0);
+  CHECK(get(ep, "a") == changed);
 }
 
 TEST_CASE("FS to EOS: an upload is confirmed by one query of the MGM") {

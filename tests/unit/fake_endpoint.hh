@@ -80,6 +80,9 @@ class FakeEndpoint : public eosmirror::Endpoint {
   // Directories whose listings say that they replace files at the open, like
   // EOS directories that force uploads to be non-atomic.
   std::set<RelPath> replacing_at_open;
+  // Listings carry the checksums of files, of the type of `caps.checksum`,
+  // like EOS's.
+  bool lists_checksums = false;
 
   // ---- test setup -----------------------------------------------------------
 
@@ -190,10 +193,13 @@ class FakeEndpoint : public eosmirror::Endpoint {
     result.replaces_at_open = replacing_at_open.count(dir) > 0;
     for (const auto& [p, n] : nodes_) {
       if (p.empty() || parent_of(p) != dir || unlisted.count(p)) continue;
-      if (unlistable.count(p))
+      if (unlistable.count(p)) {
         ++result.skipped;
-      else
+      } else {
         result.entries.push_back(n.entry);
+        if (lists_checksums && n.entry.type == eosmirror::EntryType::File)
+          result.entries.back().checksum = checksum_of(n.content);
+      }
     }
     return result;
   }
@@ -396,13 +402,16 @@ class FakeEndpoint : public eosmirror::Endpoint {
     auto it = nodes_.find(path);
     if (it == nodes_.end() || it->second.entry.id != id) return not_found(path);
     Entry e = it->second.entry;
-    if (caps.checksum != eosmirror::ChecksumType::None) {
-      eosmirror::Hasher h(caps.checksum);
-      const std::string& c = it->second.content;
-      h.update({reinterpret_cast<const std::byte*>(c.data()), c.size()});
-      e.checksum = h.finish();
-    }
+    e.checksum = checksum_of(it->second.content);
     return e;
+  }
+
+  // The checksum of the type of `caps.checksum`; none without.
+  eosmirror::Checksum checksum_of(const std::string& content) const {
+    if (caps.checksum == eosmirror::ChecksumType::None) return {};
+    eosmirror::Hasher h(caps.checksum);
+    h.update({reinterpret_cast<const std::byte*>(content.data()), content.size()});
+    return h.finish();
   }
 
   Entry base(const RelPath& path, eosmirror::EntryType type, eosmirror::ModeBits mode,

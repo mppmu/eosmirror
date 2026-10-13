@@ -52,6 +52,10 @@ TEST_CASE("the sync command line maps onto the options") {
   CHECK_FALSE(o.sync.size_only);
   CHECK_FALSE(o.sync.one_file_system);
   CHECK(o.endpoints.posix.sync);
+  CHECK_FALSE(o.sync.checksum);
+  CHECK(parse({"sync", "-c", "a", "b"}).value().sync.checksum);
+  CHECK(parse({"sync", "--checksum", "a", "b"}).value().sync.checksum);
+  CHECK_FALSE(parse({"sync", "--checksum", "--size-only", "a", "b"}).ok());
   CHECK_FALSE(parse({"sync", "--no-fsync", "a", "b"}).value().endpoints.posix.sync);
   CHECK_FALSE(parse({"sync", "--fsync", "a", "b"}).ok());
   CHECK(parse({"sync", "-x", "a", "b"}).value().sync.one_file_system);

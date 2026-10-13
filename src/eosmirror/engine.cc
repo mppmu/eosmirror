@@ -59,6 +59,9 @@ struct CopyJob {
   std::shared_ptr<DirNode> dir;
   Entry source;
   bool replaces = true;  // the target had a file of that name when listed
+  // The target's file of the source's size, to compare by checksum before
+  // copying (--checksum).
+  std::optional<Entry> compare;
 };
 
 // Limits how many transfers run at once; the limit can change while
@@ -410,6 +413,7 @@ struct Engine::Impl {
   // The metadata fields of the target entry that differ from the source.
   MetaFields differences(const Entry& src, const Entry& dst) const {
     MetaFields fields = MetaFields::None;
+    bool by_size = options.size_only || options.checksum;
     bool owner_matters =
         options.preserve_owner && (src.type != EntryType::Symlink || symlink_owner);
     if (owner_matters && (src.uid != dst.uid || src.gid != dst.gid))
@@ -421,10 +425,9 @@ struct Engine::Impl {
     // reapplied afterwards.
     if (mode_matters && has(fields, MetaFields::Owner) && (src.mode & 06000))
       fields = fields | MetaFields::Mode;
-    // The mtime of a file that differs decides a copy, unless comparing by
-    // size alone.
-    if (use_mtimes && (src.type != EntryType::File || options.size_only) &&
-        !same_mtime(src.mtime, dst.mtime))
+    // The mtime of a file that differs decides a copy, unless files are
+    // compared otherwise.
+    if (use_mtimes && (src.type != EntryType::File || by_size) && !same_mtime(src.mtime, dst.mtime))
       fields = fields | MetaFields::Mtime;
     return fields;
   }
@@ -844,30 +847,92 @@ struct Engine::Impl {
       if (!resolve_conflict(node, path, *existing, EntryType::File)) return;
       existing = nullptr;
     }
-    bool in_doubt = existing && copy_in_doubt(path);
-    if (existing && !in_doubt && existing->size == e.size &&
-        (options.size_only || same_mtime(existing->mtime, e.mtime))) {
-      stats.files_unchanged.fetch_add(1);
-      MetaFields fields = differences(e, *existing);
-      if (!apply_metadata(path, e, fields)) return;
-      if (fields != MetaFields::None) stats.metadata_fixed.fetch_add(1);
-      succeeded(path);
-      return;
+    CopyJob job{node, e, existing != nullptr, std::nullopt};
+    if (existing && existing->size == e.size) {
+      if (options.checksum) {
+        // Stored checksums of one type decide at once, a transfer reads the
+        // files for the others. A copy in doubt is compared all the same.
+        if (e.checksum.type == ChecksumType::None || e.checksum.type != existing->checksum.type) {
+          job.compare = *existing;
+          queue(std::move(job));
+          return;
+        }
+        stats.checksums_compared.fetch_add(1);
+        if (e.checksum == existing->checksum) {
+          unchanged(path, e, *existing);
+          return;
+        }
+        stats.checksums_differ.fetch_add(1);
+        if (!copy_differing(job, *existing, e.checksum, existing->checksum)) return;
+      } else if (!copy_in_doubt(path) &&
+                 (options.size_only || same_mtime(existing->mtime, e.mtime))) {
+        unchanged(path, e, *existing);
+        return;
+      } else if (!prepare_copy(job, existing)) {
+        return;
+      }
+    } else {
+      if (options.dry_run && options.checksum)
+        differs(path, existing ? std::to_string(e.size) + " bytes on the source, " +
+                                     std::to_string(existing->size) + " on the target"
+                               : "missing on the target");
+      if (!prepare_copy(job, existing)) return;
     }
-    ensure_writable(node);
-    if (in_doubt && !invalidate_in_doubt(path, e)) return;
-    if (existing && node->replaces_at_open && !node->replacing_warned.exchange(true))
-      log::warn("replacing files in ", node->path.empty() ? "." : node->path,
+    queue(std::move(job));
+  }
+
+  // A file that matches, whose metadata is fixed where it differs.
+  void unchanged(const RelPath& path, const Entry& e, const Entry& existing) {
+    stats.files_unchanged.fetch_add(1);
+    MetaFields fields = differences(e, existing);
+    if (!apply_metadata(path, e, fields)) return;
+    if (fields != MetaFields::None) stats.metadata_fixed.fetch_add(1);
+    succeeded(path);
+  }
+
+  // A file to copy where its checksum on the target differs: in a dry run a
+  // failure (as --checksum verifies), else prepared for its copy. Whether it
+  // is to be copied.
+  bool copy_differing(const CopyJob& job, const Entry& existing, const Checksum& on_source,
+                      const Checksum& on_target) {
+    RelPath path = join(job.dir->path, job.source.name);
+    if (options.dry_run)
+      differs(path, std::string(to_string(on_source.type)) + " " + on_source.hex +
+                        " on the source, " + on_target.hex + " on the target (" +
+                        std::to_string(job.source.size) + " bytes)");
+    return prepare_copy(job, &existing);
+  }
+
+  // A file that differs from the source in a dry run that compares by
+  // checksum: a failure, which the journal records (also in a dry run) so
+  // that a run copies it again.
+  void differs(const RelPath& path, const std::string& how) {
+    Failure f{path, EntryType::File, Error{ErrorKind::Checksum, "differs from the source: " + how}};
+    if (journal) journal_write(journal->record_failure(f));
+    report.add_failure(std::move(f));
+  }
+
+  // Before a copy is queued or made. Whether it is to be made.
+  bool prepare_copy(const CopyJob& job, const Entry* existing) {
+    RelPath path = join(job.dir->path, job.source.name);
+    ensure_writable(job.dir);
+    if (existing && copy_in_doubt(path) && !invalidate_in_doubt(path, job.source)) return false;
+    if (existing && job.dir->replaces_at_open && !job.dir->replacing_warned.exchange(true))
+      log::warn("replacing files in ", job.dir->path.empty() ? "." : job.dir->path,
                 " without atomic uploads, which the target forces to be non-atomic there: a "
                 "failed replacement leaves no file");
+    return true;
+  }
+
+  void queue(CopyJob job) {
+    std::shared_ptr<DirNode> node = job.dir;
     node->pending.fetch_add(1);
     stats.queued_copies.fetch_add(1);
-    if (!copies.push(CopyJob{node, e, existing != nullptr})) {
+    if (!copies.push(std::move(job))) {
       stats.queued_copies.fetch_sub(1);
       entry_done(node);
     }
   }
-
 
   // Gives a file whose last copy is in doubt mtime 0 before it is copied
   // again, so that an upload that does not arrive (EOS confirms commits by
@@ -1075,7 +1140,56 @@ struct Engine::Impl {
     }
   }
 
+  // Compares a file of the source's size on the target by checksum: by the
+  // ones stored on both sides where they are of a type, else by the type
+  // that the target stores (or the source, or adler32), computed by reading
+  // the files that store none of it. Whether it differs and is to be copied;
+  // one that matches is unchanged.
+  bool differs_by_checksum(const CopyJob& job, BufferPool& pool) {
+    RelPath path = join(job.dir->path, job.source.name);
+    const Entry& existing = *job.compare;
+    auto on_source = retry([&] { return source.stored_checksum(path, job.source); });
+    if (!on_source.ok()) return compare_failed(path, on_source.error(), true);
+    auto on_target = retry([&] { return target.stored_checksum(path, existing); });
+    if (!on_target.ok()) return compare_failed(path, on_target.error(), false);
+    ChecksumType type = on_target.value().type;
+    if (type == ChecksumType::None) type = on_source.value().type;
+    if (type == ChecksumType::None) type = ChecksumType::Adler32;
+    auto of = [&](Endpoint& ep, const Checksum& stored) -> Result<Checksum> {
+      if (stored.type == type) return stored;
+      return retry([&] { return read_checksum(ep, path, job.source.size, type, pool, cancel); });
+    };
+    auto s = of(source, on_source.value());
+    if (!s.ok()) return compare_failed(path, s.error(), true);
+    auto d = of(target, on_target.value());
+    if (!d.ok()) return compare_failed(path, d.error(), false);
+    stats.checksums_compared.fetch_add(1);
+    if (s.value() == d.value()) {
+      unchanged(path, job.source, existing);
+      return false;
+    }
+    stats.checksums_differ.fetch_add(1);
+    return copy_differing(job, existing, s.value(), d.value());
+  }
+
+  // A comparison that failed. A source file that is gone has vanished, a
+  // target file that is gone is copied anew, other errors are failures.
+  // Whether the file is to be copied.
+  bool compare_failed(const RelPath& path, const Error& error, bool on_source) {
+    if (error.kind != ErrorKind::NotFound) {
+      fail(path, EntryType::File, error);
+      return false;
+    }
+    if (on_source) {
+      vanished(path, EntryType::File);
+      return false;
+    }
+    if (options.dry_run) differs(path, "missing on the target");
+    return true;
+  }
+
   void run_copy(const CopyJob& job, BufferPool& pool, TransferSlot& slot) {
+    if (job.compare && !differs_by_checksum(job, pool)) return;
     RelPath path = join(job.dir->path, job.source.name);
     job.dir->touched = true;
     bool non_atomic = job.replaces && job.dir->replaces_at_open;
@@ -1178,10 +1292,10 @@ struct Engine::Impl {
     if (options.preserve_owner && !target.capabilities().can_set_owner)
       return Error{ErrorKind::Permission,
                    "cannot set owners on " + target.describe() + " (use --no-owner to copy anyway)"};
-    if (!target.capabilities().can_set_mtime && !options.size_only)
+    if (!target.capabilities().can_set_mtime && !options.size_only && !options.checksum)
       return Error{ErrorKind::Unsupported, target.describe() +
                                                " stores no mtimes, so that files can be compared "
-                                               "by size only: use --size-only"};
+                                               "by size only: use --size-only (or --checksum)"};
     // Deleting through a symlink there deletes what it points to.
     if (options.delete_extra && target.capabilities().follows_symlinks &&
         !options.target_without_symlinks)

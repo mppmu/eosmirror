@@ -156,6 +156,30 @@ overlapping) or its journal failed, 4 when it stopped
 after too many failures in a row (try again later with `--resume`) and 130
 when interrupted.
 
+## Verifying a mirror
+
+`--checksum` (`-c`) compares files of the same size by checksum instead
+of mtime, as `rsync -c` does: by the checksums that both sides store where
+they are of one type (EOS listings carry Adler-32; plain XRootD servers
+may answer checksum queries), else by reading the files that store none
+(Adler-32, or the type that the other side stores). Files that match get
+their mtime fixed where it differs, files that differ are copied. Where
+the listings carry the checksums, this costs no requests beyond them;
+otherwise it reads files, which costs as much as copying them.
+
+With `--dry-run`, that is a verification that changes nothing: every file
+that differs from the source (missing on the target, of another size, or
+with another checksum) is reported, with both sizes or checksums, as a
+failure, so that the run exits with 1, and recorded in the journal, so
+that a later run with it copies those files again; the summary counts the
+files compared by checksum and those that differ. Before the source of a
+migration is retired, for example:
+
+```
+eosmirror sync --journal migration.db --dry-run --checksum /data/project root://eos.example.org//eos/project
+eosmirror sync --journal migration.db --retry-failed /data/project root://eos.example.org//eos/project
+```
+
 ## Pipelined writes and erasure coding
 
 Each file is written with up to `--write-window` writes of `--buffer-size`

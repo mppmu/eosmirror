@@ -57,4 +57,9 @@ Result<CopyOutcome> copy_file(Endpoint& source, Endpoint& target, const RelPath&
                               const Entry& listed, const CopyOptions& options, BufferPool& pool,
                               const Cancellation& cancel);
 
+// The checksum of the given type of a file of the given size on an
+// endpoint, computed by reading it in chunks of the pool's buffer size.
+Result<Checksum> read_checksum(Endpoint& ep, const RelPath& path, uint64_t size, ChecksumType type,
+                               BufferPool& pool, const Cancellation& cancel);
+
 }  // namespace eosmirror

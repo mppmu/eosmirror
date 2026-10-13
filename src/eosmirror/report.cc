@@ -111,6 +111,9 @@ std::string Report::summary(bool dry_run) const {
   if (stats.incomplete_dirs.load() > 0)
     s << "  directories with entries that could not be listed, whose target entries were kept: "
       << stats.incomplete_dirs.load() << "\n";
+  if (stats.checksums_compared.load() > 0)
+    s << "  files of the same size compared by checksum: " << stats.checksums_compared.load()
+      << ", differing: " << stats.checksums_differ.load() << "\n";
   if (stats.non_atomic_replacements.load() > 0)
     s << "  files " << would << "replaced without atomic uploads (forced by the target): "
       << stats.non_atomic_replacements.load() << "\n";

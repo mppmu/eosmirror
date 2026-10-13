@@ -44,6 +44,10 @@ struct SyncOptions {
   // Compare files by size alone, not by mtime, as a target that stores no
   // mtimes needs; mtimes are still set where the target stores them.
   bool size_only = false;
+  // Compare files of the same size by checksum instead of mtime: stored
+  // ones where both sides have one of a type, else computed by reading. With
+  // dry_run, each file that differs is a failure (a verification).
+  bool checksum = false;
   bool delete_extra = false;
   // Keep the extras of directories that are empty on the source but not on
   // the target, which delete_extra deletes like any other (the top
