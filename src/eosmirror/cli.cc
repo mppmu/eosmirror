@@ -115,7 +115,10 @@ Options:
       --require-checksum   fail copies that neither the target nor the source can
                            verify by checksum
       --verify-readback    read files on local targets back to verify them
-      --fsync              fsync files on local targets before renaming them
+      --no-fsync           give copies on local targets their mtimes at once,
+                           without syncing; by default they have mtime 0 until a
+                           sync of their file system (every 30 s and at the end)
+                           has made them durable
       --rewrite-links A=B  rewrite symlink targets starting with A to start with B
   -x, --one-file-system    skip directories of a local source that are on other
                            file systems than SOURCE, which are kept on the target
@@ -259,7 +262,7 @@ Result<CliOptions> parse_command_line(int argc, char** argv) {
   flag("--no-verify", [&] { sync.verify = false; });
   flag("--require-checksum", [&] { sync.require_checksum = true; });
   flag("--verify-readback", [&] { opts.endpoints.posix.verify_readback = true; });
-  flag("--fsync", [&] { opts.endpoints.posix.fsync = true; });
+  flag("--no-fsync", [&] { opts.endpoints.posix.sync = false; });
   value("--rewrite-links", [&](const std::string& v) -> Status {
     auto eq = v.find('=');
     if (eq == std::string::npos || eq == 0) return usage_error("--rewrite-links expects FROM=TO");

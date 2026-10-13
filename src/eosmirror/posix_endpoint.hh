@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -21,15 +22,22 @@ namespace eosmirror {
 struct PosixOptions {
   // Read every written file back and compare its checksum before the rename.
   bool verify_readback = false;
-  // fsync files before the rename.
-  bool fsync = false;
+  // Make copies durable without waiting for each: a copy is renamed into
+  // place with mtime 0, flush() syncs the file systems that copies went to
+  // (syncfs), and the copies renamed before then get their mtimes. Without,
+  // copies get their mtimes before the rename, and nothing is synced.
+  bool sync = true;
   // The mode of copied files when modes are not preserved (0666 & ~umask).
   ModeBits default_mode = 0644;
 };
 
+class DeferredMtimes;
+
 class PosixEndpoint : public Endpoint {
  public:
   explicit PosixEndpoint(std::string root, PosixOptions options = PosixOptions());
+  // Flushes what is left.
+  ~PosixEndpoint() override;
 
   std::string describe() const override { return root_; }
   Location location() const override { return {"", root_}; }
@@ -51,6 +59,8 @@ class PosixEndpoint : public Endpoint {
   Result<std::unique_ptr<FileReader>> open_read(const RelPath& path) override;
   Result<std::unique_ptr<FileWriter>> open_write(const RelPath& path,
                                                  const CommitSpec& spec) override;
+  // Syncs the file systems of the copies so far and gives them their mtimes.
+  Status flush() override;
 
   // The absolute path of a relative one.
   std::string absolute(const RelPath& path) const;
@@ -62,6 +72,7 @@ class PosixEndpoint : public Endpoint {
   std::atomic<int32_t> mtime_resolution_{1};
   mutable std::once_flag device_once_;
   mutable std::string device_;  // of the root, as in directory ids
+  std::unique_ptr<DeferredMtimes> deferred_;  // with options_.sync
 };
 
 // The type of the file system that a path is on, from a mount table in the

@@ -2,7 +2,9 @@
 # Crash consistency: syncs of a generated local tree are killed with SIGKILL
 # at random points several times and then run until one completes, with the
 # journal, --resume and --delete as an operator would run them. The copy
-# must then equal the source in content and metadata. Several rounds change
+# must then equal the source in content and metadata. Killed runs leave the
+# copies they made since their last sync of the file system with mtime 0,
+# which the next run copies again. Several rounds change
 # the source in between (files rewritten with and without another size,
 # deleted, added, given other modes, replaced by directories). The seed
 # (printed; EOSMIRROR_SEED or the second argument) reproduces the trees and
@@ -111,6 +113,7 @@ describe() {
 args=(sync -q "${owner_opt[@]}" --journal "$work/journal.db" --resume --delete
   --checkers 4 --transfers 8 --buffer-size 64k "$src" "$dst")
 total_kills=0
+provisional=0
 # Kills fall within the time a run takes (ms): that of the last complete
 # one, but at least a quarter of the longest, since a round changes a
 # quarter of the files and the last complete run may only have finished
@@ -140,6 +143,9 @@ for ((round = 0; round < rounds; round++)); do
     fi
     rc=0
     wait "$pid" 2> /dev/null || rc=$?
+    if ((rc == 137)); then
+      provisional=$((provisional + $(find "$dst" -type f ! -name '.*.eosmirror-*' -printf '%T@\n' 2> /dev/null | grep -c '^0\.' || true)))
+    fi
     if ((rc == 0)); then
       duration=$(( ($(date +%s%N) - started) / 1000000 + 1 ))
       ((duration > longest)) && longest=$duration
@@ -156,9 +162,11 @@ for ((round = 0; round < rounds; round++)); do
     || fail "content differs: $(head -20 "$work/content.diff")"
 done
 temporaries=$(find "$dst" -name '.*.eosmirror-*' | wc -l)
-echo "$rounds rounds, $total_kills runs killed, $temporaries temporaries of killed runs left"
-# Those show that kills hit copies under way.
+echo "$rounds rounds, $total_kills runs killed, $temporaries temporaries of killed runs left," \
+  "$provisional copies with mtime 0 after them"
+# Those show that kills hit copies under way, and copies not yet synced.
 ((temporaries > 0)) || fail "no run was killed while it copied"
+((provisional > 0)) || fail "no killed run left a copy with mtime 0"
 
 "$bin" sync "${owner_opt[@]}" "$src" "$dst" > "$work/rerun.out" 2> "$work/rerun.err" \
   || fail "a further run failed: $(cat "$work/rerun.err")"

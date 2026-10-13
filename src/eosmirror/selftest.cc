@@ -123,6 +123,9 @@ class Selftest {
     else
       skip("verify the stored checksum", "the target computes no checksum to compare with");
 
+    // As a run ends, before the metadata is final.
+    if (Status flushed = target_.flush(); !flushed.ok())
+      fail("make the file durable", flushed.error().describe());
     auto st = target_.stat(file_);
     if (!check("stat the file", st.ok() ? Status() : Status(st.error()))) return;
     if (st.value().size != content.size())

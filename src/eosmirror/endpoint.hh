@@ -178,6 +178,11 @@ class Endpoint {
   // its root exists. Sources and dry runs are never probed.
   virtual void probe_target() {}
 
+  // Makes the copies written so far durable and final where the endpoint
+  // defers that (local targets, see PosixOptions::sync); a run calls it
+  // once its transfers have ended.
+  virtual Status flush() { return {}; }
+
   // Stats an entry without following symlinks. The result's name is the
   // last path component.
   virtual Result<Entry> stat(const RelPath& path) = 0;

@@ -137,7 +137,10 @@ TEST_CASE("posix writer commits atomically with metadata") {
   auto st = ep.stat("out.bin");
   REQUIRE(st.ok());
   CHECK(st.value().mode == 0600);
-  CHECK(st.value().mtime == Timespec{1600000000, 42});
+  // The mtime once a sync has made the copy durable.
+  CHECK(st.value().mtime == Timespec{0, 0});
+  REQUIRE(ep.flush().ok());
+  CHECK(ep.stat("out.bin").value().mtime == Timespec{1600000000, 42});
   CHECK(ep.list("").value().entries.size() == 1);  // the temporary is gone
 
   SUBCASE("a size mismatch is rejected and leaves no trace") {
@@ -175,6 +178,45 @@ TEST_CASE("posix writer commits atomically with metadata") {
     REQUIRE(w.value()->commit(spec).ok());
     CHECK(tmp.read_file("out.bin") == "HELLO WORLD");
   }
+}
+
+TEST_CASE("posix copies get their mtimes once a sync has made them durable") {
+  TempDir tmp;
+  CommitSpec spec;
+  spec.size = 4;
+  spec.fields = MetaFields::Mode | MetaFields::Mtime;
+  spec.metadata.mode = 0640;
+  spec.metadata.mtime = {1600000000, 7};
+  auto copy = [&](PosixEndpoint& ep, const RelPath& path) {
+    auto w = ep.open_write(path, spec);
+    REQUIRE(w.ok());
+    REQUIRE(w.value()->write(0, bytes("data")).ok());
+    REQUIRE(w.value()->commit(spec).ok());
+    return ep.stat(path).value().mtime;
+  };
+
+  PosixEndpoint ep(tmp.path());
+  CHECK(copy(ep, "a") == Timespec{0, 0});
+  CHECK(ep.stat("a").value().mode == 0640);
+  REQUIRE(ep.flush().ok());
+  CHECK(ep.stat("a").value().mtime == spec.metadata.mtime);
+  // A copy after a flush waits for the next.
+  CHECK(copy(ep, "a") == Timespec{0, 0});
+  REQUIRE(ep.flush().ok());
+  CHECK(ep.stat("a").value().mtime == spec.metadata.mtime);
+
+  // Copies left when the endpoint goes get theirs too.
+  {
+    PosixEndpoint once(tmp.path());
+    CHECK(copy(once, "b") == Timespec{0, 0});
+  }
+  CHECK(PosixEndpoint(tmp.path()).stat("b").value().mtime == spec.metadata.mtime);
+
+  // Without syncs, at once.
+  PosixOptions unsynced;
+  unsynced.sync = false;
+  PosixEndpoint plain(tmp.path(), unsynced);
+  CHECK(copy(plain, "c") == spec.metadata.mtime);
 }
 
 TEST_CASE("posix readback verification catches corruption") {

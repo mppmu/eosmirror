@@ -13,10 +13,107 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <mutex>
+#include <optional>
+#include <thread>
 #include <vector>
 
+#include "eosmirror/log.hh"
+
 namespace eosmirror {
+
+// Copies renamed into place with mtime 0, which get their mtimes once a sync
+// of their file system has followed the rename, by flush(). Adding a copy
+// never waits for a sync.
+class DeferredMtimes {
+ public:
+  ~DeferredMtimes() {
+    if (Status s = flush(); !s.ok()) log::warn(s.error().describe());
+  }
+
+  // A copy renamed into place at path, on the file system of device dev.
+  void add(std::string path, Timespec mtime, dev_t dev) {
+    std::lock_guard lock(mutex_);
+    pending_.push_back({std::move(path), mtime, dev});
+  }
+
+  // Syncs the file systems of the copies added so far, each through the
+  // directory of one of them, and gives those that were synced their mtimes.
+  // Copies whose sync or mtime failed keep mtime 0, so that the next run
+  // copies them again.
+  Status flush() {
+    std::lock_guard flush_lock(flush_mutex_);
+    std::vector<Copy> batch;
+    {
+      std::lock_guard lock(mutex_);
+      batch.swap(pending_);
+    }
+    std::map<dev_t, bool> synced;
+    Outcome outcome;
+    for (const Copy& c : batch) {
+      auto [it, added] = synced.emplace(c.dev, false);
+      if (!added) continue;
+      std::string dir = c.path.substr(0, c.path.rfind('/'));
+      int fd = open(dir.empty() ? "/" : dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+      it->second = fd >= 0 && syncfs(fd) == 0;
+      if (!it->second && !outcome.first)
+        outcome.first = errno_error(errno, "sync the file system of " + dir);
+      if (fd >= 0) close(fd);
+    }
+    std::erase_if(batch, [&](const Copy& c) {
+      if (synced[c.dev]) return false;
+      ++outcome.failed;
+      return true;
+    });
+    // In several threads where there are many: a run waits for its last
+    // flush.
+    size_t workers = std::min<size_t>(8, (batch.size() + 999) / 1000);
+    std::vector<Outcome> outcomes(workers);
+    std::vector<std::thread> threads;
+    for (size_t w = 1; w < workers; ++w)
+      threads.emplace_back([&, w] { apply(batch, w, workers, outcomes[w]); });
+    if (workers > 0) apply(batch, 0, workers, outcomes[0]);
+    for (auto& t : threads) t.join();
+    for (const Outcome& o : outcomes) {
+      if (!outcome.first) outcome.first = o.first;
+      outcome.failed += o.failed;
+    }
+    if (!outcome.first) return {};
+    Error e = *outcome.first;
+    e.message = e.describe() + ": " + std::to_string(outcome.failed) + " copies keep mtime 0";
+    e.errnum = 0;
+    return e;
+  }
+
+ private:
+  struct Copy {
+    std::string path;
+    Timespec mtime;
+    dev_t dev;
+  };
+  // Of giving mtimes: the first error, and the copies that keep mtime 0.
+  struct Outcome {
+    std::optional<Error> first;
+    size_t failed = 0;
+  };
+
+  // Gives every n-th copy from the k-th on its mtime.
+  static void apply(const std::vector<Copy>& batch, size_t k, size_t n, Outcome& outcome) {
+    for (size_t i = k; i < batch.size(); i += n) {
+      const Copy& c = batch[i];
+      struct timespec times[2] = {{0, UTIME_OMIT}, {c.mtime.sec, c.mtime.nsec}};
+      if (utimensat(AT_FDCWD, c.path.c_str(), times, AT_SYMLINK_NOFOLLOW) == 0 || errno == ENOENT)
+        continue;
+      if (!outcome.first) outcome.first = errno_error(errno, "utimes " + c.path);
+      ++outcome.failed;
+    }
+  }
+
+  std::mutex mutex_;  // for pending_
+  std::vector<Copy> pending_;
+  std::mutex flush_mutex_;  // one flush at a time
+};
 
 namespace {
 
@@ -117,8 +214,14 @@ class PosixReader : public FileReader {
 
 class PosixWriter : public FileWriter {
  public:
-  PosixWriter(int fd, std::string temp, std::string final_path, PosixOptions options)
-      : fd_(fd), temp_(std::move(temp)), final_(std::move(final_path)), options_(options) {}
+  // deferred: where copies get their mtimes after a sync, if at all.
+  PosixWriter(int fd, std::string temp, std::string final_path, PosixOptions options,
+              DeferredMtimes* deferred)
+      : fd_(fd),
+        temp_(std::move(temp)),
+        final_(std::move(final_path)),
+        options_(options),
+        deferred_(deferred) {}
 
   ~PosixWriter() override {
     if (fd_ >= 0) abort();
@@ -163,6 +266,8 @@ class PosixWriter : public FileWriter {
     if (written_ != spec.size)
       return Error{ErrorKind::Changed, "wrote " + std::to_string(written_) + " bytes to " + temp_ +
                                            ", expected " + std::to_string(spec.size)};
+    // Its writeback starts now, which the sync later only has to finish.
+    if (deferred_) sync_file_range(fd_, 0, 0, SYNC_FILE_RANGE_WRITE);
     // Reading the file back is the only verification a local target has.
     if ((options_.verify_readback || spec.require_verification) &&
         spec.checksum.type != ChecksumType::None) {
@@ -172,9 +277,15 @@ class PosixWriter : public FileWriter {
     } else if (spec.require_verification) {
       return Error{ErrorKind::Unsupported, "no checksum to verify " + temp_ + " against"};
     }
-    if (options_.fsync && fsync(fd_) != 0) return errno_error(errno, "fsync " + temp_);
-    Status md = apply_metadata_fd(fd_, temp_, spec.metadata, spec.fields, options_.default_mode);
+    // Until a sync has made it durable, the copy has mtime 0, which no
+    // source file has: a run that ends before copies it again.
+    bool deferred = deferred_ && has(spec.fields, MetaFields::Mtime);
+    Entry metadata = spec.metadata;
+    if (deferred) metadata.mtime = {0, 0};
+    Status md = apply_metadata_fd(fd_, temp_, metadata, spec.fields, options_.default_mode);
     if (!md.ok()) return md;
+    struct stat st{};
+    if (deferred && fstat(fd_, &st) != 0) return errno_error(errno, "stat " + temp_);
     if (close(fd_) != 0) {
       fd_ = -1;
       unlink(temp_.c_str());
@@ -186,6 +297,7 @@ class PosixWriter : public FileWriter {
       unlink(temp_.c_str());
       return errno_error(err, "rename " + temp_ + " to " + final_);
     }
+    if (deferred) deferred_->add(final_, spec.metadata.mtime, st.st_dev);
     return {};
   }
 
@@ -214,6 +326,7 @@ class PosixWriter : public FileWriter {
   std::string temp_;
   std::string final_;
   PosixOptions options_;
+  DeferredMtimes* deferred_;
   uint64_t written_ = 0;
   bool verified_ = false;
 };
@@ -235,7 +348,12 @@ PosixEndpoint::PosixEndpoint(std::string root, PosixOptions options)
   mode_t mask = umask(0);
   umask(mask);
   options_.default_mode = 0666 & ~static_cast<ModeBits>(mask);
+  if (options_.sync) deferred_ = std::make_unique<DeferredMtimes>();
 }
+
+PosixEndpoint::~PosixEndpoint() = default;
+
+Status PosixEndpoint::flush() { return deferred_ ? deferred_->flush() : Status(); }
 
 Capabilities PosixEndpoint::capabilities() const {
   Capabilities caps;
@@ -495,7 +613,8 @@ Result<std::unique_ptr<FileWriter>> PosixEndpoint::open_write(const RelPath& pat
       if (errno == EEXIST) continue;
       return errno_error(errno, "create " + tmp);
     }
-    return std::unique_ptr<FileWriter>(new PosixWriter(fd, std::move(tmp), std::move(abs), options_));
+    return std::unique_ptr<FileWriter>(
+        new PosixWriter(fd, std::move(tmp), std::move(abs), options_, deferred_.get()));
   }
   return Error{ErrorKind::Other, "no free temporary name for " + abs};
 }

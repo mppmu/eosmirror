@@ -251,6 +251,11 @@ class FakeEndpoint : public eosmirror::Endpoint {
     return {};
   }
 
+  Status flush() override {
+    if (auto err = check("flush", "")) return *err;
+    return {};
+  }
+
   Result<std::unique_ptr<eosmirror::FileReader>> open_read(const RelPath& path) override {
     if (auto err = check("open_read", path)) return *err;
     std::lock_guard lock(mutex_);

@@ -54,7 +54,9 @@ A run walks the source tree directory by directory and makes the target match:
 Every copy writes to a temporary name (or uses EOS's atomic upload) and
 renames into place, so an interrupted run never leaves a partial file under
 the real name. Owner, mode and mtime are applied to the temporary file before
-the rename, so a file never appears with wrong metadata either. The target
+the rename, so a file never appears with wrong metadata either (on local
+targets, the mtime is 0 until a sync has made the copy durable, see
+below). The target
 mtime is always the source mtime as observed *before* reading the file (by a
 stat, or for EOS sources from the listing, see below). If the source changed
 while it was read (size or mtime differ afterwards), the copy is reported as
@@ -165,6 +167,44 @@ a file with requests in flight and may complete them after the close. The
 first chunk is read before the target file is created, so that an
 unreadable source leaves nothing on the target, and the reads ahead overlap
 the target's open.
+
+### Durability of local copies
+
+A copy to a local target is renamed into place with mtime 0 instead of the
+source's, with owner and mode as usual, and the writeback of its data is
+started right after its writes (`sync_file_range` with
+`SYNC_FILE_RANGE_WRITE`, whose failure does not matter). Every 30 s, and
+once the transfers of a run have ended (also after a graceful
+cancellation, before the summary), the engine has the target sync the file
+systems that copies went to (`syncfs`, through a directory on each) and
+then give every copy renamed before that its mtime (`utimensat`, not
+following symlinks, in up to 8 threads); only then are the directories of
+those copies recorded as finalized for `--resume`. Transfers never wait for
+a sync. A run that ends without its last sync (killed, or a crash or power
+loss of the host) leaves copies with mtime 0, which no source file has and
+the next run copies again, with or without a journal; a run that resumes
+walks their directories again.
+
+Data and metadata reach the disk separately: the rename that puts a copy
+in place goes through the file system's journal, its data is written when
+the page cache flushes it, after about 30 s (`vm.dirty_expire_centisecs`),
+so that a crash can leave a file with the source's size and mtime but
+zeros, or nothing, in it, which a later run would take for a good copy. An
+fsync per file before the rename prevents that at the cost of a disk flush
+per file, much more than many small copies cost themselves; a sync of the
+file system every 30 s costs one flush for all of them, and the
+provisional mtime keeps a copy that no sync has made durable yet from
+passing for good. `--no-fsync` gives copies their mtimes before the
+rename and syncs nothing. EOS's storage nodes do not fsync at the close of
+a file either (unless asked to by its I/O type): durability there comes
+from the replicas or stripes of the layout and from the FST's scanner,
+which checks the stored checksums, as for every EOS client.
+
+On the local test host, a copy of 20,000 files of 4 KiB from one local
+directory to another took 157-177 ms without syncs (as before), 190-214 ms
+with them, of which the final sync took 10-17 ms and the mtimes 8-9 ms
+(the copies themselves as fast as without), 154-187 ms with `--no-fsync`,
+and 313-331 ms with an fsync per file, as the former `--fsync` did.
 
 ### Engine
 

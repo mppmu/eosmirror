@@ -1034,6 +1034,37 @@ TEST_CASE("fake: journal records failures and finalized directories, resume and 
   }
 }
 
+TEST_CASE("fake: directories are recorded as finalized once the target has synced their copies") {
+  TempDir tmp;
+  auto journal = Journal::open(tmp.sub("j.sqlite"), "fake", "fake");
+  REQUIRE(journal.ok());
+  Journal& j = *journal.value();
+  FakeEndpoint src, dst;
+  populate(src);
+  // Copies that take a while, and a sync every 20 ms meanwhile.
+  src.hook = [](std::string_view op, const RelPath&) {
+    if (op == "read") std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  };
+  SyncOptions o = fake_options();
+  o.sync_interval = std::chrono::milliseconds(20);
+  REQUIRE(j.begin_run(false).ok());
+  Report r;
+  REQUIRE(run_sync(src, dst, o, r, &j).ok());
+  REQUIRE(j.end_run(false).ok());
+  CHECK(dst.count("flush") >= 3);
+  for (const char* dir : {"", "d1", "d1/d2"}) CHECK(j.is_done_dir(dir).value());
+
+  // A sync that fails records none of them, so that resuming walks them.
+  src.hook = nullptr;
+  dst.fail("flush", "", Error{ErrorKind::IO, "sync failed"}, 1000);
+  REQUIRE(j.begin_run(false).ok());
+  Report r2;
+  REQUIRE(run_sync(src, dst, o, r2, &j).ok());
+  REQUIRE(j.end_run(false).ok());
+  CHECK(r2.stats.failures >= 1);
+  for (const char* dir : {"", "d1", "d1/d2"}) CHECK_FALSE(j.is_done_dir(dir).value());
+}
+
 TEST_CASE("fake: a run stops when its journal cannot be written") {
   TempDir tmp;
   auto journal = Journal::open(tmp.sub("j.sqlite"), "fake", "fake");

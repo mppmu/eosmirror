@@ -33,6 +33,10 @@ struct SyncOptions {
   int min_transfers = 4;
   int max_transfers = 64;
   std::chrono::seconds adapt_interval{10};
+  // The target makes the copies so far durable this often, and at the end
+  // (Endpoint::flush); only then are their directories recorded as
+  // finalized for resuming.
+  std::chrono::milliseconds sync_interval{30000};
   size_t max_backlog = 10000;  // queued copies before the checkers block
   size_t buffer_size = 8u << 20;
 

@@ -220,6 +220,14 @@ struct Engine::Impl {
   std::vector<std::thread> threads;
   std::thread controller;
   std::atomic<bool> controller_stop{false};
+  std::thread syncer;  // makes copies durable every sync_interval, until stopped
+  std::mutex syncer_mutex;
+  std::condition_variable syncer_cv;
+  bool syncer_stop = false;
+  // Directories finalized since the last sync, to record as such after the
+  // next: a copy may need it to be durable and final (PosixOptions::sync).
+  std::mutex finalized_mutex;
+  std::vector<RelPath> finalized;
   bool ran = false;
 
   size_t max_transfers() const { return static_cast<size_t>(std::max(1, options.max_transfers)); }
@@ -483,8 +491,10 @@ struct Engine::Impl {
     }
     bool complete = !node->failed && !node->incomplete;
     if (complete && !cancel.requested()) succeeded(node->path);
-    if (journal && !options.dry_run && complete && !node->only && !cancel.requested())
-      journal_write(journal->record_done_dir(node->path));
+    if (journal && !options.dry_run && complete && !node->only && !cancel.requested()) {
+      std::lock_guard lock(finalized_mutex);
+      finalized.push_back(node->path);
+    }
     if (node->parent) {
       entry_done(node->parent);
     } else {
@@ -858,6 +868,7 @@ struct Engine::Impl {
     }
   }
 
+
   // Gives a file whose last copy is in doubt mtime 0 before it is copied
   // again, so that an upload that does not arrive (EOS confirms commits by
   // size and mtime where it has no checksum) cannot be taken for it. Whether
@@ -1011,6 +1022,22 @@ struct Engine::Impl {
       // Finalizing the directory takes no transfer slot.
       entry_done(job->dir);
     }
+  }
+
+  // Makes the copies so far durable and final, and records the directories
+  // finalized before as such. Where that fails, they are not recorded: a
+  // run that resumes walks them again.
+  void sync_target() {
+    std::vector<RelPath> done;
+    {
+      std::lock_guard lock(finalized_mutex);
+      done.swap(finalized);
+    }
+    if (Status synced = target.flush(); !synced.ok()) {
+      fail("", EntryType::Directory, synced.error());
+      return;
+    }
+    for (const RelPath& path : done) journal_write(journal->record_done_dir(path));
   }
 
   // Adjusts the transfer limit every interval, see TransferController.
@@ -1250,6 +1277,18 @@ struct Engine::Impl {
     for (size_t i = 0; i < transfers; ++i)
       threads.emplace_back([this, i] { transfer_loop(i); });
     if (initial_limit() < transfers) controller = std::thread([this] { controller_loop(); });
+    if (!options.dry_run)
+      syncer = std::thread([this] {
+        // By the system clock: ThreadSanitizer up to GCC 11 misses the
+        // waits on the steady one (pthread_cond_clockwait).
+        std::unique_lock lock(syncer_mutex);
+        while (!syncer_cv.wait_until(lock, std::chrono::system_clock::now() + options.sync_interval,
+                                     [&] { return syncer_stop; })) {
+          lock.unlock();
+          sync_target();
+          lock.lock();
+        }
+      });
     for (auto& root : roots) dirs.push(root);
 
     {
@@ -1263,6 +1302,14 @@ struct Engine::Impl {
     for (auto& t : threads) t.join();
     threads.clear();
     if (controller.joinable()) controller.join();
+    {
+      std::lock_guard lock(syncer_mutex);
+      syncer_stop = true;
+    }
+    syncer_cv.notify_all();
+    if (syncer.joinable()) syncer.join();
+    // Also after a cancellation: the copies made so far stay.
+    if (!options.dry_run) sync_target();
     if (end_error) return *end_error;
     if (cancel.requested()) return Error{ErrorKind::Cancelled, "run cancelled"};
     return {};

@@ -21,7 +21,11 @@ client for now. See [docs/design.md](docs/design.md).
   and symlinks) the modification time are fixed.
 - Copies are atomic (temporary name plus rename, or EOS atomic uploads), set
   the source's modification time, and verify a checksum end to end where the
-  endpoint supports it. An EOS upload is done once the file it created,
+  endpoint supports it. On local targets, a copy has mtime 0 until a sync of
+  its file system (every 30 s, and at the end of a run) has made it durable,
+  so that one that a crash or a killed run left without its data is copied
+  again by the next run; `--no-fsync` sets mtimes at once and syncs
+  nothing. An EOS upload is done once the file it created,
   known by its id, is in place with the right size, mtime and checksum.
   With a journal, an upload whose run ended before that is copied again by
   the next run.

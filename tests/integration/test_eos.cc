@@ -756,6 +756,7 @@ TEST_CASE("EOS to FS: files that changed since the listing or while they are rea
   auto copied = copy_file(ep, dst, "f", old, options, pool, cancel);
   REQUIRE(copied.ok());
   CHECK(tmp.read_file("dst/f") == "replaced with a longer content");
+  REQUIRE(dst.flush().ok());  // which gives copies their mtimes
   CHECK(must(dst.stat("f")).mtime == Timespec{1600000500, 2});
 
   // Replaced once more after it was opened, with the size of the file read:
@@ -800,6 +801,7 @@ TEST_CASE("EOS to FS: files that changed since the listing or while they are rea
   auto retried = copy_file(ep, dst, "g", old, options, pool, cancel);
   REQUIRE(retried.ok());
   CHECK(tmp.read_file("dst/g") == content + "more");
+  REQUIRE(dst.flush().ok());
   CHECK(must(dst.stat("g")).mtime == must(ep.stat("g")).mtime);
 
   // Gone: not found, which a run counts as vanished from the source.
@@ -822,6 +824,7 @@ TEST_CASE("EOS to FS: files that changed since the listing or while they are rea
   REQUIRE(dst2.mkdir("", 0755).ok());
   REQUIRE(copy_file(*plain.endpoint, dst2, "f", old, options, pool, cancel).ok());
   CHECK(tmp.read_file("dst2/f") == "bbbb");
+  REQUIRE(dst2.flush().ok());
   CHECK(must(dst2.stat("f")).mtime == Timespec{1600000000, 1});
   SyncOptions sync = test_options();
   sync.preserve_owner = false;
