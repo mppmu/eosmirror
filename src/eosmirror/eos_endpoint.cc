@@ -215,6 +215,14 @@ std::string sealed(std::string_view path) {
   return out;
 }
 
+// The path that a sealed one stands for, where it is no literal "#AND#".
+std::string unsealed(std::string_view path) {
+  std::string out(path);
+  for (size_t at = 0; (at = out.find("#AND#", at)) != std::string::npos; ++at)
+    out.replace(at, 5, "&");
+  return out;
+}
+
 std::string format_timespec(const Timespec& t) {
   char buf[40];
   std::snprintf(buf, sizeof buf, "%lld.%09d", static_cast<long long>(t.sec), t.nsec);
@@ -288,11 +296,11 @@ class EosUploadWriter : public XrdFileWriter {
   EosUploadWriter(std::unique_ptr<XrdCl::File> file, std::string url, int window)
       : XrdFileWriter(std::move(file), std::move(url), window) {}
 
-  ~EosUploadWriter() override { abort(); }
+  ~EosUploadWriter() override { (void)abort(); }
 
   Result<CommitInfo> commit(const CommitSpec& spec) override {
     if (Status s = complete(spec.size); !s.ok()) {
-      abort();
+      (void)abort();
       return s.error();
     }
     if (Status s = close(); !s.ok()) return s.error();
@@ -302,21 +310,28 @@ class EosUploadWriter : public XrdFileWriter {
   // A storage node commits an atomic upload at any regular close, partial or
   // not. Told to delete it first, it discards the upload instead. A file that
   // XrdCl gave up on is not closed at all, and the node discards its upload
-  // when the connection ends.
-  void abort() override {
-    if (!file_) return;
+  // when the connection ends. Where the request to delete fails, the close
+  // that follows (XrdCl closes an open file at its destruction anyway) may
+  // commit the upload: an error, for the caller to take the file away by its
+  // id.
+  Status abort() override {
+    if (!file_) return {};
     Status drained = writes_.drain();  // XrdCl refuses to close with writes in flight
     (void)drained;
+    Status status;
     if (file_->IsOpen()) {
       XrdCl::Buffer arg;
       arg.FromString("delete");
       XrdCl::Buffer* response = nullptr;
       XrdCl::XRootDStatus st = file_->Fcntl(arg, response);
       delete response;
-      if (!st.IsOK()) log::warn("cannot discard the upload of ", name_, ": ", st.ToStr());
+      if (!st.IsOK())
+        status = Status(XrdEndpoint::xrd_error(
+            st, "discard the upload of " + name_ + " (its close may commit it)"));
       st = file_->Close();  // fails after the delete
     }
     file_.reset();
+    return status;
   }
 };
 
@@ -457,8 +472,12 @@ Result<FindEntry> parse_find_line(std::string_view line, std::string_view abs_di
   std::string_view checksum, checksum_type;
   std::optional<std::string_view> sys_atomic, user_atomic;
   // Attribute values are printed raw as well: one with a quote and a space
-  // would continue as further fields, so no field may repeat or be unknown.
+  // would continue as further fields, so no field may repeat (under either
+  // of its names: "mode" of directories is "flags" of files) or be unknown,
+  // none but attributes and the target may follow an attribute, and only a
+  // symlink has a target.
   std::vector<std::string_view> keys;
+  bool attributes_seen = false;
   std::string_view rest = line.substr(path_end + 2);
   while (!rest.empty()) {
     if (rest.front() == ' ') {
@@ -468,9 +487,14 @@ Result<FindEntry> parse_find_line(std::string_view line, std::string_view abs_di
     auto eq = rest.find('=');
     if (eq == std::string_view::npos) return bad("unparsable listing line");
     std::string_view key = rest.substr(0, eq);
-    if (std::find(keys.begin(), keys.end(), key) != keys.end())
+    std::string_view meaning = key == "flags" ? "mode" : key;
+    if (std::find(keys.begin(), keys.end(), meaning) != keys.end())
       return bad("repeated field in listing line");
-    keys.push_back(key);
+    keys.push_back(meaning);
+    bool attribute = key.starts_with("attr.");
+    if (attributes_seen && !attribute && key != "target")
+      return bad("field after the attributes in listing line");
+    attributes_seen = attributes_seen || attribute;
     rest.remove_prefix(eq + 1);
     std::string_view value;
     if (key == "target") {
@@ -516,13 +540,15 @@ Result<FindEntry> parse_find_line(std::string_view line, std::string_view abs_di
     } else if (key == "checksumtype") {
       checksum_type = value;
     } else if (key == "target") {
+      if (e.type != EntryType::Symlink) return bad("target of no symlink in listing line");
       e.link_target = std::string(value);
     } else if (key == "attr.sys.forced.atomic" || key == "attr.user.forced.atomic") {
       // Quoted, without spaces or quotes of its own.
       valid = value.size() >= 2 && value.front() == '"' && value.back() == '"' &&
               value.find('"', 1) == value.size() - 1;
-      (key == "attr.sys.forced.atomic" ? sys_atomic : user_atomic) =
-          value.substr(1, value.size() - 2);
+      if (valid)
+        (key == "attr.sys.forced.atomic" ? sys_atomic : user_atomic) =
+            value.substr(1, value.size() - 2);
     } else {
       return bad("unknown field in listing line");
     }
@@ -1027,11 +1053,27 @@ Result<UploadFile> EosEndpoint::file_by_id(const std::string& abs, uint64_t fid)
     found.file.name = name_of(abs);
     return found;
   }
-  // Elsewhere: in the upload's directory, by a name that is not ambiguous,
-  // or anywhere else, nameless.
-  if (parent_of(path) != sealed(parent_of(abs)) ||
-      found.file.name.find("#AND#") != std::string::npos)
-    found.file.name.clear();
+  // Elsewhere: anywhere else, nameless, or in the upload's directory under
+  // another name (an upload not committed yet). A sealed name or directory
+  // with "#AND#" can also be another's, so the file under the name tells by
+  // its id, and one not found that way is at a place that cannot be told.
+  std::string name = found.file.name;  // sealed
+  found.file.name.clear();
+  if (parent_of(path) != sealed(parent_of(abs))) return found;
+  std::vector<std::string> candidates{unsealed(name)};
+  if (candidates.front() != name) candidates.push_back(name);
+  for (const std::string& candidate : candidates) {
+    auto under = stat_abs(parent_of(abs) + "/" + candidate);
+    if (!under.ok()) {
+      if (under.error().kind == ErrorKind::NotFound) continue;
+      return under.error();
+    }
+    if (under.value().id == found.file.id) {
+      found.file.name = candidate;
+      return found;
+    }
+  }
+  found.unresolved = true;
   return found;
 }
 
@@ -1069,7 +1111,7 @@ Result<std::unique_ptr<FileWriter>> EosEndpoint::open_write(const RelPath& path,
   std::unique_ptr<FileWriter> upload(
       new EosUploadWriter(std::move(file), url_of(abs), options_.write_window));
   if (fid == 0) {
-    upload->abort();
+    (void)upload->abort();
     return Error{ErrorKind::Unsupported,
                  "create " + url_of(abs) + ": the MGM names no id for the file of the upload"};
   }

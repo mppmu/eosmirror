@@ -65,8 +65,14 @@ class PosixEndpoint : public Endpoint {
   // The absolute path of a relative one.
   std::string absolute(const RelPath& path) const;
 
+  // Why the root could not be resolved to its canonical path, if it could
+  // not: such an endpoint is not to be used, since the overlap check could
+  // not trust the path.
+  std::optional<Error> root_error() const { return root_error_; }
+
  private:
   std::string root_;
+  std::optional<Error> root_error_;
   PosixOptions options_;
   std::once_flag probe_once_;
   std::atomic<int32_t> mtime_resolution_{1};
@@ -74,6 +80,12 @@ class PosixEndpoint : public Endpoint {
   mutable std::string device_;  // of the root, as in directory ids
   std::unique_ptr<DeferredMtimes> deferred_;  // with options_.sync
 };
+
+// The canonical form of a path that may not exist yet: that of its deepest
+// existing ancestor, followed by the rest. Normalizing ".." behind a missing
+// component can expose a symlink before it ("missing/../link"), so the
+// result is resolved again until it settles.
+Result<std::string> canonical_path(const std::string& path);
 
 // The type of the file system that a path is on, from a mount table in the
 // format of /proc/self/mountinfo: that of the mount with the longest mount

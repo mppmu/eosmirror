@@ -122,24 +122,25 @@ class XrdWriter : public XrdFileWriter {
         temp_(std::move(temp_abs)),
         final_(std::move(final_abs)) {}
 
-  ~XrdWriter() override { abort(); }
+  ~XrdWriter() override { (void)abort(); }
 
   Result<CommitInfo> commit(const CommitSpec& spec) override {
     Status s = finish(spec);
     if (!s.ok()) {
-      abort();
+      (void)abort();
       return s.error();
     }
     return CommitInfo{verified_};
   }
 
-  void abort() override {
+  Status abort() override {
     close_quietly();
-    if (!temp_exists_) return;
+    if (!temp_exists_) return {};
     temp_exists_ = false;
     Status removed = ep_.remove_abs(temp_);
     if (!removed.ok() && removed.error().kind != ErrorKind::NotFound)
       log::warn("cannot remove temporary ", temp_, ": ", removed.error().describe());
+    return {};  // a temporary left behind is not in place
   }
 
  private:

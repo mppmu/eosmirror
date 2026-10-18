@@ -364,7 +364,7 @@ TEST_CASE("eos endpoint: aborted uploads leave the previous file as it was") {
     auto w = ep.open_write("f", spec);
     REQUIRE(w.ok());
     REQUIRE(w.value()->write(0, bytes(std::string_view(content).substr(0, 1024 * 1024))).ok());
-    w.value()->abort();
+    CHECK(w.value()->abort().ok());
     CHECK(get(ep, "f") == old);
     CHECK(must(ep.stat("f")).mtime == Timespec{1500000000, 1});
 
@@ -388,7 +388,7 @@ TEST_CASE("eos endpoint: aborted uploads leave the previous file as it was") {
     for (size_t off = 0; off < 2 * 1024 * 1024; off += 512 * 1024)
       REQUIRE(
           w4.value()->write(off, bytes(std::string_view(content).substr(off, 512 * 1024))).ok());
-    w4.value()->abort();
+    CHECK(w4.value()->abort().ok());
     CHECK(get(ep, "f") == old);
     CHECK(must(ep.stat("f")).mtime == Timespec{1500000000, 1});
 

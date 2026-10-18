@@ -337,13 +337,18 @@ TEST_CASE("find listing lines tell directories that force uploads to be non-atom
   CHECK_FALSE(non_atomic(R"(attr.user.forced.atomic="-1")"));
   // Refused: values that would make the rest of the line ambiguous, a value
   // whose quote ends it early to forge fields after it (which repeats a
-  // field), and fields that are not in the format.
+  // field, also under its other name, or puts one after the attributes),
+  // fields that are not in the format, a target of no symlink, and an
+  // attribute without a value.
   for (const char* value : {R"("0 size=5")", R"("0)", R"(0)", R"("0"x")",
-                            R"("1" size=0 checksum=00000001)", R"("1" etag=1)"}) {
+                            R"("1" size=0 checksum=00000001)", R"("1" etag=1)",
+                            R"("1" flags=0777 target="")", R"("1" ctime=1.0)",
+                            R"("1" target="/a")", R"("1" attr.sys.forced.atomic= x=")"}) {
     INFO("value ", value);
     CHECK(refused(std::string(R"(path="/eos/d/s/" type=directory  size=0 uid=0 gid=0 )") +
                   "mode=40755 mtime=1.0 attr.user.forced.atomic=" + value));
   }
+  CHECK(refused(R"(path="/eos/d/f" type=file  size=1 uid=1 gid=1 flags=644 mtime=1.0 target="x")"));
 }
 
 TEST_CASE("find listing lines that are refused") {

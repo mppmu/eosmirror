@@ -11,6 +11,7 @@
 #include "eosmirror/engine.hh"
 #include "eosmirror/journal.hh"
 #include "eosmirror/log.hh"
+#include "eosmirror/posix_endpoint.hh"
 #include "eosmirror/progress_display.hh"
 #include "eosmirror/selftest.hh"
 #include "eosmirror/version.hh"
@@ -112,11 +113,10 @@ std::string spec_name(const std::string& spec) {
 // of the source or the target: a run would copy or delete it.
 Status check_journal_outside(const std::string& file, const Endpoint& source,
                              const Endpoint& target) {
-  std::error_code ec;
-  std::filesystem::path path = std::filesystem::absolute(file, ec);
-  if (!ec) path = std::filesystem::weakly_canonical(path, ec);
+  auto path = canonical_path(file);
+  if (!path.ok()) return path.error();
   for (const char* suffix : {"", "-wal", "-shm", "-journal"}) {
-    Location journal{"", path.string() + suffix};
+    Location journal{"", path.value() + suffix};
     for (const Endpoint* tree : {&source, &target})
       if (contains(tree->location(), journal))
         return Error{ErrorKind::Other, "the journal " + journal.path + " is in the tree of " +
@@ -268,30 +268,34 @@ int sync(const CliOptions& opts) {
 
   std::atomic<bool> finished{false};
   std::thread progress;
-  if (opts.progress_seconds > 0) {
-    progress = std::thread([&] {
-      auto interval = std::chrono::seconds(opts.progress_seconds);
-      auto next = std::chrono::steady_clock::now() + interval;
-      while (!finished) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
-        if (std::chrono::steady_clock::now() >= next) {
-          log::info(report.progress());
-          next += interval;
-        }
-      }
-    });
-  }
-
   std::string title = std::string("eosmirror ") + (sync.dry_run ? "dry run: " : "") +
                       source.value()->describe() + " -> " + target.value()->describe();
-  log::info(title);
   // Live bars on a terminal, unless plain progress lines were asked for or
   // the run is quiet.
   std::unique_ptr<ProgressDisplay> display;
-  if (opts.progress_seconds == 0 && opts.log_level >= LogLevel::Info &&
-      ProgressDisplay::suitable(STDERR_FILENO)) {
-    display = std::make_unique<ProgressDisplay>(report, title);
-    display->start();
+  try {
+    if (opts.progress_seconds > 0) {
+      progress = std::thread([&] {
+        auto interval = std::chrono::seconds(opts.progress_seconds);
+        auto next = std::chrono::steady_clock::now() + interval;
+        while (!finished) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(200));
+          if (std::chrono::steady_clock::now() >= next) {
+            log::info(report.progress());
+            next += interval;
+          }
+        }
+      });
+    }
+    log::info(title);
+    if (opts.progress_seconds == 0 && opts.log_level >= LogLevel::Info &&
+        ProgressDisplay::suitable(STDERR_FILENO)) {
+      display = std::make_unique<ProgressDisplay>(report, title);
+      display->start();
+    }
+  } catch (const std::system_error& e) {
+    log::error("cannot start the progress thread: ", e.what());
+    return kFatal;
   }
   Status status = opts.retry_failed ? engine.run(retried) : engine.run();
   finished = true;

@@ -3223,3 +3223,165 @@ TEST_CASE("fake: a failed upload that replaced a file gets mtime 0, one that rep
   CHECK(r3.stats.failures == 0);
   expect_mirrored(src, dst);
 }
+
+TEST_CASE("fake: a copy in doubt since an earlier run stays so when its new copy fails otherwise") {
+  TempDir tmp;
+  auto journal = Journal::open(tmp.sub("j.sqlite"), "fake", "fake");
+  REQUIRE(journal.ok());
+  Journal& j = *journal.value();
+  FakeEndpoint src, dst;
+  // Same size and mtime 0 on both sides: nothing but the doubt tells the
+  // corrupt copy from a good one, since mtime 0 cannot mark it as not final.
+  src.add_file("f", "good", 0644, {0, 0});
+  dst.add_file("f", "evil", 0644, {0, 0});
+  REQUIRE(j.begin_run(false).ok());
+  REQUIRE(j.record_failure({"f", EntryType::File, Error{ErrorKind::Checksum, "differs"}}).ok());
+  REQUIRE(j.end_run(true).ok());
+  // The new copy cannot even be opened (and that is not retried).
+  dst.fail("open_write", "f", Error{ErrorKind::Permission, "denied"});
+  REQUIRE(j.begin_run(false).ok());
+  Report r;
+  REQUIRE(run_sync(src, dst, fake_options(), r, &j).ok());
+  REQUIRE(j.end_run(true).ok());
+  CHECK(r.stats.failures == 1);
+  auto rows = j.failures().value();
+  REQUIRE(rows.size() == 1);
+  CHECK(rows[0].error.kind == ErrorKind::IO);
+  CHECK(rows[0].error.message.find("in doubt since an earlier run") != std::string::npos);
+  // So the next run copies it instead of taking it for unchanged.
+  REQUIRE(j.begin_run(false).ok());
+  Report r2;
+  REQUIRE(run_sync(src, dst, fake_options(), r2, &j).ok());
+  REQUIRE(j.end_run(true).ok());
+  CHECK(r2.stats.files_copied == 1);
+  CHECK(dst.get("f")->content == "good");
+  CHECK(j.failures().value().empty());
+}
+
+TEST_CASE("fake: an upload that an abort could not discard is taken back by its id") {
+  FakeEndpoint src, dst;
+  dst.atomic_uploads = true;
+  populate(src);
+  SUBCASE("one that replaced nothing is removed") {
+    dst.committing_aborts = 1;
+    dst.fail("write", "f0", Error{ErrorKind::IO, "write failed"});
+    Report r;
+    REQUIRE(run_sync(src, dst, fake_options(), r).ok());
+    CHECK(r.stats.retries == 1);
+    CHECK(r.stats.failures == 0);
+    CHECK(dst.count("remove") == 1);
+  }
+  SUBCASE("one that replaced a file gets mtime 0, and is replaced again") {
+    Report mirror;
+    REQUIRE(run_sync(src, dst, fake_options(), mirror).ok());
+    src.modify("f0", [](FakeEndpoint::Node& n) {
+      n.content = "root file, v2";
+      n.entry.size = n.content.size();
+      n.entry.mtime = {3100, 1};
+    });
+    dst.committing_aborts = 1;
+    dst.fail("write", "f0", Error{ErrorKind::IO, "write failed"});
+    Report r;
+    REQUIRE(run_sync(src, dst, fake_options(), r).ok());
+    CHECK(r.stats.retries == 1);
+    CHECK(r.stats.failures == 0);
+    CHECK(dst.count("remove") == 0);
+  }
+  expect_mirrored(src, dst);
+}
+
+TEST_CASE("fake: a verifying dry run keeps the failures it only would have repaired") {
+  TempDir tmp;
+  auto journal = Journal::open(tmp.sub("j.sqlite"), "fake", "fake");
+  REQUIRE(journal.ok());
+  Journal& j = *journal.value();
+  FakeEndpoint src, dst;
+  populate(src);
+  Report mirror;
+  REQUIRE(run_sync(src, dst, fake_options(), mirror).ok());
+  // A mode that could not be set, an extra that could not be deleted, and a
+  // directory whose mtime could not be set.
+  dst.modify("f0", [](FakeEndpoint::Node& n) { n.entry.mode = 0600; });
+  dst.add_file("extra", "x");
+  dst.modify("d1", [](FakeEndpoint::Node& n) { n.entry.mtime = {1, 0}; });
+  REQUIRE(j.begin_run(false).ok());
+  REQUIRE(j.record_failure({"f0", EntryType::File, Error{ErrorKind::Permission, "denied"}}).ok());
+  REQUIRE(j.record_failure({"extra", EntryType::File, Error{ErrorKind::Permission, "denied"}}).ok());
+  REQUIRE(j.record_failure({"d1", EntryType::Directory, Error{ErrorKind::Permission, "denied"}}).ok());
+  REQUIRE(j.end_run(true).ok());
+  SyncOptions o = fake_options();
+  o.dry_run = o.checksum = o.delete_extra = true;
+  REQUIRE(j.begin_run(false).ok());
+  Report r;
+  REQUIRE(run_sync(src, dst, o, r, &j).ok());
+  REQUIRE(j.end_run(true).ok());
+  CHECK(r.stats.metadata_fixed >= 2);  // and the top directory, touched by the extra
+  CHECK(r.stats.deleted == 1);
+  CHECK(j.failures().value().size() == 3);
+  // A run repairs them and clears the rows.
+  o.dry_run = false;
+  REQUIRE(j.begin_run(false).ok());
+  Report r2;
+  REQUIRE(run_sync(src, dst, o, r2, &j).ok());
+  REQUIRE(j.end_run(true).ok());
+  CHECK(j.failures().value().empty());
+  expect_mirrored(src, dst);
+}
+
+TEST_CASE("fake: retry rows below a directory that is a file on both sides now are dropped") {
+  TempDir tmp;
+  auto journal = Journal::open(tmp.sub("j.sqlite"), "fake", "fake");
+  REQUIRE(journal.ok());
+  Journal& j = *journal.value();
+  FakeEndpoint src, dst;
+  populate(src);
+  Report mirror;
+  REQUIRE(run_sync(src, dst, fake_options(), mirror).ok());
+  REQUIRE(j.begin_run(false).ok());
+  REQUIRE(j.record_failure({"d1/d2/f2", EntryType::File, Error{ErrorKind::IO, "x"}}).ok());
+  REQUIRE(j.end_run(true).ok());
+  for (FakeEndpoint* ep : {&src, &dst}) {
+    ep->erase("d1");
+    ep->add_file("d1", "now a file");
+  }
+  REQUIRE(j.begin_run(false).ok());
+  Cancellation cancel;
+  Report r;
+  Engine engine(src, dst, fake_options(), r, &j, cancel);
+  REQUIRE(engine.run(j.failures().value()).ok());
+  REQUIRE(j.end_run(true).ok());
+  CHECK(r.stats.failures == 0);
+  CHECK(j.failures().value().empty());
+}
+
+TEST_CASE("fake: a retry with --one-file-system does not enter another file system either") {
+  TempDir tmp;
+  auto journal = Journal::open(tmp.sub("j.sqlite"), "fake", "fake");
+  REQUIRE(journal.ok());
+  Journal& j = *journal.value();
+  FakeEndpoint src, dst;
+  populate(src);
+  src.add_dir("mnt");
+  src.add_file("mnt/data", "elsewhere");
+  dst.add_dir("mnt");
+  dst.add_file("mnt/old", "kept");
+  REQUIRE(j.begin_run(false).ok());
+  REQUIRE(j.record_failure({"mnt/data", EntryType::File, Error{ErrorKind::IO, "x"}}).ok());
+  REQUIRE(j.end_run(true).ok());
+  // Another file system is mounted there since the failure was recorded.
+  src.modify("mnt", [](FakeEndpoint::Node& n) { n.entry.id = "other-fs"; });
+  SyncOptions o = fake_options();
+  o.one_file_system = o.delete_extra = true;
+  REQUIRE(j.begin_run(false).ok());
+  Cancellation cancel;
+  Report r;
+  Engine engine(src, dst, o, r, &j, cancel);
+  REQUIRE(engine.run(j.failures().value()).ok());
+  REQUIRE(j.end_run(true).ok());
+  CHECK(r.stats.other_fs_skipped == 1);
+  CHECK(r.stats.files_copied == 0);
+  CHECK(r.stats.deleted == 0);
+  CHECK(dst.get("mnt/old"));
+  CHECK_FALSE(dst.get("mnt/data"));
+  CHECK(j.failures().value().size() == 1);
+}

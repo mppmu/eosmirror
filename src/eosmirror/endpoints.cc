@@ -139,6 +139,13 @@ Result<std::string> eos_path_url(const std::string& spec, const std::string& mgm
   return server + "/" + spec;
 }
 
+static Result<std::unique_ptr<Endpoint>> local_endpoint(std::string path,
+                                                        const PosixOptions& options) {
+  auto ep = std::make_unique<PosixEndpoint>(std::move(path), options);
+  if (auto error = ep->root_error()) return *error;
+  return std::unique_ptr<Endpoint>(std::move(ep));
+}
+
 Result<std::unique_ptr<Endpoint>> make_endpoint(const std::string& given,
                                                 const EndpointSettings& settings) {
   if (given.empty()) return Error{ErrorKind::Other, "empty endpoint"};
@@ -148,7 +155,7 @@ Result<std::unique_ptr<Endpoint>> make_endpoint(const std::string& given,
   auto scheme_end = spec.find("://");
   if (scheme_end != std::string::npos) {
     std::string scheme = spec.substr(0, scheme_end);
-    if (scheme == "file") return std::unique_ptr<Endpoint>(new PosixEndpoint(spec.substr(scheme_end + 3), settings.posix));
+    if (scheme == "file") return local_endpoint(spec.substr(scheme_end + 3), settings.posix);
     bool eos = scheme == "eos";
     if (eos || scheme == "root" || scheme == "roots" || scheme == "xroot" || scheme == "xroots") {
 #ifdef EOSMIRROR_HAVE_XROOTD
@@ -177,7 +184,7 @@ Result<std::unique_ptr<Endpoint>> make_endpoint(const std::string& given,
     }
     return Error{ErrorKind::Unsupported, "unknown URL scheme in " + display_url(spec)};
   }
-  return std::unique_ptr<Endpoint>(new PosixEndpoint(spec, settings.posix));
+  return local_endpoint(spec, settings.posix);
 }
 
 }  // namespace eosmirror

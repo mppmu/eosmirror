@@ -11,12 +11,15 @@ namespace eosmirror {
 
 // The file that an upload created, as it is now: in place under the
 // upload's name (in_place), still under another name in the same directory
-// (an upload not committed yet, named file.name), or elsewhere (file.name
-// empty). The size, mtime and checksum are those the endpoint stores (None
-// where it stores no checksum, or one of a type that cannot be computed).
+// (an upload not committed yet, named file.name), elsewhere (file.name
+// empty), or at a place that cannot be told (unresolved: the endpoint's
+// answer could name another file's place as well). The size, mtime and
+// checksum are those the endpoint stores (None where it stores no checksum,
+// or one of a type that cannot be computed).
 struct UploadFile {
   Entry file;
   bool in_place = false;
+  bool unresolved = false;
 };
 
 // Writes a file through an upload that the endpoint renames into place
@@ -45,12 +48,17 @@ class AtomicUploadWriter : public FileWriter {
   // path: the file's path on ep; name: the file for messages. The upload's
   // commit() closes it. mtime_at_open: the upload carries the mtime, which
   // the file in place must have; else it is set once the file is confirmed.
+  // open_spec: what the file was opened for, which decides how an upload
+  // that an abort could not discard is taken away.
   AtomicUploadWriter(Endpoint& ep, RelPath path, std::string name,
-                     std::unique_ptr<FileWriter> upload, Locate locate, bool mtime_at_open = true);
+                     std::unique_ptr<FileWriter> upload, Locate locate, bool mtime_at_open = true,
+                     CommitSpec open_spec = CommitSpec{});
 
   Status write(Chunk chunk) override { return upload_->write(std::move(chunk)); }
   Result<CommitInfo> commit(const CommitSpec& spec) override;
-  void abort() override { upload_->abort(); }
+  // Discards the upload. One that may have been committed all the same is
+  // taken away by its id, like one that failed its verification.
+  Status abort() override;
 
  private:
   // Takes the upload away where it is. Stuck: it is, or may be, in place or
@@ -73,6 +81,7 @@ class AtomicUploadWriter : public FileWriter {
   std::unique_ptr<FileWriter> upload_;
   Locate locate_;
   bool mtime_at_open_;
+  CommitSpec open_spec_;
 };
 
 }  // namespace eosmirror

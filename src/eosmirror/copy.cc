@@ -76,42 +76,43 @@ Result<CopyOutcome> copy_file(Endpoint& source, Endpoint& target, const RelPath&
   if (!created.ok()) return target_failed(created.error());
   std::unique_ptr<FileWriter> writer = std::move(created).value();
 
+  // The error of a copy given up, after its data is discarded. Where that
+  // may have failed, with the data in place in doubt, the error says so, as
+  // a journal records it.
+  auto aborted = [&](Error e) {
+    Status discarded = writer->abort();
+    if (discarded.ok() || !discarded.error().in_doubt) return e;
+    if (!is_transient(e.kind) || e.kind == ErrorKind::Changed) e.kind = ErrorKind::IO;
+    e.message += "; " + discarded.error().message;
+    e.in_doubt = true;
+    return e;
+  };
+
   Hasher hasher(type);
   uint64_t offset = 0;
   while (offset < src.size) {
-    if (cancel.requested()) {
-      writer->abort();
-      return Error{ErrorKind::Cancelled, "copy of " + path + " cancelled"};
-    }
+    if (cancel.requested())
+      return aborted(Error{ErrorKind::Cancelled, "copy of " + path + " cancelled"});
     Chunk chunk;
     if (first) {
       chunk = std::move(*first);
       first.reset();
     } else {
       auto next = read(offset);
-      if (!next.ok()) {
-        writer->abort();
-        return next.error();
-      }
+      if (!next.ok()) return aborted(next.error());
       chunk = std::move(next).value();
     }
     size_t size = chunk.size;
     hasher.update(chunk.data());
     Status written = writer->write(std::move(chunk));
-    if (!written.ok()) {
-      writer->abort();
-      return target_failed(written.error());
-    }
+    if (!written.ok()) return target_failed(aborted(written.error()));
     if (options.on_chunk) options.on_chunk(size);
     offset += size;
   }
 
   auto unchanged = reader->unchanged(src);
-  if (!unchanged.ok() || !unchanged.value()) {
-    writer->abort();
-    if (!unchanged.ok()) return unchanged.error();
-    return Error{ErrorKind::Changed, path + " changed during copy"};
-  }
+  if (!unchanged.ok()) return aborted(unchanged.error());
+  if (!unchanged.value()) return aborted(Error{ErrorKind::Changed, path + " changed during copy"});
   spec.checksum = hasher.finish();
 
   // The source's stored checksum is compared where the target computes
@@ -124,35 +125,29 @@ Result<CopyOutcome> copy_file(Endpoint& source, Endpoint& target, const RelPath&
   if (type != ChecksumType::None &&
       (target_type == ChecksumType::None || known.checksum.type == type)) {
     auto stored = source.stored_checksum(path, known);
-    if (!stored.ok()) {
-      writer->abort();
-      return stored.error();
-    }
+    if (!stored.ok()) return aborted(stored.error());
     if (stored.value().type == type) {
       if (stored.value() != spec.checksum) {
-        writer->abort();
+        Error mismatch{ErrorKind::Checksum, path + " has checksum " + stored.value().hex +
+                                                " on the source, but " + spec.checksum.hex +
+                                                " was read"};
         if (stored.value() == known.checksum) {
           // The listing's checksum: unless the data is corrupt, the file was
           // rewritten with the same size since it was listed, which a reader
           // that takes the listed entry as the file's state cannot tell.
           auto now = source.stat(path);
-          if (!now.ok() && now.error().kind == ErrorKind::NotFound) return now.error();
+          if (!now.ok() && now.error().kind == ErrorKind::NotFound) mismatch = now.error();
           if (now.ok() && (now.value().size != listed.size || now.value().mtime != listed.mtime))
-            return Error{ErrorKind::Changed, path + " changed since it was listed"};
+            mismatch = Error{ErrorKind::Changed, path + " changed since it was listed"};
         }
-        return Error{ErrorKind::Checksum, path + " has checksum " + stored.value().hex +
-                                              " on the source, but " + spec.checksum.hex +
-                                              " was read"};
+        return aborted(std::move(mismatch));
       }
       source_verified = true;
     }
   }
   spec.require_verification = options.require_verification && !source_verified;
   if (options.before_commit) {
-    if (Status s = options.before_commit(); !s.ok()) {
-      writer->abort();
-      return s.error();
-    }
+    if (Status s = options.before_commit(); !s.ok()) return aborted(s.error());
   }
   auto committed = writer->commit(spec);
   if (!committed.ok()) return target_failed(committed.error());

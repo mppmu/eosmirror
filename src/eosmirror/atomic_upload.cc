@@ -26,13 +26,22 @@ RelPath parent_path(const RelPath& path) {
 
 AtomicUploadWriter::AtomicUploadWriter(Endpoint& ep, RelPath path, std::string name,
                                        std::unique_ptr<FileWriter> upload, Locate locate,
-                                       bool mtime_at_open)
+                                       bool mtime_at_open, CommitSpec open_spec)
     : ep_(ep),
       path_(std::move(path)),
       name_(std::move(name)),
       upload_(std::move(upload)),
       locate_(std::move(locate)),
-      mtime_at_open_(mtime_at_open) {}
+      mtime_at_open_(mtime_at_open),
+      open_spec_(std::move(open_spec)) {}
+
+Status AtomicUploadWriter::abort() {
+  Status discarded = upload_->abort();
+  if (discarded.ok()) return discarded;
+  Gone gone = take_back(open_spec_);
+  if (gone == Gone::Stuck) return failed(gone, discarded.error());
+  return {};
+}
 
 Result<CommitInfo> AtomicUploadWriter::commit(const CommitSpec& spec) {
   CommitSpec upload_spec = spec;
@@ -48,7 +57,8 @@ Result<CommitInfo> AtomicUploadWriter::commit(const CommitSpec& spec) {
   if (!upload.in_place)
     return rejected(spec, Error{ErrorKind::IO, name_ + " is not in place after its close: the "
                                                    "upload is still " +
-                                                   (upload.file.name.empty()
+                                                   (upload.unresolved ? "at a place that cannot be told"
+                                                    : upload.file.name.empty()
                                                         ? "elsewhere"
                                                         : "under " + upload.file.name)});
   const Entry& file = upload.file;
@@ -105,6 +115,10 @@ AtomicUploadWriter::Gone AtomicUploadWriter::take_back(const CommitSpec& spec) {
       return Gone::Stuck;
     }
     const UploadFile& upload = located.value();
+    if (upload.unresolved) {
+      log::error("cannot tell where the failed upload of ", name_, " is: left alone");
+      return Gone::Stuck;
+    }
     if (!upload.in_place && upload.file.name.empty()) {
       log::warn("the failed upload of ", name_, " was moved elsewhere: left alone");
       return Gone::NotInPlace;

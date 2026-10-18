@@ -113,16 +113,27 @@ class DeferredMtimes {
   static void apply(const std::vector<Copy>& batch, size_t k, size_t n, Outcome& outcome) {
     for (size_t i = k; i < batch.size(); i += n) {
       const Copy& c = batch[i];
-      struct stat st{};
-      if (lstat(c.path.c_str(), &st) == 0 && (st.st_dev != c.dev || st.st_ino != c.ino)) {
-        ++outcome.failed;  // replaced
+      // Through a descriptor of the file, so that the mtime cannot go to a
+      // file that replaces the copy between its identification and that.
+      int fd = open(c.path.c_str(), O_PATH | O_NOFOLLOW | O_CLOEXEC);
+      if (fd < 0) {
+        if (errno != ENOENT) {
+          if (!outcome.first) outcome.first = errno_error(errno, "open " + c.path);
+          ++outcome.failed;
+        }
         continue;
       }
+      struct stat st{};
+      bool ours = fstat(fd, &st) == 0 && st.st_dev == c.dev && st.st_ino == c.ino;
       struct timespec times[2] = {{0, UTIME_OMIT}, {c.mtime.sec, c.mtime.nsec}};
-      if (utimensat(AT_FDCWD, c.path.c_str(), times, AT_SYMLINK_NOFOLLOW) == 0 || errno == ENOENT)
-        continue;
-      if (!outcome.first) outcome.first = errno_error(errno, "utimes " + c.path);
-      ++outcome.failed;
+      // The empty path names the descriptor's file (futimens() takes no
+      // O_PATH descriptor).
+      bool set = ours && utimensat(fd, "", times, AT_EMPTY_PATH) == 0;
+      int err = errno;
+      close(fd);
+      if (set) continue;
+      if (ours && !outcome.first) outcome.first = errno_error(err, "utimes " + c.path);
+      ++outcome.failed;  // replaced, or not given its mtime
     }
   }
 
@@ -240,7 +251,7 @@ class PosixWriter : public FileWriter {
         deferred_(deferred) {}
 
   ~PosixWriter() override {
-    if (fd_ >= 0) abort();
+    if (fd_ >= 0) (void)abort();
   }
 
   Status write(Chunk chunk) override {
@@ -264,17 +275,18 @@ class PosixWriter : public FileWriter {
   Result<CommitInfo> commit(const CommitSpec& spec) override {
     Status status = finish(spec);
     if (!status.ok()) {
-      abort();
+      (void)abort();
       return status.error();
     }
     return CommitInfo{verified_};
   }
 
-  void abort() override {
-    if (fd_ < 0) return;
+  Status abort() override {
+    if (fd_ < 0) return {};
     close(fd_);
     fd_ = -1;
     unlink(temp_.c_str());
+    return {};
   }
 
  private:
@@ -316,7 +328,19 @@ class PosixWriter : public FileWriter {
       unlink(temp_.c_str());
       return errno_error(err, "rename " + temp_ + " to " + final_);
     }
-    if (deferred) deferred_->add(final_, spec.metadata.mtime, st.st_dev, st.st_ino);
+    if (deferred) {
+      deferred_->add(final_, spec.metadata.mtime, st.st_dev, st.st_ino);
+    } else if (options_.sync) {
+      // No sync of the file system need follow before the directory of a
+      // copy made durable at once is recorded as done: its rename is synced
+      // here.
+      std::string dir = final_.substr(0, final_.rfind('/'));
+      int dfd = open(dir.empty() ? "/" : dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+      bool synced = dfd >= 0 && fsync(dfd) == 0;
+      int err = errno;
+      if (dfd >= 0) close(dfd);
+      if (!synced) return errno_error(err, "sync the directory of " + final_);
+    }
     return {};
   }
 
@@ -352,25 +376,34 @@ class PosixWriter : public FileWriter {
 
 }  // namespace
 
+Result<std::string> canonical_path(const std::string& path) {
+  std::error_code ec;
+  std::filesystem::path absolute = std::filesystem::absolute(path, ec);
+  if (ec) return errno_error(ec.value(), "resolve the path " + path);
+  std::filesystem::path canonical = std::filesystem::weakly_canonical(absolute, ec);
+  for (int i = 0; !ec && i < 40; ++i) {
+    std::filesystem::path again = std::filesystem::weakly_canonical(canonical, ec);
+    if (ec || again == canonical) break;
+    canonical = again;
+  }
+  if (ec) return errno_error(ec.value(), "resolve the path " + path);
+  return canonical.string();
+}
+
 PosixEndpoint::PosixEndpoint(std::string root, PosixOptions options)
     : root_(std::move(root)), options_(options) {
   // The canonical path, so that journals recognize the tree however it was
   // named, and so that the overlap check sees where the tree really is. A
   // root that does not exist yet gets the canonical path of its deepest
-  // existing ancestor, which is what it will have once created. Normalizing
-  // ".." behind a missing component can expose a symlink before it
-  // ("missing/../link"), so the result is resolved again until it settles.
-  std::error_code ec;
-  std::filesystem::path absolute = std::filesystem::absolute(root_, ec);
-  if (!ec) {
-    std::filesystem::path canonical = std::filesystem::weakly_canonical(absolute, ec);
-    for (int i = 0; !ec && i < 40; ++i) {
-      std::filesystem::path again = std::filesystem::weakly_canonical(canonical, ec);
-      if (ec || again == canonical) break;
-      canonical = again;
-    }
-    root_ = (ec ? absolute.lexically_normal() : canonical).string();
-  }
+  // existing ancestor, which is what it will have once created. One that
+  // cannot be resolved (a directory above it that cannot be searched) is
+  // kept as given, and root_error() says so: such a path could name a tree
+  // inside the other endpoint's without the overlap check seeing it.
+  auto canonical = canonical_path(root_);
+  if (canonical.ok())
+    root_ = canonical.value();
+  else
+    root_error_ = canonical.error();
   while (root_.size() > 1 && root_.back() == '/') root_.pop_back();
   mode_t mask = umask(0);
   umask(mask);

@@ -159,7 +159,7 @@ TEST_CASE("posix writer commits atomically with metadata") {
     auto w = ep.open_write("gap.bin", spec);
     REQUIRE(w.ok());
     CHECK_FALSE(w.value()->write(5, bytes("x")).ok());
-    w.value()->abort();
+    CHECK(w.value()->abort().ok());
     CHECK(ep.list("").value().entries.size() == 1);
   }
 
@@ -339,6 +339,20 @@ TEST_CASE("posix roots have their canonical path, also before they exist") {
   // ".." behind a missing component exposes the symlink before it.
   CHECK(PosixEndpoint(tmp.sub("missing/../link/dir")).describe() == real + "/dir");
   CHECK(PosixEndpoint(tmp.sub("link/dir/missing/../../missing2/../")).describe() == real);
+  CHECK_FALSE(PosixEndpoint(tmp.sub("link/dir")).root_error().has_value());
+  auto resolved = canonical_path(tmp.sub("missing/../link/dir"));
+  REQUIRE(resolved.ok());
+  CHECK(resolved.value() == real + "/dir");
+
+  // A root that cannot be resolved (here through a symlink loop) is told,
+  // since the overlap check could not trust it.
+  REQUIRE(symlink("loop", tmp.sub("loop").c_str()) == 0);
+  auto unresolved = canonical_path(tmp.sub("loop/dir"));
+  REQUIRE_FALSE(unresolved.ok());
+  CHECK(unresolved.error().message.find("resolve the path") != std::string::npos);
+  auto error = PosixEndpoint(tmp.sub("loop/dir")).root_error();
+  REQUIRE(error.has_value());
+  CHECK(error->message.find(tmp.sub("loop/dir")) != std::string::npos);
 }
 
 TEST_CASE("trees that overlap are found by whole path components") {

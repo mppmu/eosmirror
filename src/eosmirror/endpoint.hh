@@ -146,7 +146,10 @@ class FileWriter {
   virtual Result<CommitInfo> commit(const CommitSpec& spec) = 0;
 
   // Discards the file. Called instead of commit(), or after a failed one.
-  virtual void abort() = 0;
+  // An error means that the target may hold the data all the same (an
+  // upload that its storage node may have committed, see AtomicUploadWriter),
+  // in doubt where it may stay in place.
+  virtual Status abort() = 0;
 };
 
 class Endpoint {

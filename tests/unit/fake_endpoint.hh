@@ -86,6 +86,10 @@ class FakeEndpoint : public eosmirror::Endpoint {
   // hidden name (".tmp-<name>"), like an EOS close that timed out while the
   // storage node was still committing.
   int hidden_uploads = 0;
+  // With `atomic_uploads`: this many aborts fail to discard the upload,
+  // which is committed as it is, like an EOS upload whose request to delete
+  // failed before its close.
+  int committing_aborts = 0;
 
   // ---- test setup -----------------------------------------------------------
 
@@ -181,8 +185,16 @@ class FakeEndpoint : public eosmirror::Endpoint {
     if (auto err = check("stat", path)) return *err;
     std::lock_guard lock(mutex_);
     auto it = nodes_.find(path);
-    if (it == nodes_.end()) return not_found(path);
-    return it->second.entry;
+    if (it != nodes_.end()) return it->second.entry;
+    // Below an entry that is no directory, as a file system answers.
+    for (RelPath above = parent_of(path); !above.empty(); above = parent_of(above)) {
+      auto a = nodes_.find(above);
+      if (a == nodes_.end()) continue;
+      if (a->second.entry.type != eosmirror::EntryType::Directory)
+        return Error{ErrorKind::NotADirectory, above + " is no directory"};
+      break;
+    }
+    return not_found(path);
   }
 
   Result<eosmirror::Listing> list(const RelPath& dir) override {
@@ -292,7 +304,8 @@ class FakeEndpoint : public eosmirror::Endpoint {
     std::unique_ptr<eosmirror::FileWriter> writer(new Writer(*this, path, spec, id));
     if (!atomic_uploads) return writer;
     return std::unique_ptr<eosmirror::FileWriter>(new eosmirror::AtomicUploadWriter(
-        *this, path, path, std::move(writer), [this, path, id] { return placed(path, id); }));
+        *this, path, path, std::move(writer), [this, path, id] { return placed(path, id); }, true,
+        spec));
   }
 
  private:
@@ -380,7 +393,18 @@ class FakeEndpoint : public eosmirror::Endpoint {
       if (auto err = ep_.check("close", path_)) return *err;
       return eosmirror::CommitInfo{verified};
     }
-    void abort() override {}
+    Status abort() override {
+      std::lock_guard lock(ep_.mutex_);
+      if (id_.empty() || ep_.committing_aborts <= 0) return {};
+      --ep_.committing_aborts;
+      Entry e = ep_.base(path_, eosmirror::EntryType::File, 0600, ep_.tick());
+      e.size = content_.size();
+      e.id = id_;
+      ep_.apply(e, spec_.metadata, spec_.fields);
+      ep_.nodes_[path_] = Node{e, content_};
+      ep_.touch_parent(path_);
+      return Error{ErrorKind::IO, "cannot discard the upload of " + path_};
+    }
 
    private:
     FakeEndpoint& ep_;

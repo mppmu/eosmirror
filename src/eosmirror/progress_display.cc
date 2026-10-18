@@ -101,7 +101,12 @@ bool ProgressDisplay::suitable(int fd) {
 void ProgressDisplay::start() {
   if (thread_.joinable()) return;
   log::set_display_hooks([this] { erase(); }, [this] { render(); });
-  thread_ = std::thread([this] { loop(); });
+  try {
+    thread_ = std::thread([this] { loop(); });
+  } catch (...) {
+    log::set_display_hooks(nullptr, nullptr);
+    throw;
+  }
 }
 
 void ProgressDisplay::stop() {

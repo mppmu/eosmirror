@@ -490,6 +490,7 @@ struct Engine::Impl {
   }
 
   void finalize(const std::shared_ptr<DirNode>& node) {
+    bool simulated = false;  // a dry run would have changed the metadata
     if (!cancel.requested() && node->owned && !node->failed) {
       MetaFields fields = MetaFields::None;
       if (node->created) {
@@ -507,15 +508,17 @@ struct Engine::Impl {
         node->failed = true;
       else if (!node->created && fields != MetaFields::None)
         stats.metadata_fixed.fetch_add(1);
+      simulated = options.dry_run && fields != MetaFields::None;
     } else if (!cancel.requested() && !node->failed && node->made_writable) {
       // The shard that owns the directory sets its metadata, but the mode
       // relaxed for creating a subdirectory is restored here.
       if (!apply_metadata(node->path, node->source, MetaFields::Mode)) node->failed = true;
     }
     // The top directory stands for the copies that a failed sync left with
-    // mtime 0, wherever they are.
+    // mtime 0, wherever they are. A recorded failure stays where a dry run
+    // only would have repaired it.
     bool complete = !node->failed && !node->incomplete && !(node->path.empty() && sync_failed);
-    if (complete && !cancel.requested()) succeeded(node->path);
+    if (complete && !simulated && !cancel.requested()) succeeded(node->path);
     if (journal && !options.dry_run && complete && !node->only && !cancel.requested()) {
       std::lock_guard lock(finalized_mutex);
       finalized.push_back(node->path);
@@ -919,7 +922,9 @@ struct Engine::Impl {
     if (fields != MetaFields::None) ensure_writable(node);
     if (!apply_metadata(path, e, fields)) return;
     if (fields != MetaFields::None) stats.metadata_fixed.fetch_add(1);
-    succeeded(path);
+    // A dry run that only would have fixed the metadata leaves a recorded
+    // failure (a verifying one keeps its journal) for a run to repair.
+    if (fields == MetaFields::None || !options.dry_run) succeeded(path);
   }
 
   // A file to copy where its checksum on the target differs: in a dry run a
@@ -1099,9 +1104,9 @@ struct Engine::Impl {
         deletions.fetch_sub(1);
         return s;
       }
+      succeeded(path);  // not in a dry run, which deletes nothing
     }
     stats.deleted.fetch_add(1);
-    succeeded(path);
     return {};
   }
 
@@ -1274,8 +1279,11 @@ struct Engine::Impl {
       auto settled = [&] {
         if (pending) journal_write(journal->clear_failure(path));
       };
-      // The error of an attempt that may have left its copy in place.
+      // The error of an attempt that may have left its copy in place. A
+      // copy in doubt since an earlier run stays so until one is confirmed,
+      // whatever the attempts of this run fail with.
       std::optional<Error> doubt;
+      bool prior_doubt = copy_in_doubt(path);
       auto result = retry([&] {
         slot.written = 0;
         target_failed = false;
@@ -1299,18 +1307,21 @@ struct Engine::Impl {
         }
         succeeded(path);
         settled();
-      } else if (doubt) {
-        // The journal keeps the copy in doubt, however its last attempt
-        // ended, also when cancelled.
-        Error e = result.error();
-        if (e.kind == ErrorKind::Cancelled)
-          e = *doubt;
-        else if (!e.in_doubt)
-          e = Error{ErrorKind::IO, e.describe() + "; an attempt before: " + doubt->describe()};
-        fail(path, EntryType::File, e);
-      } else if (result.error().kind == ErrorKind::NotFound && !target_failed) {
-        vanished(path, EntryType::File, job.replaces);
+      } else if (result.error().kind == ErrorKind::NotFound && !target_failed && !doubt) {
+        vanished(path, EntryType::File, job.replaces);  // keeps a row in doubt
         settled();
+      } else if (doubt || prior_doubt) {
+        // The journal keeps the copy in doubt, however its last attempt
+        // ended, also when cancelled (which fail() leaves out, so that the
+        // row of the earlier run stays as it is).
+        Error e = result.error();
+        if (e.kind == ErrorKind::Cancelled && doubt)
+          e = *doubt;
+        else if (!e.in_doubt && e.kind != ErrorKind::Cancelled)
+          e = Error{ErrorKind::IO, e.describe() + "; " +
+                                       (doubt ? "an attempt before: " + doubt->describe()
+                                              : "the copy in place is in doubt since an earlier run")};
+        fail(path, EntryType::File, e);
       } else {
         fail(path, EntryType::File, result.error());
       }
@@ -1407,9 +1418,11 @@ struct Engine::Impl {
   // them may be in doubt.
   void retry_without_source(const RelPath& dir, const std::set<std::string>& names) {
     for (const auto& name : names) {
+      if (cancel.requested()) return;
       RelPath path = join(dir, name);
       auto dst = retry([&] { return target.stat(path); });
-      if (!dst.ok() && dst.error().kind == ErrorKind::NotFound) {
+      if (!dst.ok() && (dst.error().kind == ErrorKind::NotFound ||
+                        dst.error().kind == ErrorKind::NotADirectory)) {
         if (journal_updates()) journal_write(journal->clear_failure(path));
         continue;
       }
@@ -1419,6 +1432,24 @@ struct Engine::Impl {
            Error{ErrorKind::NotFound, "gone from the source while the target has it: not "
                                       "retried (a run with --delete removes it)"}});
     }
+  }
+
+  // With --one-file-system: an error if the source directory, or one above
+  // it, is on another file system than the source's root, where a walk from
+  // the top would not go.
+  Status on_root_file_system(const RelPath& dir, const Entry& entry) {
+    auto check = [&](const RelPath& path, const Entry& e) {
+      if (!source.other_file_system(e)) return Status();
+      return Status(Error{ErrorKind::Other, source.describe() + "/" + path +
+                                                " is on another file system (--one-file-system)"});
+    };
+    for (auto slash = dir.find('/'); slash != std::string::npos; slash = dir.find('/', slash + 1)) {
+      RelPath ancestor = dir.substr(0, slash);
+      auto st = retry([&] { return source.stat(ancestor); });
+      if (!st.ok()) return st.error();
+      if (Status s = check(ancestor, st.value()); !s.ok()) return s;
+    }
+    return check(dir, entry);
   }
 
   // Prepares a node for a source directory: stats the target and creates the
@@ -1512,6 +1543,12 @@ struct Engine::Impl {
     if (syncer.joinable()) syncer.join();
     // Also after a cancellation: the copies made so far stay.
     if (!options.dry_run) sync_target();
+    // The top directory's finalization may have cleared the failure that a
+    // sync recorded meanwhile: recorded again, once nothing else runs.
+    if (sync_failed && journal_updates())
+      journal_write(journal->record_failure(
+          {"", EntryType::Directory,
+           Error{ErrorKind::IO, "a sync of the target failed: copies may keep mtime 0"}}));
     if (end_error) return *end_error;
     if (cancel.requested()) return Error{ErrorKind::Cancelled, "run cancelled"};
     return {};
@@ -1559,11 +1596,26 @@ Status Engine::run(const std::vector<Failure>& entries) {
 
   std::vector<std::shared_ptr<DirNode>> roots;
   for (auto& [dir, names] : groups) {
+    if (impl_->cancel.requested()) break;
     auto src = impl_->source_dir(dir);
     if (!src.ok() && (src.error().kind == ErrorKind::NotFound ||
                       src.error().kind == ErrorKind::NotADirectory)) {
       impl_->retry_without_source(dir, names);
       continue;
+    }
+    // Where a walk from the top would not go, nor does a retry: the rows
+    // stay for a run that does.
+    if (src.ok() && impl_->options.one_file_system) {
+      Status same = impl_->on_root_file_system(dir, src.value());
+      if (!same.ok()) {
+        if (same.error().kind != ErrorKind::Other) {
+          impl_->fail(dir, EntryType::Directory, same.error());
+          continue;
+        }
+        impl_->stats.other_fs_skipped.fetch_add(1);
+        log::info("skipping ", dir, ": ", same.error().message, "; its entries stay recorded");
+        continue;
+      }
     }
     // Starting below the top takes the paths above for directories.
     Status above = src.ok() ? impl_->ancestors_are_directories(impl_->source, dir) : Status();
