@@ -12,8 +12,9 @@ A run walks the source tree directory by directory and makes the target match:
   mtime (compared at the coarser mtime resolution of the two endpoints).
   Otherwise only its owner, group and mode are fixed when they differ.
   `--size-only` compares sizes alone, as a target that stores no mtimes needs
-  (a run against one refuses to start without it). Where the target stores
-  mtimes, `--size-only` fixes those of files that match, as rsync does.
+  (a run against one refuses to start without it or `--checksum`). Where the
+  target stores mtimes, `--size-only` fixes those of files that match, as
+  rsync does.
   `--checksum` compares files of the same size by checksum instead of mtime,
   as `rsync -c` does, and works on a target without mtimes as well. Where both
   listings carry stored checksums of one type (EOS), the checker decides at
@@ -416,9 +417,10 @@ symlinks, and removing a symlink removes the file it points to
 (`XrdOssUnlink.cc`, BreakLink): `--delete` on such a target, which would
 delete through symlinks it cannot see, is refused unless
 `--target-without-symlinks` states that there are none. The endpoint
-reports these as capabilities, and the engine then needs `--size-only` to
-compare files by size only, skips symlinks (counted), applies no mtimes,
-ignores owners of such a source, and detects directory cycles.
+reports these as capabilities, and the engine then needs `--size-only` (or
+`--checksum`) to compare files without mtimes, skips symlinks (counted),
+applies no mtimes, ignores owners of such a source, and detects directory
+cycles.
 
 A server ends a listing with stat information at the first entry that it
 cannot stat for another reason than its absence, such as a symlink loop, and
@@ -595,7 +597,8 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
   computed while copying (adler32). Files without checksums (`none`, the
   default without `sys.forced.checksum`) or with another type (from the
   directory or a space policy) are counted as unverified, and refused with
-  `--require-checksum`. Any other file in place (the previous one, or
+  `--require-checksum`, unless the source's stored checksum verified the
+  data read (an EOS source). Any other file in place (the previous one, or
   another writer's) is never taken for the upload, however much it looks
   like it: the copy fails as not committed (an I/O error), is retried, and
   that file is left alone. An upload in place that does not match, or is

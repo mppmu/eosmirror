@@ -126,9 +126,9 @@ not enough). Without one, the run refuses to start unless `--no-owner` is
 given.
 
 Plain XRootD servers store no mtimes and have no symlinks: a run against one
-needs `--size-only`, and skips and counts symlinks. As with rsync,
-`--size-only` works on any target: it compares files by size alone, and sets
-the mtimes of files that match where the target stores them.
+needs `--size-only` or `--checksum`, and skips and counts symlinks. As with
+rsync, `--size-only` works on any target: it compares files by size alone,
+and sets the mtimes of files that match where the target stores them.
 
 Each file is copied in chunks of `--buffer-size` (8 MiB) with up to 4 reads
 and 4 writes in flight (`--read-window`, `--write-window`). Writes go out in
@@ -239,11 +239,13 @@ distances. Runs with an EOS target and a larger window say so at the start.
   another writer's upload that has been running for longer than an hour. EOS's
   own creation tracker (`eos space config default space.tracker=on`, off by
   default) removes abandoned atomic uploads after two days.
-- The first Ctrl-C (or SIGTERM) lets the copies under way finish. XrdCl's
-  request timeout no longer applies once the header of a read's reply has
-  arrived, so a storage node that sends the rest of the reply slowly keeps a
-  transfer, and with it the run, waiting. A second Ctrl-C exits at once,
-  without a summary. The next run removes the temporaries left behind (with
+- The first Ctrl-C (or SIGTERM) stops the copies under way at their next
+  chunk and discards what they wrote, waits for the requests in flight, makes
+  the copies finished so far durable, and prints the summary. XrdCl's request
+  timeout no longer applies once the header of a read's reply has arrived,
+  so a storage node that sends the rest of the reply slowly keeps a transfer,
+  and with it the run, waiting. A second Ctrl-C exits at once, without a
+  summary. The next run removes the temporaries left behind (with
   `--delete`, once they are an hour old) and copies again what a sync has not
   made durable.
 - Plain XRootD servers create files and directories with modes masked by
