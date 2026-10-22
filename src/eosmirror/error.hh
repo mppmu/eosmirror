@@ -54,7 +54,9 @@ Error errno_error(int err, std::string_view context);
 // errors of other kinds become transient I/O errors.
 Error upload_error(Error e);
 
-// The result of an operation: either a value or an error.
+// The result of an operation: either a value or an error. Asking for the
+// one it does not hold throws std::bad_optional_access, so that a test
+// fails instead of reading garbage.
 template <class T>
 class [[nodiscard]] Result {
  public:
@@ -64,12 +66,12 @@ class [[nodiscard]] Result {
   bool ok() const { return !error_; }
   explicit operator bool() const { return ok(); }
 
-  T& value() & { return *value_; }
-  const T& value() const& { return *value_; }
+  T& value() & { return value_.value(); }
+  const T& value() const& { return value_.value(); }
   // By value, so that the value of a temporary outlives it, as in
   // `for (auto& x : f().value())`.
-  T value() && { return std::move(*value_); }
-  const Error& error() const { return *error_; }
+  T value() && { return std::move(value_.value()); }
+  const Error& error() const { return error_.value(); }
 
  private:
   std::optional<T> value_;
@@ -84,7 +86,7 @@ class [[nodiscard]] Result<void> {
 
   bool ok() const { return !error_; }
   explicit operator bool() const { return ok(); }
-  const Error& error() const { return *error_; }
+  const Error& error() const { return error_.value(); }
 
  private:
   std::optional<Error> error_;

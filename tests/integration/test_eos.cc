@@ -200,8 +200,9 @@ TEST_CASE("eos endpoint: identity, listing, symlinks, metadata and atomic writes
   CHECK(st.value().uid == 1234);
   CHECK(st.value().mode == 0640);
 
-  // A checksum mismatch found after the upload is in place removes it, so
-  // that its size and mtime cannot pass for a good copy.
+  // A checksum mismatch found after the upload is in place takes it back,
+  // so that its size and mtime cannot pass for a good copy: having replaced
+  // a file, it stays with mtime 0 and the file's versions.
   std::string corrupt = pattern(1000);
   CommitSpec bad = spec;
   bad.size = corrupt.size();
@@ -212,7 +213,7 @@ TEST_CASE("eos endpoint: identity, listing, symlinks, metadata and atomic writes
   auto s = w2.value()->commit(bad);
   REQUIRE_FALSE(s.ok());
   CHECK(s.error().kind == ErrorKind::Checksum);
-  CHECK(ep.stat("d/f").error().kind == ErrorKind::NotFound);
+  CHECK(must(ep.stat("d/f")).mtime == Timespec{0, 0});
 
   // Replacing an existing file.
   std::string other = "replacement";
