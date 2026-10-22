@@ -62,7 +62,7 @@ struct SyncOptions {
   bool preserve_owner = true;
   bool preserve_mode = true;
   bool verify = true;  // compute and compare checksums where possible
-  bool require_checksum = false;  // fail copies the target cannot verify
+  bool require_checksum = false;  // fail copies that neither side could verify
   bool resume = false;  // skip directories the journal records as finalized
   // Skip source directories on file systems other than the source root's.
   bool one_file_system = false;

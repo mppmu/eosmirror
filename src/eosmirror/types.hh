@@ -11,6 +11,7 @@
 
 namespace eosmirror {
 
+// Journals store types as numbers: new types go last.
 enum class EntryType : uint8_t { File, Directory, Symlink, Other };
 
 std::string_view to_string(EntryType type);
@@ -47,7 +48,7 @@ constexpr MetaFields operator~(MetaFields a) {
 constexpr bool has(MetaFields fields, MetaFields flag) { return (fields & flag) != MetaFields::None; }
 
 // A directory entry or stat result. Directory listings fill it completely,
-// so that the engine never needs a stat per entry.
+// so that comparing entries takes no stat per entry.
 struct Entry {
   std::string name;
   EntryType type = EntryType::Other;

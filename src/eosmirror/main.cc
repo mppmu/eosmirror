@@ -59,7 +59,7 @@ int selftest(const CliOptions& opts) {
   Capabilities caps = target.value()->capabilities();
   std::printf("Self-test of %s\n", target.value()->describe().c_str());
   std::printf("  mtimes: %s, symlinks: %s, owners: %s, checksum: %s\n",
-              caps.can_set_mtime ? "yes" : "no (runs need --size-only)",
+              caps.can_set_mtime ? "yes" : "no (runs need --size-only or --checksum)",
               caps.has_symlinks ? "yes" : "no (skipped)",
               caps.can_set_owner ? "yes" : "no (needs --no-owner)",
               std::string(to_string(caps.checksum)).c_str());

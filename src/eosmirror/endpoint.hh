@@ -31,7 +31,8 @@ struct Capabilities {
   bool can_set_mode = true;
   ModeBits file_mode_bits = 07777;
   ModeBits dir_mode_bits = 07777;
-  // Whether mtimes can be set. Without it, files are compared by size only.
+  // Whether mtimes can be set. Without it, files are compared by size only,
+  // or by checksum.
   bool can_set_mtime = true;
   // Whether symlinks exist on the endpoint.
   bool has_symlinks = true;
@@ -142,7 +143,8 @@ class FileWriter {
   }
 
   // Finishes the file: applies the metadata, verifies size and checksum
-  // against what the endpoint stored, and renames it into place.
+  // against what the endpoint stored, and puts it in place (a rename, or
+  // EOS's close and the confirmation after it).
   virtual Result<CommitInfo> commit(const CommitSpec& spec) = 0;
 
   // Discards the file. Called instead of commit(), or after a failed one.
@@ -152,6 +154,9 @@ class FileWriter {
   virtual Status abort() = 0;
 };
 
+// All methods may be called from many threads at once, flush() while
+// transfers write. A reader or writer is used by one thread, while the
+// endpoint may complete its requests from others.
 class Endpoint {
  public:
   virtual ~Endpoint() = default;
@@ -184,11 +189,12 @@ class Endpoint {
 
   // Makes the copies written so far durable and final where the endpoint
   // defers that (local targets, see PosixOptions::sync); a run calls it
-  // once its transfers have ended.
+  // every so often while its transfers go on, and once they have ended.
   virtual Status flush() { return {}; }
 
-  // Stats an entry without following symlinks. The result's name is the
-  // last path component.
+  // Stats an entry without following a final symlink, where the endpoint
+  // shows symlinks (see Capabilities::follows_symlinks). The result's name
+  // is the last path component.
   virtual Result<Entry> stat(const RelPath& path) = 0;
 
   // Lists a directory with full metadata per entry, in no particular order.

@@ -25,9 +25,9 @@ size_t next_transfer_limit(size_t limit, size_t min_limit, size_t max_limit, boo
 // throughput in bytes or files beats the one measured at the previous limit
 // by more than 5 %. If both fall more than 10 % short of that throughput
 // after a rise, the rise did not pay: the limit goes back and holds for a
-// minute (6 intervals of 10 s). The limit falls when operations of transfers
-// on the target had to be retried. The interval after that only measures the
-// lower limit. The throughput to beat decays by 0.5 % per interval, so that
+// minute (6 intervals of 10 s). The limit falls when transfers met transient
+// errors of the target. The interval after that only measures the lower
+// limit. The throughput to beat decays by 0.5 % per interval, so that
 // a record from an earlier part of the tree cannot block growth for good.
 // With a flat throughput, a higher limit is tried every 100 s or so.
 class TransferController {
@@ -48,7 +48,9 @@ class TransferController {
   int hold_ = 0;                              // intervals left without rises
 };
 
-// Synchronizes a target tree with a source tree, see docs/design.md.
+// Synchronizes a target tree with a source tree, see docs/architecture.md
+// and docs/design.md. An engine runs once, and borrows the endpoints, the
+// report, the journal and the cancellation, which must outlive the run.
 class Engine {
  public:
   Engine(Endpoint& source, Endpoint& target, SyncOptions options, Report& report, Journal* journal,
