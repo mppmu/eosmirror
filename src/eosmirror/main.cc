@@ -268,8 +268,9 @@ int sync(const CliOptions& opts) {
 
   std::atomic<bool> finished{false};
   std::thread progress;
-  std::string title = std::string("eosmirror ") + (sync.dry_run ? "dry run: " : "") +
-                      source.value()->describe() + " -> " + target.value()->describe();
+  std::string title = std::string("eosmirror " EOSMIRROR_VERSION) +
+                      (sync.dry_run ? " dry run: " : ": ") + source.value()->describe() + " -> " +
+                      target.value()->describe();
   // Live bars on a terminal, unless plain progress lines were asked for or
   // the run is quiet.
   std::unique_ptr<ProgressDisplay> display;
