@@ -255,6 +255,12 @@ distances. Runs with an EOS target and a larger window say so at the start.
   summary. The next run removes the temporaries left behind (with
   `--delete`, once they are an hour old) and copies again what a sync has not
   made durable.
+- Plain XRootD servers list names one per line, unescaped. A name with line
+  breaks can add lines; names that then appear twice, and lines that cannot
+  be names, are skipped and counted. XrdCl drops empty lines, though, so a
+  name that starts or ends with a line break is listed without it (its copy
+  fails as vanished), and one that is a line break alone is not listed at
+  all, neither of them counted.
 - Plain XRootD servers create files and directories with modes masked by
   their `ofs.crmode` (by default 0775), while eosmirror takes them to keep
   all permission bits: files writable by others (o+w) get their mode

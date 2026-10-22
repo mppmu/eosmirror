@@ -539,7 +539,8 @@ Result<Entry> XrdEndpoint::stat_abs(const std::string& abs) {
 // the names alone stats nothing, so one is taken alongside, and the names it
 // has that the other lacks are stated one by one. Names come one per line,
 // unescaped: a name with line breaks can forge lines, so names listed more
-// than once are left out.
+// than once are left out, and so are lines that are no names ("." or "..",
+// which servers do not list), rather than stated.
 Result<Listing> XrdEndpoint::list(const RelPath& dir) {
   std::string abs = absolute(dir);
   auto request = request_path(abs);
@@ -581,6 +582,10 @@ Result<Listing> XrdEndpoint::list(const RelPath& dir) {
   // An entry stated on its own: one that is gone is no entry, one that
   // cannot be stated is left out.
   auto stat_entry = [&](const std::string& name) {
+    if (!valid_entry_name(name)) {
+      ++forged;
+      return;
+    }
     auto e = stat(join(dir, name));
     if (e.ok()) {
       result.entries.push_back(std::move(e).value());
@@ -608,7 +613,7 @@ Result<Listing> XrdEndpoint::list(const RelPath& dir) {
   }
   if (forged > 0)
     log::warn("skipping ", forged, " entries of ", url_of(abs),
-              " whose names are listed more than once");
+              " whose names are forged by line breaks");
   result.skipped += forged;
   return result;
 }

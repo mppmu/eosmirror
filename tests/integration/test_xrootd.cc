@@ -390,6 +390,12 @@ TEST_CASE("xrootd endpoint: listings that end early or have forged lines") {
   REQUIRE(forged.ok());
   for (const Entry& e : forged.value().entries) CHECK(e.name != "f0");
   CHECK(forged.value().skipped == 2);
+  // A symlink loop, which leaves the names to be stated one by one, whose
+  // name has a line "..": that line is skipped, not stated.
+  auto dotdot = ep.value()->list("dotdot");
+  REQUIRE(dotdot.ok());
+  CHECK(dotdot.value().entries.empty());
+  CHECK(dotdot.value().skipped == 1);
 }
 
 TEST_CASE("xrootd to FS: owners and symlink loops of a server that follows symlinks") {

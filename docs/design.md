@@ -436,7 +436,11 @@ listed by name, which stats nothing, in a request sent alongside. Names that
 the listing with stat information lacks are stated one by one, and left out
 (counted) where that fails. Both listings send one name per line, unescaped,
 so a name with line breaks can add lines: names listed more than once are left
-out (counted), as in EOS listings.
+out (counted), as in EOS listings, and so are lines that cannot be names ("."
+or "..", which servers do not list), rather than stated. XrdCl drops empty
+lines, though (`XrdOucTUtils::splitString`): a name that starts or ends with a
+line break is listed without it, so that its copy fails as vanished, and one
+that is a line break alone is not listed at all, neither of them counted.
 
 Writes go to a temporary name `.<name>.eosmirror-<12 hex digits>` with up to
 `--write-window` writes in flight per file. The stored checksum is verified by
