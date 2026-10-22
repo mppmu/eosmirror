@@ -130,9 +130,11 @@ differs in size, or in mtime at the coarser resolution of the two endpoints
 in place that is provisional (mtime 0 while the source's is not,
 `provisional()`) or in doubt (a journal row of an in-doubt kind,
 `copy_in_doubt()`) is copied again whatever the comparison says, after
-getting mtime 0 (`invalidate_in_doubt()`) so that it can never pass for good
-if the new copy does not arrive. With `--checksum`, stored checksums of one
-type decide at once; otherwise the transfer reads what is not stored
+getting mtime 0 (`invalidate_in_doubt()`; removed where mtime 0 cannot mark
+it, on a target without mtimes or for a source with mtime 0, unless removing
+could delete through a symlink) so that it can never pass for good if the new
+copy does not arrive. With `--checksum`, stored checksums of one type decide
+at once; otherwise the transfer reads what is not stored
 (`differs_by_checksum()`).
 
 `run_copy()` runs `copy_file()` under `with_retries()`: open the source,
@@ -342,12 +344,15 @@ Every change keeps these; the tests named protect them.
    parsers refuse what they cannot tell apart. "listed names that cannot be
    joined into paths are skipped", `test_xrootd_eos` "find listing lines
    that are refused".
-5. Nothing is deleted without `--delete`; never everything (the empty-source
-   stop); nothing in a directory whose listings may be incomplete; no extra
-   before a stat of the source confirmed its absence; every deletion held
-   back is a journaled failure. "an empty source does not empty the target",
-   "nothing is deleted where a listing skipped entries", "the source confirms
-   what it lacks before anything is deleted".
+5. No extra is deleted without `--delete`; never everything (the
+   empty-source stop); nothing in a directory whose listings may be
+   incomplete; no extra before a stat of the source confirmed its absence;
+   every deletion held back is a journaled failure. A file about to be
+   copied again is removed only where mtime 0 cannot mark it and removing
+   cannot reach through a symlink. "an empty source does not empty the
+   target", "nothing is deleted where a listing skipped entries", "the source
+   confirms what it lacks before anything is deleted", "no file is removed to
+   mark it where that may delete through a symlink".
 6. The journal is the only state across runs: it belongs to one source,
    target and shard, serves one run at a time, and a run that cannot write
    it stops. `test_journal`, "a run stops when its journal cannot be written".

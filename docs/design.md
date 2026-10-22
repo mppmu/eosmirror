@@ -311,23 +311,27 @@ Modes:
   Nothing counts as gone from both sides in a directory where a listing left
   out entries.
 - Files whose row is a transient error other than a change of the source (I/O,
-  timeout, checksum) are copied again by any run with the journal that
-  visits them (a resumed run skips finalized directories), whatever their
-  size and mtime, and without a checksum comparison: such a copy may
-  have failed its verification or close in place (EOS) and kept the source's
-  size and mtime when it could be neither removed nor given mtime 0, which
-  then fails it as an I/O error whatever went wrong. Before the new copy, the
-  file gets mtime 0 unless it has it, as does a file that `--checksum` found
-  to differ, so that, if the new copy does not arrive, the file in place
-  cannot be taken for it, with or without a journal. An EOS upload gets such a
-  row ("the run ended before the copy was confirmed") right before its close.
-  The row is removed once the copy is confirmed, or replaced by its failure: a
-  run that ends in between (killed, or on a host that crashed) leaves the copy
-  in doubt. Rows are written in a transaction each, in SQLite's write-ahead
-  log with synchronous=NORMAL, which keeps them when the process ends, though
-  not necessarily through a power loss. Once an attempt has left a copy in
-  doubt, its row is such an I/O error however the later attempts end, also
-  when the run is cancelled before the next one.
+  timeout, checksum) are copied again by any run with the journal that visits
+  them (a resumed run skips finalized directories), whatever their size and
+  mtime, and without a checksum comparison: such a copy may have failed its
+  verification or close in place (EOS) and kept the source's size and mtime
+  when it could be neither removed nor given mtime 0, which then fails it as
+  an I/O error whatever went wrong. Before the new copy, the file gets mtime 0
+  unless it has it, as does a file that `--checksum` found to differ, so that,
+  if the new copy does not arrive, the file in place cannot be taken for it,
+  with or without a journal. Where mtime 0 cannot mark it (a target without
+  mtimes, a source file with mtime 0), the file is removed instead, except on
+  a target that cannot show symlinks without `--target-without-symlinks`:
+  removing a symlink there removes the file it points to, so the file stays,
+  and a run that compares by size alone may take it for a good copy. An EOS
+  upload gets such a row ("the run ended before the copy was confirmed") right
+  before its close. The row is removed once the copy is confirmed, or replaced
+  by its failure: a run that ends in between (killed, or on a host that
+  crashed) leaves the copy in doubt. Rows are written in a transaction each,
+  in SQLite's write-ahead log with synchronous=NORMAL, which keeps them when
+  the process ends, though not necessarily through a power loss. Once an
+  attempt has left a copy in doubt, its row is such an I/O error however the
+  later attempts end, also when the run is cancelled before the next one.
 - `--resume` skips directories finalized by the previous run if that run
   was interrupted; after a completed run there is nothing to resume and
   everything is walked. Resuming selects no recorded failures: those in

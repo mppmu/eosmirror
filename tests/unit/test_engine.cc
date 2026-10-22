@@ -1460,6 +1460,55 @@ TEST_CASE("fake: --checksum compares files of the same size by checksum") {
   expect_mirrored(src, dst);
 }
 
+TEST_CASE("fake: a differing file that mtime 0 cannot mark cannot pass for a copy later") {
+  FakeEndpoint src, dst;
+  populate(src);
+  SyncOptions plain = fake_options();
+  SUBCASE("a source file with mtime 0") {
+    src.modify("f0", [](FakeEndpoint::Node& n) { n.entry.mtime = {0, 0}; });
+  }
+  SUBCASE("a target without mtimes") {
+    dst.caps.can_set_mtime = false;
+    plain.size_only = true;
+  }
+  Report mirror;
+  REQUIRE(run_sync(src, dst, plain, mirror).ok());
+  // Other content with the same size and mtime, and a new copy that fails.
+  dst.modify("f0", [](FakeEndpoint::Node& n) { n.content = "root fil3"; });
+  dst.fail("commit", "f0", Error{ErrorKind::NoSpace, "quota exceeded"});
+  SyncOptions o = fake_options();
+  o.checksum = true;
+  Report r;
+  REQUIRE(run_sync(src, dst, o, r).ok());
+  CHECK(r.stats.checksums_differ == 1);
+  CHECK(r.stats.failures == 1);
+  // A run that compares by size (and mtime) copies it all the same.
+  Report again;
+  REQUIRE(run_sync(src, dst, plain, again).ok());
+  CHECK(again.stats.files_copied == 1);
+  CHECK(dst.get("f0")->content == "root file");
+}
+
+TEST_CASE("fake: no file is removed to mark it where that may delete through a symlink") {
+  FakeEndpoint src, dst;
+  populate(src);
+  dst.caps.can_set_mtime = false;
+  dst.caps.follows_symlinks = true;
+  SyncOptions o = fake_options();
+  o.size_only = true;
+  Report mirror;
+  REQUIRE(run_sync(src, dst, o, mirror).ok());
+  dst.modify("f0", [](FakeEndpoint::Node& n) { n.content = "root fil3"; });
+  dst.fail("commit", "f0", Error{ErrorKind::NoSpace, "quota exceeded"});
+  o.size_only = false;
+  o.checksum = true;
+  Report r;
+  REQUIRE(run_sync(src, dst, o, r).ok());
+  CHECK(r.stats.failures == 1);
+  CHECK(dst.count("remove") == 0);
+  CHECK(dst.get("f0"));
+}
+
 TEST_CASE("fake: --dry-run --checksum verifies, and a later run repairs what differs") {
   TempDir tmp;
   auto journal = Journal::open(tmp.sub("j.sqlite"), "fake", "fake");

@@ -216,6 +216,9 @@ struct Engine::Impl {
   bool checksums_expected = false;
   bool confirms_after_commit = false;  // the target's commits are confirmed afterwards
   bool relax_modes = false;  // make read-only target directories writable first
+  // Removing a target file may remove what a symlink in its place points to
+  // (Capabilities::follows_symlinks), unless the target has none.
+  bool removes_safely = true;
 
   WorkQueue<std::shared_ptr<DirNode>> dirs;
   WorkQueue<CopyJob> copies;
@@ -976,14 +979,23 @@ struct Engine::Impl {
 
   // Gives a file in place mtime 0 before it is copied again, as a copy that
   // is not final (see provisional()): should the new copy not arrive, every
-  // later run still copies the file again, with or without a journal.
-  // Whether that worked.
+  // later run still copies the file again, with or without a journal. One
+  // that mtime 0 cannot mark, on a target without mtimes or where the
+  // source has mtime 0, is removed instead, where that is safe. Whether
+  // that worked.
   bool invalidate_in_doubt(const RelPath& path, const Entry& e) {
     log::debug("copying ", path, " again: its copy in place is in doubt or differs");
-    if (!use_mtimes || options.dry_run) return true;
+    if (options.dry_run) return true;
     Entry md = e;
     md.mtime = {0, 0};
-    Status reset = retry([&] { return target.set_metadata(path, md, MetaFields::Mtime); });
+    Status reset;
+    if (!use_mtimes || same_mtime(e.mtime, md.mtime)) {
+      if (!removes_safely) return true;
+      reset = retry([&] { return target.remove(path, EntryType::File); });
+      if (!reset.ok() && reset.error().kind == ErrorKind::NotFound) reset = {};
+    } else {
+      reset = retry([&] { return target.set_metadata(path, md, MetaFields::Mtime); });
+    }
     if (reset.ok()) return true;
     // Still in doubt for the next run, whatever the error.
     Error error = reset.error();
@@ -1384,6 +1396,7 @@ struct Engine::Impl {
       log::info(target.describe(), " stores only the mode bits ", bits);
     }
     relax_modes = !dst.can_set_owner && options.preserve_mode;
+    removes_safely = !dst.follows_symlinks || options.target_without_symlinks;
     copy_options.preserve_mtime = use_mtimes;
     if (!use_symlinks) log::warn(target.describe(), " has no symlinks: symlinks are skipped");
     if (mtime_resolution > 1)
