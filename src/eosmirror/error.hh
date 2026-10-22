@@ -34,6 +34,11 @@ std::string_view to_string(ErrorKind kind);
 // transient (network trouble, timeouts, busy servers, a file changing).
 bool is_transient(ErrorKind kind);
 
+// Whether a journal row of this kind may stand for a copy in doubt (see
+// Error::in_doubt). Journals store the kind only, so an error in doubt gets
+// one of these kinds, and every row of them counts as a copy in doubt.
+bool may_be_in_doubt(ErrorKind kind);
+
 struct Error {
   ErrorKind kind = ErrorKind::Other;
   std::string message;

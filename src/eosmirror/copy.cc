@@ -82,7 +82,7 @@ Result<CopyOutcome> copy_file(Endpoint& source, Endpoint& target, const RelPath&
   auto aborted = [&](Error e) {
     Status discarded = writer->abort();
     if (discarded.ok() || !discarded.error().in_doubt) return e;
-    if (!is_transient(e.kind) || e.kind == ErrorKind::Changed) e.kind = ErrorKind::IO;
+    if (!may_be_in_doubt(e.kind)) e.kind = ErrorKind::IO;
     e.message += "; " + discarded.error().message;
     e.in_doubt = true;
     return e;

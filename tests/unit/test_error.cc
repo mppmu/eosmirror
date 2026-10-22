@@ -29,6 +29,12 @@ TEST_CASE("errno mapping and transience") {
   CHECK_FALSE(is_transient(ErrorKind::Cancelled));
   CHECK_FALSE(is_transient(ErrorKind::NoSpace));
 
+  // A change of the source leaves no unverified copy in place.
+  CHECK(may_be_in_doubt(ErrorKind::IO));
+  CHECK(may_be_in_doubt(ErrorKind::Checksum));
+  CHECK_FALSE(may_be_in_doubt(ErrorKind::Changed));
+  CHECK_FALSE(may_be_in_doubt(ErrorKind::Withheld));
+
   Error e = errno_error(ENOENT, "stat /x");
   CHECK(e.describe() == "stat /x: No such file or directory");
   CHECK(Error{ErrorKind::Other, "plain"}.describe() == "plain");

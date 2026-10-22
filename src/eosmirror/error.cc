@@ -39,6 +39,17 @@ bool is_transient(ErrorKind kind) {
   }
 }
 
+bool may_be_in_doubt(ErrorKind kind) {
+  switch (kind) {
+    case ErrorKind::IO:
+    case ErrorKind::Timeout:
+    case ErrorKind::Checksum:
+      return true;
+    default:
+      return false;
+  }
+}
+
 std::string Error::describe() const {
   if (errnum == 0) return message;
   return message + ": " + std::strerror(errnum);

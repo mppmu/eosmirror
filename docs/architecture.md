@@ -227,11 +227,12 @@ shard, the options of the last run). The kind of a failure row is the
 `ErrorKind` as a number, and the type the `EntryType`, which is why new
 values of both go last. Three groups of kinds matter:
 
-- in doubt: IO, Timeout, Checksum. The copy in place may be the failed one
-  with the source's size and mtime. Every run with the journal that visits
-  the file copies it again (`copy_in_doubt()`), and its source vanishing does
-  not clear the row while the file is in place. `Error::in_doubt` itself is
-  not stored: the paths that leave a copy in doubt record an IO row.
+- in doubt (`may_be_in_doubt()`): IO, Timeout, Checksum. The copy in place
+  may be the failed one with the source's size and mtime. Every run with the
+  journal that visits the file copies it again (`copy_in_doubt()`), and its
+  source vanishing does not clear the row while the file is in place.
+  `Error::in_doubt` itself is not stored: the paths that leave a copy in
+  doubt record a row of one of these kinds, IO unless the error has one.
 - Withheld: a deletion held back (incomplete listings, the source still has
   the entry, the `--max-delete` cap). `--retry-failed` with `--delete`
   takes it up; it counts as no failure in a row.

@@ -419,15 +419,14 @@ struct Engine::Impl {
   }
 
   // Whether the journal records a failed copy of the file that may have left
-  // it in place unverified, with the source's size and mtime: a transient
-  // error other than a change of the source, such as that of a failed
-  // verification or close of an EOS upload that could not be taken back.
+  // it in place unverified, with the source's size and mtime, such as a
+  // failed verification or close of an EOS upload that could not be taken
+  // back.
   bool copy_in_doubt(const RelPath& path) const {
     auto rows = prior_failures.find(parent_path(path));
     if (rows == prior_failures.end()) return false;
     auto row = rows->second.find(name_of(path));
-    return row != rows->second.end() && is_transient(row->second) &&
-           row->second != ErrorKind::Changed;
+    return row != rows->second.end() && may_be_in_doubt(row->second);
   }
 
   // The metadata fields of the target entry that differ from the source.
