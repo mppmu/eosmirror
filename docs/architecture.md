@@ -389,10 +389,11 @@ An `Endpoint` implementation guarantees:
   of a target never report as foreign entries, and which are stale after an
   hour by mtime and ctime.
 - `capabilities()` is honest: the mtime resolution, whether owners exist and
-  can be set, which mode bits are stored, whether mtimes can be set, whether
-  symlinks exist and have owners, whether listings follow symlinks the
-  endpoint cannot show, which checksum it computes, and whether a committed
-  file is in place before `commit()` confirmed it.
+  can be set, whether modes can be set and which of their bits are stored,
+  whether mtimes can be set, whether symlinks exist and have owners, whether
+  listings follow symlinks the endpoint cannot show, which checksum it
+  computes, and whether a committed file is in place before `commit()`
+  confirmed it.
 - Errors are `ErrorKind`s with the errno where known: `NotFound` for an
   absent entry, `Exists` for a `mkdir` that lost a race, `Changed` for a
   source that is not what was listed, transient kinds only where a retry can

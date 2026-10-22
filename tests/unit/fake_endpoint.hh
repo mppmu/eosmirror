@@ -25,6 +25,7 @@
 // EOS, by the id that each upload gives its file and a "confirm" query. A
 // "close" fault fails a commit after the file is in place. A "lost" fault,
 // like a close whose connection is gone, makes it succeed without the file.
+// Without `caps.can_set_mode`, setting a mode fails.
 class FakeEndpoint : public eosmirror::Endpoint {
  public:
   using Entry = eosmirror::Entry;
@@ -250,6 +251,8 @@ class FakeEndpoint : public eosmirror::Endpoint {
     std::lock_guard lock(mutex_);
     auto it = nodes_.find(path);
     if (it == nodes_.end()) return not_found(path);
+    if (has(fields, eosmirror::MetaFields::Mode) && !caps.can_set_mode)
+      return Error{ErrorKind::Unsupported, "chmod " + path};
     if (utimes_needs_write && has(fields, eosmirror::MetaFields::Mtime) &&
         !(it->second.entry.mode & 0200))
       return Error{ErrorKind::Permission, "utimes " + path + ": no write access"};
@@ -361,6 +364,8 @@ class FakeEndpoint : public eosmirror::Endpoint {
       if (auto err = ep_.check("commit", path_)) return *err;
       if (ep_.check("lost", path_)) return eosmirror::CommitInfo{};
       if (content_.size() != spec.size) return Error{ErrorKind::Changed, "size mismatch"};
+      if (has(spec.fields, eosmirror::MetaFields::Mode) && !ep_.caps.can_set_mode)
+        return Error{ErrorKind::Unsupported, "chmod " + path_};
       bool verified = false;
       if (ep_.caps.checksum != eosmirror::ChecksumType::None &&
           spec.checksum.type == ep_.caps.checksum) {

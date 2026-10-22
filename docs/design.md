@@ -152,17 +152,18 @@ Each endpoint describes its capabilities: mtime resolution (POSIX probes
 it on the target, by writing a file there, so never on a source or in a dry
 run), whether entries have owners at all, whether owners, modes (and which
 mode bits of files and of directories) and mtimes can be set, whether
-symlinks exist and have owners, which checksum it computes. The
-engine adapts: comparison granularity, `--size-only` needed without mtimes,
-skipped symlinks, masked mode comparison, no owners from a source that has
-none (with a warning), which checksum to compute, what the preflight checks.
-Without the privilege to set owners, the engine makes read-only target
-directories writable (the owner's rwx bits) while it changes their entries
-or sets their mtime, which EOS allows only with write access, and restores
-their mode afterwards, also in directories that another shard owns.
-Read-only directories that `--delete` removes are made writable first. An
-endpoint can also warn about being used as a target (a POSIX target on an
-EOS FUSE mount, see below).
+symlinks exist and have owners, which checksum it computes. The engine
+adapts: comparison granularity, `--size-only` or `--checksum` needed without
+mtimes, skipped symlinks, masked mode comparison, no owners from a source
+that has none and no modes on a target that sets none (with a warning),
+which checksum to compute, what the preflight checks. Without the privilege
+to set owners, and while modes are preserved, the engine makes read-only
+target directories writable (the owner's rwx bits) while it changes their
+entries or sets their mtime, which EOS allows only with write access, and
+restores their mode afterwards, also in directories that another shard
+owns. Read-only directories that `--delete` removes are then made writable
+first. An endpoint can also warn about being used as a target (a POSIX
+target on an EOS FUSE mount, see below).
 
 Listings of endpoints that follow symlinks (plain XRootD servers do) can
 lead back into a directory being walked. Such endpoints, and POSIX, give

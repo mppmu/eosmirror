@@ -1373,6 +1373,11 @@ struct Engine::Impl {
     dir_mode_bits = dst.dir_mode_bits;
     checksums_expected = dst.checksum != ChecksumType::None || src.checksum != ChecksumType::None;
     confirms_after_commit = dst.confirms_after_commit;
+    if (options.preserve_mode && !dst.can_set_mode) {
+      log::warn(target.describe(), " sets no modes: modes are not synchronized");
+      options.preserve_mode = false;
+      copy_options.preserve_mode = false;
+    }
     if (options.preserve_mode && (file_mode_bits != 07777 || dir_mode_bits != 07777)) {
       char bits[80];
       std::snprintf(bits, sizeof bits, "%04o of files and %04o of directories", file_mode_bits,

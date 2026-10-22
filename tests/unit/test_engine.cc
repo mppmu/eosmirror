@@ -1529,6 +1529,36 @@ TEST_CASE("fake: owners of a source without owners are left alone") {
   CHECK(r2.stats.metadata_fixed == 0);
 }
 
+TEST_CASE("fake: modes are left alone on a target that sets none") {
+  FakeEndpoint src, dst;
+  // Without the privilege to set owners, read-only target directories would
+  // be made writable by setting their mode.
+  dst.caps.can_set_mode = false;
+  dst.caps.can_set_owner = false;
+  populate(src);
+  src.add_dir("ro", 0555);
+  src.add_file("ro/f", "x", 0444);
+  dst.add_dir("extra", 0555);
+  dst.add_file("extra/f", "x");
+  SyncOptions o = test_options();
+  o.preserve_owner = false;
+  o.delete_extra = true;
+  Report r;
+  StderrCapture err;
+  REQUIRE(run_sync(src, dst, o, r).ok());
+  CHECK(err.text().find("sets no modes") != std::string::npos);
+  CHECK(r.stats.failures == 0);
+  CHECK(r.stats.files_copied == 4);
+  CHECK(dst.get("ro/f")->content == "x");
+  CHECK(dst.get("ro")->entry.mtime == src.get("ro")->entry.mtime);
+  CHECK_FALSE(dst.get("extra"));
+  Report r2;
+  REQUIRE(run_sync(src, dst, o, r2).ok());
+  CHECK(r2.stats.failures == 0);
+  CHECK(r2.stats.files_copied == 0);
+  CHECK(r2.stats.metadata_fixed == 0);
+}
+
 TEST_CASE("fake: directories that lead back to an ancestor are failures, not walked") {
   FakeEndpoint src, dst;
   src.modify("", [](FakeEndpoint::Node& n) { n.entry.id = "top"; });
