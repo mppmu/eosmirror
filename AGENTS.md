@@ -21,8 +21,8 @@ change. [AI_POLICY.md](AI_POLICY.md) applies.
   for a change to the engine, the pipeline, an endpoint or the journal; the
   integration tests for a change to an endpoint or to `copy.cc`; the long
   tests for a change to the engine, the journal or the local endpoint's
-  durability. CI runs the EOS integration and the long tests only nightly.
-  Say which tests ran and which did not.
+  durability. CI runs the EOS integration and the long tests only nightly
+  and on demand. Say which tests ran and which did not.
 
 ## Changing code
 

@@ -458,7 +458,8 @@ Ubuntu 24.04 (plain, thread; with the xrootd integration tests against the
 distribution's server) and EL9 (plain, address), and the packages for EL9 and
 Ubuntu, plus packages from stock Debian, Ubuntu, EL, Fedora and openSUSE
 images, each installed in a fresh container with the self-test run; nightly,
-the long tests and the EOS integration tests in the build containers.
+the long tests and the EOS integration tests in the build containers, the
+integration tests also under address (with undefined).
 
 What a change needs: a sanitizer build (address and thread) for anything in
 the engine, the pipeline, the endpoints or the journal; the integration tests

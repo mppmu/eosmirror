@@ -60,11 +60,15 @@ jobs:
     # The long tests, and the integration tests against a single-host EOS
     # instance and an xrootd server in rootless podman containers from
     # CERN's public EOS image, as scripts/integration-test.sh runs them;
-    # nightly and on demand.
-    name: Long and EOS integration tests
+    # nightly and on demand. The integration tests also under ASan and UBSan.
+    name: Long and EOS integration tests ${{ matrix.sanitizer }}
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [none, address]
     steps:
       - uses: actions/checkout@v4
       - name: Free disk space for the EOS image
@@ -74,8 +78,9 @@ jobs:
       - name: Build and unit tests
         env:
           EOSMIRROR_BUILD_ROOT: ${{ runner.temp }}/build
-        run: scripts/check.sh ubuntu22
+        run: scripts/check.sh ubuntu22 ${{ matrix.sanitizer }}
       - name: Long tests
+        if: matrix.sanitizer == 'none'
         env:
           EOSMIRROR_BUILD_ROOT: ${{ runner.temp }}/build
         run: scripts/in-container.sh ubuntu22 ctest --test-dir /build/none -C long -L long --output-on-failure
@@ -84,7 +89,7 @@ jobs:
         env:
           EOSMIRROR_BUILD_ROOT: ${{ runner.temp }}/build
           EOSMIRROR_EOS_STATE: ${{ runner.temp }}/eos
-        run: scripts/integration-test.sh ubuntu22
+        run: scripts/integration-test.sh ubuntu22 ${{ matrix.sanitizer }}
       - name: Collect the EOS logs
         if: failure()
         # The daemons' files belong to their user in the containers' user
@@ -95,7 +100,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: eos-logs
+          name: eos-logs-${{ matrix.sanitizer }}
           path: ${{ runner.temp }}/eos-logs
 
   el9:
