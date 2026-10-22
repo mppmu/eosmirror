@@ -1117,7 +1117,7 @@ Result<std::unique_ptr<FileWriter>> EosEndpoint::open_write(const RelPath& path,
   }
   return std::unique_ptr<FileWriter>(new AtomicUploadWriter(
       *this, path, url_of(abs), std::move(upload), [this, abs, fid] { return file_by_id(abs, fid); },
-      mtime_at_open));
+      mtime_at_open, spec));
 }
 
 }  // namespace eosmirror

@@ -51,8 +51,8 @@ class AtomicUploadWriter : public FileWriter {
   // open_spec: what the file was opened for, which decides how an upload
   // that an abort could not discard is taken away.
   AtomicUploadWriter(Endpoint& ep, RelPath path, std::string name,
-                     std::unique_ptr<FileWriter> upload, Locate locate, bool mtime_at_open = true,
-                     CommitSpec open_spec = CommitSpec{});
+                     std::unique_ptr<FileWriter> upload, Locate locate, bool mtime_at_open,
+                     CommitSpec open_spec);
 
   Status write(Chunk chunk) override { return upload_->write(std::move(chunk)); }
   Result<CommitInfo> commit(const CommitSpec& spec) override;
