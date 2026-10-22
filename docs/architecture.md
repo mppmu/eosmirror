@@ -362,7 +362,8 @@ Every change keeps these; the tests named protect them.
 8. A directory's metadata is applied once its entries are done, and a
    directory is recorded as finalized only after the sync that followed.
    "directory mtimes are applied after their entries", "directories are
-   recorded as finalized once the target has synced their copies".
+   recorded as finalized once the target has synced their copies", "a
+   directory finalized during a sync is recorded only after the next one".
 9. Shards all create the directory skeleton; only the owner of a directory
    changes its entries. "shards partition the files and together cover
    everything", the three shards of `tests/cli/smoke.sh`.
@@ -371,9 +372,10 @@ Every change keeps these; the tests named protect them.
     previous one ended (erasure-coded EOS files), with XrdCl's write recovery
     off. `test_pipeline` "write windows start writes in order", `test_eos`
     "pipelined writes give erasure-coded files their parity".
-12. The copies made so far stay when a run is cancelled; the first signal
-    waits for the requests in flight and syncs, the second exits at once.
-    "cancellation stops the run and leaves nothing partial".
+12. The copies made so far stay when a run is cancelled, and are synced;
+    the first signal waits for the requests in flight, the second exits at
+    once (main.cc, without a test). "cancellation stops the run and leaves
+    nothing partial".
 
 ## The endpoint contract
 

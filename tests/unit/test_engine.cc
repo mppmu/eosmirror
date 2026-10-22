@@ -949,8 +949,10 @@ TEST_CASE("fake: cancellation stops the run and leaves nothing partial") {
   for (int f = 0; f < 200; ++f) src.add_file("f" + std::to_string(f), "content");
   Cancellation cancel;
   std::atomic<int> commits{0};
+  std::atomic<size_t> files_at_flush{0};
   dst.hook = [&](std::string_view op, const RelPath&) {
     if (op == "commit" && ++commits == 5) cancel.request();
+    if (op == "flush") files_at_flush = dst.paths().size();
   };
   Report r;
   SyncOptions o = fake_options();
@@ -961,7 +963,15 @@ TEST_CASE("fake: cancellation stops the run and leaves nothing partial") {
   CHECK(s.error().kind == ErrorKind::Cancelled);
   CHECK(r.stats.files_copied < 200);
   CHECK(r.stats.failures == 0);
-  for (const RelPath& p : dst.paths()) CHECK(dst.get(p)->content == "content");
+  // The copies made stay, and the target is synced after them.
+  size_t files = 0;
+  for (const RelPath& p : dst.paths()) {
+    CHECK(dst.get(p)->content == "content");
+    ++files;
+  }
+  CHECK(files >= 4);
+  CHECK(files == r.stats.files_copied);
+  CHECK(files_at_flush == files);
 }
 
 TEST_CASE("fake: journal records failures and finalized directories, resume and retry use them") {
@@ -1081,6 +1091,43 @@ TEST_CASE("fake: directories are recorded as finalized once the target has synce
   REQUIRE(j.end_run(false).ok());
   CHECK(r2.stats.failures >= 1);
   for (const char* dir : {"", "d1", "d1/d2"}) CHECK_FALSE(j.is_done_dir(dir).value());
+}
+
+TEST_CASE("fake: a directory finalized during a sync is recorded only after the next one") {
+  TempDir tmp;
+  auto journal = Journal::open(tmp.sub("j.sqlite"), "fake", "fake");
+  REQUIRE(journal.ok());
+  Journal& j = *journal.value();
+  FakeEndpoint src, dst;
+  populate(src);
+  // d1/d2 is finalized while the first sync waits for its parent d1 to be,
+  // which comes after d1/d2 is queued for the journal.
+  std::atomic<int> flushes{0};
+  std::atomic<bool> finalized{false}, recorded_early{false};
+  auto wait_for = [](const auto& done) {
+    for (int i = 0; i < 1000 && !done(); ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  };
+  src.hook = [&](std::string_view op, const RelPath& path) {
+    if (op == "read" && path == "d1/d2/f2") wait_for([&] { return flushes > 0; });
+  };
+  dst.hook = [&](std::string_view op, const RelPath& path) {
+    if (op == "set_metadata" && path == "d1") finalized = true;
+    if (op != "flush") return;
+    int n = ++flushes;
+    if (n == 1) wait_for([&] { return finalized.load(); });
+    if (n == 2 && j.is_done_dir("d1/d2").value()) recorded_early = true;
+  };
+  SyncOptions o = fake_options();
+  o.sync_interval = std::chrono::milliseconds(20);
+  REQUIRE(j.begin_run(false).ok());
+  Report r;
+  REQUIRE(run_sync(src, dst, o, r, &j).ok());
+  REQUIRE(j.end_run(true).ok());
+  CHECK(finalized);
+  CHECK(flushes >= 2);
+  CHECK_FALSE(recorded_early);
+  CHECK(j.is_done_dir("d1/d2").value());
 }
 
 TEST_CASE("fake: a run stops when its journal cannot be written") {
