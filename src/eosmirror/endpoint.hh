@@ -192,9 +192,10 @@ class Endpoint {
   // every so often while its transfers go on, and once they have ended.
   virtual Status flush() { return {}; }
 
-  // Stats an entry without following a final symlink, where the endpoint
-  // shows symlinks (see Capabilities::follows_symlinks). The result's name
-  // is the last path component.
+  // Stats an entry without following a final symlink where the endpoint
+  // shows symlinks (see Capabilities::follows_symlinks), except the root
+  // (""), which may be a symlink to the tree. The result's name is the last
+  // path component.
   virtual Result<Entry> stat(const RelPath& path) = 0;
 
   // Lists a directory with full metadata per entry, in no particular order.

@@ -111,11 +111,13 @@ A `DirNode` lives from its listing until everything in it is done. Its
 every subdirectory pushed and every copy queued, before the work is
 published; `entry_done()` discharges one, and the thread that brings the
 counter to zero, a checker or a transfer, runs `finalize()`: the directory's
-metadata is applied (mtime last, since changing entries changes it), its
-earlier failure row is cleared if it completed, it is queued for the journal
-(after the next sync) and its parent's counter is decremented. Cancellation
-abandons the work still queued: the queues are drained and the run ends by
-joining the threads, not by completing the root.
+metadata is applied after its entries, since changing them changes its mtime
+(`set_metadata()` sets the mtime before owner and mode, which may take away
+the write access that setting it needs), its earlier failure row is cleared
+if it completed, it is queued for the journal (after the next sync) and its
+parent's counter is decremented. Cancellation abandons the work still queued:
+the queues are drained and the run ends by joining the threads, not by
+completing the root.
 
 The fields of a node that only the checker processing it writes (`unlisted`,
 `deletions_held`, `replaces_at_open`, `only`, `created`, `target`) are plain;
@@ -137,18 +139,20 @@ copy does not arrive. With `--checksum`, stored checksums of one type decide
 at once; otherwise the transfer reads what is not stored
 (`differs_by_checksum()`).
 
-`run_copy()` runs `copy_file()` under `with_retries()`: open the source,
-take its state (`FileReader::state()`: a stat, or the listed entry where the
+`run_copy()` runs `copy_file()` under `with_retries()`: open the source, take
+its state (`FileReader::state()`: a stat, or the listed entry where the
 reader can tell that the file still has its listed size), read the first
 chunk before the target is touched, open the target, stream chunks through
 the transfer's `BufferPool` while hashing, check the source `unchanged()`,
 compare the source's stored checksum where the target computes none or the
-listing carries one, record the pending journal row where the target
-confirms after commit (once per file, though `before_commit` runs in every
-attempt), and `commit()`. Every failure path goes through the `aborted`
-lambda, which asks the writer to discard what it wrote and, where that may
-have failed, marks the error in doubt. The result is counted, clears or
-writes the journal row, and the directory's completion is counted.
+listing carries one, record the pending journal row where the target confirms
+after commit (once per file, though `before_commit` runs in every attempt),
+and `commit()`. Every failure between `open_write()` and `commit()` goes
+through the `aborted` lambda, which asks the writer to discard what it wrote
+and, where that may have failed, marks the error in doubt. A failing
+`commit()` cleans up after itself and says whether its file may be in place
+(see the endpoint contract). The result is counted, clears or writes the
+journal row, and the directory's completion is counted.
 
 Within a file, remote endpoints pipeline: `ReadAhead` keeps up to
 `--read-window` chunk reads in flight and hands them over in order,
@@ -160,9 +164,9 @@ XrdCl specifics are in `XrdReader` and `XrdFileWriter`.
 
 ### Durability and confirmation
 
-Nothing appears under a final name before it is complete and verified, and
-nothing passes for a good copy before it is confirmed. How, differs by
-target:
+Nothing appears under a final name before it is complete (except where EOS
+forces non-atomic uploads), and nothing passes for a good copy before it is
+verified and confirmed. How, differs by target:
 
 - Local (`PosixWriter::finish()`): data to a temporary name, writeback
   started, optional readback, owner and mode applied, the rename, then the
@@ -284,9 +288,10 @@ workers start, read-only afterwards, also while the journal changes);
 (`end_mutex`); `Report`'s failures and the log (own mutexes); the journal
 (its mutex, one statement at a time); `XrdEndpoint::fs_` (a `FileSystem` per
 thread under `fs_mutex_`, so that each thread's requests go over connections
-of its own); `ReadAhead` and `WriteWindow` (own mutexes, completions from
-XrdCl's threads); `DeferredMtimes` (a mutex for the pending copies, one flush
-at a time). `Cancellation` is polled, since a signal handler sets it.
+of its own, or one for all with `--shared-connection`); `ReadAhead` and
+`WriteWindow` (own mutexes, completions from XrdCl's threads);
+`DeferredMtimes` (a mutex for the pending copies, one flush at a time).
+`Cancellation` is polled, since a signal handler sets it.
 
 Two rules follow from this. The display renders under the log mutex and
 takes a transfer slot's mutex while doing so, so a worker holds a slot's
@@ -326,17 +331,22 @@ transfer limit for (`on_target_error`).
 
 Every change keeps these; the tests named protect them.
 
-1. Nothing is visible under a final name before it is complete and verified,
-   except where the target replaces at the open (warned and counted).
+1. Nothing is visible under a final name before it is complete, except where
+   the target replaces at the open (warned and counted). Where the endpoint
+   stores a checksum, it is verified before the file is in place, except on
+   EOS, which puts it in place at the close (invariant 2).
    `test_posix_endpoint` "commits atomically", `test_engine` "nothing is
    created on the target before the first chunk was read", "a file that
    changes during the copy is not committed".
-2. A copy passes for good only once confirmed: until then it has mtime 0 or
-   an in-doubt journal row, and every later run that visits it copies it
-   again whatever the comparison mode. "a copy with mtime 0 is made again,
-   whatever the comparison says", "files whose last copy failed are copied
-   again", "a copy stays in doubt however its later attempts end",
-   `tests/long/crash.sh`.
+2. A copy passes for good only once confirmed: until then it has mtime 0 or,
+   in a run with a journal, an in-doubt journal row, and every later run that
+   visits it copies it again whatever the comparison mode. An EOS upload is
+   in place with the source's mtime between its close and its confirmation: a
+   run without a journal that is killed then leaves it unmarked. "a copy with
+   mtime 0 is made again, whatever the comparison says", "files whose last
+   copy failed are copied again", "a copy stays in doubt however its later
+   attempts end", "a differing file that mtime 0 cannot mark cannot pass for
+   a copy later", `tests/long/crash.sh`.
 3. The target's mtime is the source's as observed before reading; a source
    that changed during the read is not committed.
 4. Names from listings are untrusted: validated before they are joined into
@@ -393,9 +403,14 @@ An `Endpoint` implementation guarantees:
 - `open_write()` makes nothing visible under the final name until
   `commit()`, which applies the metadata, verifies the size and the checksum
   the endpoint stores, and puts the file in place or fails with it not in
-  place, except where `confirms_after_commit` says that the file is in
-  place first; `abort()` discards what was written and reports, as an error
-  marked `in_doubt`, where the data may stay in place all the same.
+  place. The exceptions: where `confirms_after_commit` says that the file is
+  in place first, a commit that fails takes it back or marks its error
+  `in_doubt`, except that one failing to set owner or mode after the file
+  is confirmed leaves the good file in place; and a local copy that is made
+  durable at once (source mtime 0) can fail after its rename, when the sync
+  of its directory fails, with the complete file in place. `abort()` discards what was written and reports,
+  as an error marked `in_doubt`, where the data may stay in place all the
+  same.
 - `is_temporary()` recognizes the endpoint's own temporaries, which listings
   of a target never report as foreign entries, and which are stale after an
   hour by mtime and ctime.
@@ -427,7 +442,7 @@ of it, not an independent model of EOS.
 | `atomic_uploads`, `hidden_uploads`, `committing_aborts`, the `lost` and `close` faults | EOS uploads in place before confirmation, a close that timed out, a delete request that failed, a close reported done after a lost connection |
 | `readers_take_listing` | EOS readers take the listed entry as the file's state |
 | `lists_checksums` | EOS listings carry adler32 checksums |
-| `replacing_at_open` | EOS directories that force non-atomic uploads |
+| `replacing_at_open` | the listing flag of EOS directories that force non-atomic uploads (the fake keeps the old file until the commit, where EOS removes it at the open) |
 | `utimes_needs_write`, `entries_need_write` | EOS and POSIX as a user other than root |
 | `unlistable`, `unlisted` | lines an EOS listing cannot parse; a plain XRootD listing that ends early |
 | directory id `other-fs` | a mount point below a local source |
@@ -480,9 +495,10 @@ and the local endpoint's durability.
   makes of the target (a resumed run must share it); the README's option
   list; design.md where it is a decision.
 - A new `ErrorKind` or `EntryType`: last in the enum (journals store the
-  number), `to_string()`, and for a kind `is_transient()` and whether it
-  is an in-doubt kind.
-- A new counter: `Stats`, the summary and the progress line in report.cc.
+  number), `to_string()`, and for a kind `is_transient()` and
+  `may_be_in_doubt()`.
+- A new counter: `Stats`, the summary and the progress line in report.cc,
+  and the live display (`ProgressDisplay::lines()`).
 - A new endpoint type: `Endpoint`, `FileReader` and `FileWriter` with the
   contract above, a scheme in `make_endpoint()`, a `Location` the overlap
   check can compare, a `FakeEndpoint` switch for every behavior of it that

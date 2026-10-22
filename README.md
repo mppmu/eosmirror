@@ -75,12 +75,11 @@ checksums, copies with a fixed parallelism, and its exit status does not
 reflect failed copies.
 
 eosmirror works between any two of local file systems, XRootD servers and EOS
-instances, directory by directory with bounded memory. It copies a file when
-size or mtime differ, keeps symlinks, owners, modes and mtimes, writes
-atomically with checksums verified end to end where the endpoint computes
-them, retries and journals failures, and adapts its concurrency to the target.
-EOS to EOS copies stream through the client; third-party copy is a possible
-later addition.
+instances. It copies a file when size or mtime differ, keeps symlinks, owners,
+modes and mtimes, writes atomically with checksums verified end to end where
+the endpoint computes them, retries and journals failures, and adapts its
+concurrency to the target. EOS to EOS copies stream through the client;
+third-party copy is a possible later addition.
 
 ## Differences from rsync
 
@@ -146,10 +145,10 @@ of its own, since a server handles the requests of a connection one at a time
 Files read from EOS or from an XRootD server that computes checksums are
 verified against the stored checksum when the target computes none. Files read
 from EOS take their metadata and checksum from the directory listing, so the
-MGM sees one open per file, as with xrdcp. A file whose size changed since
-the listing is stated before and after reading; one rewritten with the same
-size shows up as a checksum that differs from the listed one, and is stated
-then.
+MGM sees one open per file, as with xrdcp. A file whose size changed since the
+listing is stated before and after reading; one rewritten with the same size
+shows up as a checksum that differs from the listed one, where the listing
+carries one and copies are verified, and is stated then.
 
 Up to 64 copies run at once (`--max-transfers`). A run starts with 4
 (`--min-transfers`) and raises the number every 10 s while the throughput
