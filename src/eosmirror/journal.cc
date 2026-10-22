@@ -26,6 +26,11 @@ CREATE TABLE IF NOT EXISTS failures (
 CREATE TABLE IF NOT EXISTS done_dirs (path TEXT PRIMARY KEY, run_id INTEGER NOT NULL);
 )";
 
+// The version of the tables and of what their rows mean, which a change to
+// either raises. A journal keeps it as SQLite's user_version: journals from
+// before it was kept have 0 and are of version 1.
+constexpr int kVersion = 1;
+
 // The prefix of the meta rows that hold the options of the last run.
 constexpr std::string_view kOptionKey = "option ";
 
@@ -106,6 +111,8 @@ Result<std::unique_ptr<Journal>> Journal::open_read_only(const std::string& file
     if (Status s = journal->lock(); !s.ok()) return s.error();
   }
   sqlite3_busy_timeout(db, 10000);
+  // Before the statements, which a newer journal may not fit.
+  if (auto version = journal->known_version(); !version.ok()) return version.error();
   if (Status s = journal->prepare_statements(); !s.ok())
     return journal->not_a_journal(s.error().message);
   for (const char* key : {"source", "target"}) {
@@ -145,8 +152,13 @@ Status Journal::claim(const std::string& source, const std::string& target,
     bool empty = rc == SQLITE_ROW && sqlite3_column_int(stmt, 0) == 0;
     sqlite3_finalize(stmt);
     if (rc != SQLITE_ROW) return not_a_journal(sqlite3_errmsg(db_));
-    // A journal records its owner when it is made: a database with tables
-    // and no owner is someone else's.
+    // A journal records its owner and version when it is made: a database
+    // with tables and no owner, or with a version and no tables, is someone
+    // else's.
+    auto known = known_version();
+    if (!known.ok()) return known.error();
+    int version = known.value();
+    if (empty && version != 0) return not_a_journal("no tables");
     if (!empty) {
       auto existing = meta("source");
       if (!existing.ok())
@@ -155,6 +167,10 @@ Status Journal::claim(const std::string& source, const std::string& target,
                                  : existing.error().message);
     }
     if (Status created = exec(kSchema); !created.ok()) return created;
+    if (version < kVersion) {
+      if (Status set = exec("PRAGMA user_version = " + std::to_string(kVersion)); !set.ok())
+        return set;
+    }
     if (!empty) return check_owner(source, target, shard);
     for (const auto& [key, value] : {std::pair{"source", source}, std::pair{"target", target},
                                      std::pair{"shard", shard}})
@@ -187,6 +203,25 @@ Status Journal::check_owner(const std::string& source, const std::string& target
   return Error{ErrorKind::Other, "journal " + file_ + " belongs to " + described + ", not to " +
                                      source + " -> " + target +
                                      (shard != "0/1" ? " (shard " + shard + ")" : "")};
+}
+
+// The journal's version, or an error where it is newer than this eosmirror
+// knows: that of a journal of a newer eosmirror, or of a database that has
+// no owner and is no journal.
+Result<int> Journal::known_version() {
+  sqlite3_stmt* stmt = nullptr;
+  if (sqlite3_prepare_v2(db_, "PRAGMA user_version", -1, &stmt, nullptr) != SQLITE_OK)
+    return not_a_journal(sqlite3_errmsg(db_));
+  int rc = sqlite3_step(stmt);
+  int version = rc == SQLITE_ROW ? sqlite3_column_int(stmt, 0) : 0;
+  std::string message = rc == SQLITE_ROW ? "" : sqlite3_errmsg(db_);
+  sqlite3_finalize(stmt);
+  if (rc != SQLITE_ROW) return not_a_journal(message);
+  if (version <= kVersion) return version;
+  if (!meta("source").ok()) return not_a_journal("no source");
+  return Error{ErrorKind::Other, "journal " + file_ + " is of a newer eosmirror (version " +
+                                     std::to_string(version) + ", this one knows up to " +
+                                     std::to_string(kVersion) + ")"};
 }
 
 std::string Journal::source() {

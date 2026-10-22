@@ -31,7 +31,9 @@ change. [AI_POLICY.md](AI_POLICY.md) applies.
   fix.
 - Errors go through `Result<T>` and `Status`, never exceptions. Operations on
   endpoints are retried only for transient kinds. New `ErrorKind`s and
-  `EntryType`s go last: journals store the numbers.
+  `EntryType`s go last: journals store the numbers. A change to the
+  journal's tables, or to what its rows mean, raises its version
+  (journal.cc).
 - Names from listings are untrusted data: validate them before joining them
   into paths, print them through `printable()`, and refuse what a parser
   cannot tell apart rather than guess.

@@ -84,6 +84,18 @@ void sql(const std::string& file, const std::string& statements) {
   sqlite3_close(db);
 }
 
+int user_version(const std::string& file) {
+  sqlite3* db = nullptr;
+  REQUIRE(sqlite3_open(file.c_str(), &db) == SQLITE_OK);
+  sqlite3_stmt* stmt = nullptr;
+  REQUIRE(sqlite3_prepare_v2(db, "PRAGMA user_version", -1, &stmt, nullptr) == SQLITE_OK);
+  REQUIRE(sqlite3_step(stmt) == SQLITE_ROW);
+  int version = sqlite3_column_int(stmt, 0);
+  sqlite3_finalize(stmt);
+  sqlite3_close(db);
+  return version;
+}
+
 std::vector<std::string> files_in(const std::string& dir) {
   std::vector<std::string> names;
   for (const auto& e : std::filesystem::directory_iterator(dir))
@@ -181,4 +193,48 @@ TEST_CASE("journal: one run at a time") {
   first.value().reset();
   CHECK(Journal::open(file, "/src", "/dst").ok());
   CHECK(Journal::open_read_only(file, "/src", "/dst").ok());
+}
+
+TEST_CASE("journal: journals of a newer version are refused, older ones taken") {
+  TempDir tmp;
+  std::string file = tmp.sub("j.sqlite");
+  {
+    auto opened = Journal::open(file, "/src", "/dst");
+    REQUIRE(opened.ok());
+    REQUIRE(opened.value()->record_failure({"a", EntryType::File, Error{ErrorKind::IO, "x"}}).ok());
+  }
+  CHECK(user_version(file) == 1);
+  sql(file, "PRAGMA user_version = 2");
+  for (bool read_only : {false, true}) {
+    INFO("read-only ", read_only);
+    auto opened = read_only ? Journal::open_read_only(file, "/src", "/dst")
+                            : Journal::open(file, "/src", "/dst");
+    REQUIRE_FALSE(opened.ok());
+    CHECK(opened.error().message.find("newer eosmirror") != std::string::npos);
+  }
+
+  // From before journals had versions: read as they are, and taken up to
+  // this version by their owner only.
+  sql(file, "PRAGMA user_version = 0");
+  CHECK(Journal::open_read_only(file, "/src", "/dst").value()->failures().value().size() == 1);
+  CHECK_FALSE(Journal::open(file, "/src", "/elsewhere").ok());
+  CHECK(user_version(file) == 0);
+  CHECK(Journal::open(file, "/src", "/dst").value()->failures().value().size() == 1);
+  CHECK(user_version(file) == 1);
+
+  // Other programs' databases with a version are no journals, and stay as
+  // they are.
+  std::string other = tmp.sub("other.sqlite"), empty = tmp.sub("empty.sqlite");
+  sql(other, "CREATE TABLE notes (x TEXT); PRAGMA user_version = 2");
+  sql(empty, "PRAGMA user_version = 1");
+  for (const std::string& path : {other, empty}) {
+    INFO("file ", path);
+    for (bool read_only : {false, true}) {
+      auto opened = read_only ? Journal::open_read_only(path) : Journal::open(path, "/src", "/dst");
+      REQUIRE_FALSE(opened.ok());
+      CHECK(opened.error().message.find("not an eosmirror journal") != std::string::npos);
+    }
+  }
+  CHECK(user_version(other) == 2);
+  CHECK(user_version(empty) == 1);
 }

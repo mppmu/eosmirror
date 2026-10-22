@@ -34,7 +34,8 @@ class Journal {
   // recording that of a new journal are one transaction, so that runs
   // started together cannot both take a new journal. A journal serves one
   // run at a time: the object holds an exclusive lock on the file, and
-  // opening a journal that another one holds fails.
+  // opening a journal that another one holds fails, as does opening one of
+  // a newer version than this eosmirror knows.
   static Result<std::unique_ptr<Journal>> open(const std::string& file, const std::string& source,
                                                const std::string& target,
                                                const std::string& shard = "0/1");
@@ -43,7 +44,7 @@ class Journal {
   // files of a write-ahead log): for a dry run, which names its source,
   // target and shard and holds the journal's lock as for open(), or for
   // inspection, which names none and takes no lock. An error for a file
-  // that is not a journal.
+  // that is not a journal, or one of a newer version.
   static Result<std::unique_ptr<Journal>> open_read_only(const std::string& file,
                                                          const std::string& source = "",
                                                          const std::string& target = "",
@@ -84,6 +85,7 @@ class Journal {
   Status claim(const std::string& source, const std::string& target, const std::string& shard);
   Status check_owner(const std::string& source, const std::string& target,
                      const std::string& shard);
+  Result<int> known_version();
   Result<bool> last_run_interrupted();
   Status prepare_statements();
   Error db_error(const std::string& context);

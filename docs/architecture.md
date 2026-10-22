@@ -223,9 +223,12 @@ The journal (`journal.cc`, SQLite in WAL mode with `synchronous=NORMAL`, so
 rows survive the process but not necessarily a power loss) holds
 `failures(path, type, kind, message, run_id, updated)`, `done_dirs(path,
 run_id)`, `runs(started, finished, completed)` and `meta` (source, target,
-shard, the options of the last run). The kind of a failure row is the
-`ErrorKind` as a number, and the type the `EntryType`, which is why new
-values of both go last. Three groups of kinds matter:
+shard, the options of the last run). Its version (SQLite's `user_version`,
+`kVersion` in journal.cc) rises with any change to the tables or to what
+their rows mean, and eosmirror refuses journals of a newer version. The kind
+of a failure row is the `ErrorKind` as a number, and the type the
+`EntryType`, which is why new values of both go last. Three groups of kinds
+matter:
 
 - in doubt (`may_be_in_doubt()`): IO, Timeout, Checksum. The copy in place
   may be the failed one with the source's size and mtime. Every run with the
