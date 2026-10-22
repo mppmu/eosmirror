@@ -72,7 +72,7 @@ export CXX=g++-13
 
 %files
 %license LICENSE
-%doc README.md docs/design.md AI_POLICY.md
+%doc README.md docs/architecture.md docs/design.md AI_POLICY.md
 %{_bindir}/eosmirror
 
 %changelog

@@ -6,32 +6,36 @@ servers and [EOS](https://eos-web.web.cern.ch/) instances.
 eosmirror copies a tree from a source to a target so that the target ends up
 with the same files, symlinks, directories, owners, modes and modification
 times. It is made for very large trees over high-latency links: it keeps many
-transfers and metadata operations in flight, works directory by directory with
-bounded memory, never stops on single errors, and keeps a journal so that a
-later run retries exactly what failed.
+transfers and metadata operations in flight, works directory by directory
+without listing the tree first, never stops on single errors, and keeps a
+journal so that a later run retries exactly what failed.
 
 Status: work in progress. Local file systems, plain XRootD servers and EOS
 instances work as source and target; EOS to EOS copies stream through the
-client for now. See [docs/design.md](docs/design.md).
+client for now. [docs/design.md](docs/design.md) has the decisions behind the
+behavior, [docs/architecture.md](docs/architecture.md) how it is built.
 
 ## Behavior in short
 
 - A file is copied when it is missing on the target or differs in size or
   modification time. Otherwise only owner, group, mode and (for directories
   and symlinks) the modification time are fixed.
-- Copies are atomic (temporary name plus rename, or EOS atomic uploads), set
-  the source's modification time, and verify a checksum end to end where the
+- Copies are atomic (temporary name plus rename, or EOS atomic uploads,
+  except where EOS forces otherwise, see Known limitations), set the
+  source's modification time, and verify a checksum end to end where the
   endpoint supports it. On local targets, a copy has mtime 0 until a sync of
   its file system (every 30 s, and at the end of a run) has made it durable,
   so that the next run, whatever it compares by, copies again any copy that a
   crash or a killed run left without its data. `--no-fsync` sets mtimes at
   once and syncs nothing. An EOS upload counts as done once the file it
   created, known by its id, is in place with the right size, mtime and
-  checksum. A replacement that fails that check stays in place with mtime 0
-  until the next attempt, which keeps the file's versions on EOS. With a
+  checksum. A replacement that fails that check is given mtime 0 until the
+  next attempt, which keeps the file's versions on EOS (it is removed instead
+  where that fails, or where the source file's own mtime is 0). With a
   journal, the next run copies again an upload whose run ended before that.
-- Symlinks are recreated as symlinks and never followed. Hard links are copied
-  as separate files. Special files are skipped and reported.
+- Symlinks are recreated as symlinks and never followed where the endpoint
+  shows them (plain XRootD servers follow them, see Known limitations). Hard
+  links are copied as separate files. Special files are skipped and reported.
 - Extra entries on the target are deleted only with an explicit option
   (`--delete`), which behaves like rsync's: it deletes in directories that are
   empty on the source too, and takes an optional cap on the number of
@@ -125,10 +129,11 @@ Setting owners on EOS needs an identity that EOS treats as root (a sudoer is
 not enough). Without one, the run refuses to start unless `--no-owner` is
 given.
 
-Plain XRootD servers store no mtimes and have no symlinks: a run against one
-needs `--size-only` or `--checksum`, and skips and counts symlinks. As with
-rsync, `--size-only` works on any target: it compares files by size alone,
-and sets the mtimes of files that match where the target stores them.
+Plain XRootD servers take no mtimes and show no symlinks: a run with one as
+target needs `--size-only` or `--checksum`, and skips and counts the source's
+symlinks; one as source lists what its symlinks point to. As with rsync,
+`--size-only` works on any target: it compares files by size alone, and sets
+the mtimes of files that match where the target stores them.
 
 Each file is copied in chunks of `--buffer-size` (8 MiB) with up to 4 reads
 and 4 writes in flight (`--read-window`, `--write-window`). Writes go out in
@@ -141,8 +146,10 @@ of its own, since a server handles the requests of a connection one at a time
 Files read from EOS or from an XRootD server that computes checksums are
 verified against the stored checksum when the target computes none. Files read
 from EOS take their metadata and checksum from the directory listing, so the
-MGM sees one open per file, as with xrdcp. A file that changed since the
-listing is stated before and after reading.
+MGM sees one open per file, as with xrdcp. A file whose size changed since
+the listing is stated before and after reading; one rewritten with the same
+size shows up as a checksum that differs from the listed one, and is stated
+then.
 
 Up to 64 copies run at once (`--max-transfers`). A run starts with 4
 (`--min-transfers`) and raises the number every 10 s while the throughput
@@ -287,7 +294,8 @@ once a run completes. The other makes random changes to random trees,
 syncs them with injected faults, checks that the journal records what the
 faults left behind and that retries repair it, and compares the result in
 content and metadata. Both print their seed; `EOSMIRROR_SEED=<seed>`
-repeats a failing one.
+repeats the trees and changes of a failing one, though not where the kills
+of the first test hit, so keep its output as well.
 
 ## Packaging
 

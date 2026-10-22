@@ -2,7 +2,9 @@
 
 eosmirror replicates a file tree one way, from a source to a target, between
 POSIX file systems, XRootD servers and EOS instances. This note records the
-decisions behind the code. Behavior that users see is in the README.
+decisions behind the code. Behavior that users see is in the README; the
+parts of the code, the threads, the states a copy goes through and the
+invariants are in [architecture.md](architecture.md).
 
 ## What a run does
 
@@ -29,7 +31,9 @@ A run walks the source tree directory by directory and makes the target match:
   journal opened for writing), so that a later run with it copies those files
   again whatever their size and mtime.
 - A symlink is recreated when it is missing or points elsewhere, and its
-  owner and mtime are fixed when they differ. Symlinks are never followed.
+  owner and mtime are fixed when they differ. Symlinks are never followed
+  where the endpoint shows them; a plain XRootD source lists what its
+  symlinks point to (see the XRootD endpoint).
 - A directory is created when missing. Its owner, mode and mtime are set once
   all its entries have been processed, since changing its entries changes its
   mtime.
@@ -71,15 +75,16 @@ A run walks the source tree directory by directory and makes the target match:
 
 Every copy writes to a temporary name (or uses EOS's atomic upload) and
 renames into place, so an interrupted run never leaves a partial file under
-the real name. Owner, mode and mtime are applied to the temporary file before
-the rename, so a file never appears with wrong metadata either (on local
-targets, the mtime is 0 until a sync has made the copy durable, see below;
-EOS uploads get their owner and mode after the close, see the EOS specifics).
-The target mtime is always the source mtime as observed *before* reading the
-file (by a stat, or for EOS sources from the listing, see below). If the
-source changed while it was read (size or mtime differ afterwards), the copy
-is reported as "changed" and retried. Whatever was renamed into place carries
-the old mtime, so a later run copies it again.
+the real name, except in EOS directories that force uploads to be non-atomic
+(see the EOS specifics). Owner, mode and mtime are applied to the temporary
+file before the rename, so a file never appears with wrong metadata either
+(on local targets, the mtime is 0 until a sync has made the copy durable, see
+below; EOS uploads get their owner and mode after the close, see the EOS
+specifics). The target mtime is always the source mtime as observed *before*
+reading the file (by a stat, or for EOS sources from the listing, see below).
+If the source changed while it was read (size or mtime differ afterwards),
+the copy is reported as "changed" and retried. Whatever was renamed into
+place carries the old mtime, so a later run copies it again.
 
 Temporaries are regular files (and on POSIX targets symlinks, which are made
 under a temporary name too): a directory with the name of one is an entry like
@@ -100,26 +105,18 @@ fails copies that neither side could verify.
 
 ## Structure
 
-```
-src/eosmirror/
-  types.hh        Entry, Timespec, RelPath: what endpoints exchange
-  error.hh        Error kinds, Result<T>, Status
-  endpoint.hh     the Endpoint interface and file reader/writer interfaces
-  posix_*.cc      POSIX endpoint
-  engine.*        the walk, the queues and the worker pools
-  copy.*          the per-file copy pipeline
-  journal.*       SQLite journal
-  report.*        counters and the final summary
-  cli.*, main.cc  command line
-```
+The parts of the code and their dependencies are in
+[architecture.md](architecture.md).
 
 ### Endpoints
 
 `Endpoint` is a small synchronous interface: list a directory with full
-metadata in one call, stat, mkdir, symlink, set metadata, remove, rename,
-open for reading, open for writing. Paths are relative to the endpoint's root.
-Writers are atomic: `commit()` applies metadata, verifies the size and
-checksum and renames into place; `abort()` removes the temporary file.
+metadata in one call, stat, mkdir, symlink, set metadata, remove, open for
+reading, open for writing. Paths are relative to the endpoint's root. Writers
+are atomic: `commit()` applies metadata, verifies the size and checksum and
+puts the file in place; `abort()` discards the temporary file, or reports
+that the target may hold the data all the same (an EOS upload whose request
+to delete it failed).
 
 Names from listings are checked before they are joined into paths: empty
 names, `.`, `..` and names containing `/`, NUL or a line break are skipped
@@ -247,8 +244,9 @@ Two pools of worker threads, like rclone's checkers and transfers:
   directories stays bounded by depth times fan-out instead of growing with
   the width of the tree.
 - *Transfers* take copy jobs from a bounded queue (`--max-backlog`) and run
-  the copy pipeline. A full queue blocks the checkers, which keeps memory
-  bounded and the transfer windows full.
+  the copy pipeline. A full queue blocks the checkers, which keeps the
+  backlog bounded and the transfer windows full (what else grows with the
+  tree is in architecture.md).
 
 Each directory has a completion counter: its own listing, each copy job and
 each subdirectory. When it reaches zero, the directory is *finalized*: its
@@ -266,8 +264,8 @@ files beats the one measured at the previous limit by more than 5 %, up to
 short of that one, in bytes and in files, did not pay: the limit goes back to
 where it was and does not rise for a minute (6 intervals), which keeps it from
 going back and forth. The limit falls by a quarter, down to the start value,
-when copies had to be retried for errors of the target (opening, writing or
-committing a file), which is how an overloaded target shows. Retries for a
+when copies met transient errors of the target (opening, writing or
+committing a file), which is how an overloaded target shows. Errors of a
 changing or failing source do not count. The interval after a decrease only
 measures the lower limit. The throughput to beat decays by 0.5 % per interval,
 so that a record from a faster part of the tree blocks growth only for a
@@ -312,8 +310,9 @@ Modes:
   Nothing counts as gone from both sides in a directory where a listing left
   out entries.
 - Files whose row is a transient error other than a change of the source (I/O,
-  timeout, checksum) are copied again by any run with the journal, whatever
-  their size and mtime, and without a checksum comparison: such a copy may
+  timeout, checksum) are copied again by any run with the journal that
+  visits them (a resumed run skips finalized directories), whatever their
+  size and mtime, and without a checksum comparison: such a copy may
   have failed its verification or close in place (EOS) and kept the source's
   size and mtime when it could be neither removed nor given mtime 0, which
   then fails it as an I/O error whatever went wrong. Before the new copy, the
@@ -330,13 +329,15 @@ Modes:
   when the run is cancelled before the next one.
 - `--resume` skips directories finalized by the previous run if that run
   was interrupted; after a completed run there is nothing to resume and
-  everything is walked. Recorded failures are not retried by resuming. A
-  run resumes only with the options of the interrupted run that decide
-  what it makes of the target (`--size-only`, `--checksum`, `--delete`,
-  `--keep-emptied`, `--one-file-system`, `--no-owner`, `--no-mode`,
-  `--no-verify`, `--require-checksum`, `--verify-readback`,
-  `--rewrite-links`), which the journal records. An option that the
-  journal has no record of (it predates the option) counts as off.
+  everything is walked. Resuming selects no recorded failures: those in
+  directories it walks are handled like any entry, those under finalized
+  directories wait for `--retry-failed`. A run resumes only with the
+  options of the interrupted run that decide what it makes of the target
+  (`--size-only`, `--checksum`, `--delete`, `--keep-emptied`,
+  `--one-file-system`, `--no-owner`, `--no-mode`, `--no-verify`,
+  `--require-checksum`, `--verify-readback`, `--rewrite-links`), which the
+  journal records. An option that the journal has no record of (it predates
+  the option) counts as off.
 - `--retry-failed` processes only the recorded failures: each within its
   parent directory, directories as subtree walks (rows below a retried entry
   are covered by its walk, whatever type it was recorded as), the top
@@ -480,11 +481,12 @@ retried like I/O errors. So is any failed write or close of an upload,
 whatever the error, unless space or permission is missing: the target then
 holds no file, and copying again is right.
 
-## EOS specifics (milestone 3)
+## EOS specifics
 
-XRootD has no symlink, chown or utimes operations and its stat lacks owners,
-modes and link targets. The EOS endpoint uses the MGM's commands, sent the
-way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
+XRootD has no symlink, chown or utimes operations and its stat lacks owners
+and link targets (its extended form has the permission bits). The EOS
+endpoint uses the MGM's commands, sent the way the `eos` client sends them
+(EOS 5.5 source, `console/` and `mgm/proc/`):
 
 - Endpoints are `root://mgm//eos/...` URLs, or paths below `/eos` on the
   command line, which name the instance of `--mgm` or `EOS_MGM_URL` (the eos
@@ -527,7 +529,8 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
   A file's checksum is kept with its entry when its type is adler32; one of
   all zeros (a type without a stored value) counts as none.
   The start directory itself is listed too and skipped; a listing without it
-  is an error. Paths and targets are printed raw: lines with more than one
+  is an error, unless find cut the listing short (see the limits below).
+  Paths and targets are printed raw: lines with more than one
   `" type=` (which a name or target can contain), names with control
   characters, entries outside the directory, names listed twice and fields
   that are not numbers where numbers belong are skipped with a warning.
@@ -607,7 +610,9 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
   gets mtime 0, and the next attempt replaces it (removing it would purge
   the file's versions, which EOS keeps with `sys.versioning` and deletes
   with the file, `mgm/ofs/cmds/Rm.inc`); one that replaced nothing is
-  removed. Where the one fails, the other is tried. So is the upload taken
+  removed. Where the one fails, the other is tried, and a replacement of a
+  source file whose own mtime is 0 cannot be marked so and is removed, with
+  the versions. So is the upload taken
   away after a close that failed, if it is in place: the storage node may
   have committed it all the same. One that the query finds still under
   its hidden name in its directory (after a close that timed out while the
@@ -639,9 +644,9 @@ way the `eos` client sends them (EOS 5.5 source, `console/` and `mgm/proc/`):
 - Per copied file, the MGM sees the open (which redirects to a storage node),
   the query by id after the close and the chown, plus the chmod in the cases
   above; per created directory the mkdir and, when it is finalized, utimes,
-  chown and chmod; per listed directory one find (an open, two reads and a
-  close). An EOS source adds only the open per file, which redirects to a
-  storage node (empty files the MGM serves itself), see below.
+  chown and chmod; per listed directory one find (an open, the reads of its
+  output and a close). An EOS source adds only the open per file, which
+  redirects to a storage node (empty files the MGM serves itself), see below.
 - A file is read from an EOS source with the metadata of the listing, which
   is exact (nanosecond mtime, owners, mode) and has the checksum. The open
   brings the storage node's stat of the file (XrdCl asks every open for it,
