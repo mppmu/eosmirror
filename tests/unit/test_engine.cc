@@ -1507,10 +1507,15 @@ TEST_CASE("fake: --checksum compares files of the same size by checksum") {
   expect_mirrored(src, dst);
 }
 
-TEST_CASE("fake: a differing file that mtime 0 cannot mark cannot pass for a copy later") {
+TEST_CASE("fake: the journal keeps a differing file that mtime 0 cannot mark") {
+  TempDir tmp;
+  auto journal = Journal::open(tmp.sub("j.sqlite"), "fake", "fake");
+  REQUIRE(journal.ok());
+  Journal& j = *journal.value();
   FakeEndpoint src, dst;
   populate(src);
   SyncOptions plain = fake_options();
+  bool ends = false;  // the run ends before the new copy, which else fails
   SUBCASE("a source file with mtime 0") {
     src.modify("f0", [](FakeEndpoint::Node& n) { n.entry.mtime = {0, 0}; });
   }
@@ -1518,42 +1523,49 @@ TEST_CASE("fake: a differing file that mtime 0 cannot mark cannot pass for a cop
     dst.caps.can_set_mtime = false;
     plain.size_only = true;
   }
+  SUBCASE("a target without mtimes, and a run that ends before the copy") {
+    dst.caps.can_set_mtime = false;
+    plain.size_only = true;
+    ends = true;
+  }
   Report mirror;
   REQUIRE(run_sync(src, dst, plain, mirror).ok());
-  // Other content with the same size and mtime, and a new copy that fails.
-  dst.modify("f0", [](FakeEndpoint::Node& n) { n.content = "root fil3"; });
-  dst.fail("commit", "f0", Error{ErrorKind::NoSpace, "quota exceeded"});
+  auto corrupt = [&] {  // other content of the same size and mtime
+    dst.modify("f0", [](FakeEndpoint::Node& n) { n.content = "root fil3"; });
+  };
   SyncOptions o = fake_options();
   o.checksum = true;
+  // A copy that arrives leaves no row.
+  corrupt();
+  Report fixed;
+  REQUIRE(run_sync(src, dst, o, fixed, &j).ok());
+  CHECK(fixed.stats.files_copied == 1);
+  CHECK(j.failures().value().empty());
+
+  corrupt();
+  Cancellation cancel;
+  if (ends) {
+    dst.hook = [&](std::string_view op, const RelPath& path) {
+      if (op == "open_write" && path == "f0") cancel.request();
+    };
+    dst.fail("open_write", "f0", Error{ErrorKind::Cancelled, "cancelled"});
+  } else {
+    dst.fail("commit", "f0", Error{ErrorKind::NoSpace, "quota exceeded"});
+  }
+  REQUIRE(j.begin_run(false).ok());
   Report r;
-  REQUIRE(run_sync(src, dst, o, r).ok());
+  Engine engine(src, dst, o, r, &j, cancel);
+  CHECK(engine.run().ok() != ends);
   CHECK(r.stats.checksums_differ == 1);
-  CHECK(r.stats.failures == 1);
-  // A run that compares by size (and mtime) copies it all the same.
+  CHECK(dst.get("f0")->content == "root fil3");
+  // A run with the journal that compares by size (and mtime) copies it.
+  dst.hook = nullptr;
+  REQUIRE(j.begin_run(false).ok());
   Report again;
-  REQUIRE(run_sync(src, dst, plain, again).ok());
+  REQUIRE(run_sync(src, dst, plain, again, &j).ok());
   CHECK(again.stats.files_copied == 1);
   CHECK(dst.get("f0")->content == "root file");
-}
-
-TEST_CASE("fake: no file is removed to mark it where that may delete through a symlink") {
-  FakeEndpoint src, dst;
-  populate(src);
-  dst.caps.can_set_mtime = false;
-  dst.caps.follows_symlinks = true;
-  SyncOptions o = fake_options();
-  o.size_only = true;
-  Report mirror;
-  REQUIRE(run_sync(src, dst, o, mirror).ok());
-  dst.modify("f0", [](FakeEndpoint::Node& n) { n.content = "root fil3"; });
-  dst.fail("commit", "f0", Error{ErrorKind::NoSpace, "quota exceeded"});
-  o.size_only = false;
-  o.checksum = true;
-  Report r;
-  REQUIRE(run_sync(src, dst, o, r).ok());
-  CHECK(r.stats.failures == 1);
-  CHECK(dst.count("remove") == 0);
-  CHECK(dst.get("f0"));
+  CHECK(j.failures().value().empty());
 }
 
 TEST_CASE("fake: --dry-run --checksum verifies, and a later run repairs what differs") {

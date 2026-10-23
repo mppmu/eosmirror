@@ -62,6 +62,9 @@ struct CopyJob {
   // The target's file of the source's size, to compare by checksum before
   // copying (--checksum).
   std::optional<Entry> compare;
+  // The file in place differs and has a journal row that says so, as mtime 0
+  // cannot mark it (invalidate_in_doubt()).
+  bool journaled = false;
 };
 
 // Limits how many transfers run at once. The limit can change while
@@ -216,9 +219,6 @@ struct Engine::Impl {
   bool checksums_expected = false;
   bool confirms_after_commit = false;  // the target's commits are confirmed afterwards
   bool relax_modes = false;  // make read-only target directories writable first
-  // Removing a target file may remove what a symlink in its place points to
-  // (Capabilities::follows_symlinks), unless the target has none.
-  bool removes_safely = true;
 
   WorkQueue<std::shared_ptr<DirNode>> dirs;
   WorkQueue<CopyJob> copies;
@@ -932,7 +932,7 @@ struct Engine::Impl {
   // A file to copy where its checksum on the target differs: in a dry run a
   // failure (as --checksum verifies), else prepared for its copy. Whether it
   // is to be copied.
-  bool copy_differing(const CopyJob& job, const Entry& existing, const Checksum& on_source,
+  bool copy_differing(CopyJob& job, const Entry& existing, const Checksum& on_source,
                       const Checksum& on_target) {
     RelPath path = join(job.dir->path, job.source.name);
     if (options.dry_run)
@@ -954,11 +954,11 @@ struct Engine::Impl {
   // Before a copy is queued or made: a file in place whose last copy is in
   // doubt, or that is known to differ, gets mtime 0 first unless it has it.
   // Whether the copy is to be made.
-  bool prepare_copy(const CopyJob& job, const Entry* existing, bool differs_in_place = false) {
+  bool prepare_copy(CopyJob& job, const Entry* existing, bool differs_in_place = false) {
     RelPath path = join(job.dir->path, job.source.name);
     ensure_writable(job.dir);
     if (existing && (differs_in_place || copy_in_doubt(path)) &&
-        !provisional(job.source, *existing) && !invalidate_in_doubt(path, job.source))
+        !provisional(job.source, *existing) && !invalidate_in_doubt(job, differs_in_place))
       return false;
     if (existing && job.dir->replaces_at_open && !job.dir->replacing_warned.exchange(true))
       log::warn("replacing files in ", job.dir->path.empty() ? "." : job.dir->path,
@@ -979,23 +979,28 @@ struct Engine::Impl {
 
   // Gives a file in place mtime 0 before it is copied again, as a copy that
   // is not final (see provisional()): should the new copy not arrive, every
-  // later run still copies the file again, with or without a journal. One
-  // that mtime 0 cannot mark, on a target without mtimes or where the
-  // source has mtime 0, is removed instead, where that is safe. Whether
-  // that worked.
-  bool invalidate_in_doubt(const RelPath& path, const Entry& e) {
+  // later run still copies the file again, with or without a journal. Where
+  // mtime 0 cannot mark it (a target without mtimes, a source file with
+  // mtime 0), only the journal does, for the runs that have it: a file in
+  // doubt has its row, and one that differs gets one, which its copy
+  // clears. Whether that worked.
+  bool invalidate_in_doubt(CopyJob& job, bool differs) {
+    RelPath path = join(job.dir->path, job.source.name);
     log::debug("copying ", path, " again: its copy in place is in doubt or differs");
     if (options.dry_run) return true;
-    Entry md = e;
+    Entry md = job.source;
     md.mtime = {0, 0};
-    Status reset;
-    if (!use_mtimes || same_mtime(e.mtime, md.mtime)) {
-      if (!removes_safely) return true;
-      reset = retry([&] { return target.remove(path, EntryType::File); });
-      if (!reset.ok() && reset.error().kind == ErrorKind::NotFound) reset = {};
-    } else {
-      reset = retry([&] { return target.set_metadata(path, md, MetaFields::Mtime); });
+    if (!use_mtimes || same_mtime(job.source.mtime, md.mtime)) {
+      if (differs && journal_updates()) {
+        journal_write(journal->record_failure(
+            {path, EntryType::File,
+             Error{ErrorKind::Checksum,
+                   "differs from the source; the run ended before its copy"}}));
+        job.journaled = true;
+      }
+      return true;
     }
+    Status reset = retry([&] { return target.set_metadata(path, md, MetaFields::Mtime); });
     if (reset.ok()) return true;
     // Still in doubt for the next run, whatever the error.
     Error error = reset.error();
@@ -1201,7 +1206,7 @@ struct Engine::Impl {
   // type that the target stores (or the source, or adler32), computed by
   // reading the files that store none of it. Whether it differs and is to be
   // copied. One that matches is unchanged.
-  bool differs_by_checksum(const CopyJob& job, BufferPool& pool) {
+  bool differs_by_checksum(CopyJob& job, BufferPool& pool) {
     RelPath path = join(job.dir->path, job.source.name);
     const Entry& existing = *job.compare;
     auto on_source = retry([&] { return source.stored_checksum(path, job.source); });
@@ -1244,7 +1249,7 @@ struct Engine::Impl {
     return true;
   }
 
-  void run_copy(const CopyJob& job, BufferPool& pool, TransferSlot& slot) {
+  void run_copy(CopyJob& job, BufferPool& pool, TransferSlot& slot) {
     if (job.compare && (cancel.requested() || !differs_by_checksum(job, pool))) return;
     RelPath path = join(job.dir->path, job.source.name);
     job.dir->touched = true;
@@ -1274,8 +1279,9 @@ struct Engine::Impl {
         if (is_transient(e.kind)) target_errors.fetch_add(1);
       };
       // A copy that is in place before it is confirmed is first journaled as
-      // in doubt. A run that ends in between leaves that row for the next.
-      bool pending = false;
+      // in doubt, unless the file is journaled as differing already. A run
+      // that ends in between leaves that row for the next.
+      bool pending = job.journaled;
       if (journal && confirms_after_commit)
         job_options.before_commit = [&] {
           if (pending) return Status();
@@ -1291,10 +1297,15 @@ struct Engine::Impl {
         if (pending) journal_write(journal->clear_failure(path));
       };
       // The error of an attempt that may have left its copy in place. A
-      // copy in doubt since an earlier run stays so until one is confirmed,
-      // whatever the attempts of this run fail with.
+      // copy in doubt since an earlier run, or a file journaled as
+      // differing, stays so until a copy is confirmed, whatever the attempts
+      // of this run fail with.
       std::optional<Error> doubt;
-      bool prior_doubt = copy_in_doubt(path);
+      std::optional<std::string> prior_doubt;
+      if (job.journaled)
+        prior_doubt = "the file in place differs from the source";
+      else if (copy_in_doubt(path))
+        prior_doubt = "the copy in place is in doubt since an earlier run";
       auto result = retry([&] {
         slot.written = 0;
         target_failed = false;
@@ -1324,14 +1335,14 @@ struct Engine::Impl {
       } else if (doubt || prior_doubt) {
         // The journal keeps the copy in doubt, however its last attempt
         // ended, also when cancelled (which fail() leaves out, so that the
-        // row of the earlier run stays as it is).
+        // row written before stays as it is).
         Error e = result.error();
         if (e.kind == ErrorKind::Cancelled && doubt)
           e = *doubt;
         else if (!e.in_doubt && e.kind != ErrorKind::Cancelled)
           e = Error{ErrorKind::IO, e.describe() + "; " +
                                        (doubt ? "an attempt before: " + doubt->describe()
-                                              : "the copy in place is in doubt since an earlier run")};
+                                              : *prior_doubt)};
         fail(path, EntryType::File, e);
       } else {
         fail(path, EntryType::File, result.error());
@@ -1396,7 +1407,6 @@ struct Engine::Impl {
       log::info(target.describe(), " stores only the mode bits ", bits);
     }
     relax_modes = !dst.can_set_owner && options.preserve_mode;
-    removes_safely = !dst.follows_symlinks || options.target_without_symlinks;
     copy_options.preserve_mtime = use_mtimes;
     if (!use_symlinks) log::warn(target.describe(), " has no symlinks: symlinks are skipped");
     if (mtime_resolution > 1)
