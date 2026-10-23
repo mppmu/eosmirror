@@ -32,6 +32,11 @@ struct XrdOptions {
   // one connection per server for all of them. A file always goes over one
   // connection per server.
   bool shared_connection = false;
+  // The tree has no symlinks (--target-without-symlinks). Only then is a
+  // file that the server refuses to rename another over, as it refuses for
+  // a symlink, moved aside and removed: removing a symlink removes the file
+  // it points to (XrdOssUnlink.cc, BreakLink).
+  bool without_symlinks = false;
 };
 
 // The parts of an endpoint URL, proto://[user@]host[:port]//path[?cgi].

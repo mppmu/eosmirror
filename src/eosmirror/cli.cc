@@ -86,7 +86,7 @@ RunOptions result_options(const CliOptions& opts) {
 
 std::string usage() {
   return R"(Usage: eosmirror sync [options] SOURCE TARGET
-       eosmirror selftest [--no-owner] [--mgm URL] TARGET
+       eosmirror selftest [--no-owner] [--target-without-symlinks] [--mgm URL] TARGET
        eosmirror failures JOURNAL
        eosmirror --version
 
@@ -112,8 +112,9 @@ Options:
       --max-delete N       stop deleting after N entries (default unlimited)
       --target-without-symlinks
                            state that a plain XRootD target has no symlinks,
-                           which --delete needs there: XRootD cannot show them,
-                           and deletes what they point to
+                           which --delete needs there, as does replacing a
+                           file the server cannot rename over: XRootD cannot
+                           show symlinks, and deletes what they point to
       --no-owner           do not set owners and groups
       --no-mode            do not set modes
       --no-verify          do not compute checksums
@@ -197,6 +198,8 @@ Result<CliOptions> parse_command_line(int argc, char** argv) {
     for (size_t i = 1; i < args.size(); ++i) {
       if (args[i] == "--no-owner")
         opts.sync.preserve_owner = false;
+      else if (args[i] == "--target-without-symlinks")
+        opts.endpoints.xrootd.without_symlinks = true;
       else if (args[i] == "--mgm" && i + 1 == args.size())
         return usage_error("--mgm needs a value");
       else if (args[i] == "--mgm")
@@ -248,7 +251,10 @@ Result<CliOptions> parse_command_line(int argc, char** argv) {
   flag("--checksum", [&] { sync.checksum = true; });
   flag("--delete", [&] { sync.delete_extra = true; });
   flag("--keep-emptied", [&] { sync.keep_emptied = true; });
-  flag("--target-without-symlinks", [&] { sync.target_without_symlinks = true; });
+  flag("--target-without-symlinks", [&] {
+    sync.target_without_symlinks = true;
+    opts.endpoints.xrootd.without_symlinks = true;
+  });
   // An option that takes a count, or "unlimited" to store `unlimited`.
   auto limit = [&](const std::string& name, uint64_t& out, uint64_t unlimited) {
     value(name, [name, &out, unlimited](const std::string& v) -> Status {

@@ -94,7 +94,7 @@ XRootD target, which cannot show symlinks, `--delete` needs
 
 ```
 eosmirror sync [options] SOURCE TARGET
-eosmirror selftest [--no-owner] [--mgm URL] TARGET
+eosmirror selftest [--no-owner] [--target-without-symlinks] [--mgm URL] TARGET
 eosmirror failures JOURNAL
 eosmirror --version
 ```
@@ -225,13 +225,14 @@ distances. Runs with an EOS target and a larger window say so at the start.
 
 ## Known limitations
 
-- Plain XRootD servers cannot show symlinks: their listings follow them,
-  and removing one removes the file it points to (XRootD's
-  `XrdOssUnlink.cc`), so that deleting a directory through a symlink
-  empties the directory it points to. `--delete` against a plain XRootD
-  target is therefore refused unless `--target-without-symlinks` states
-  that it has none. Local and EOS targets show symlinks and remove them
-  as such.
+- Plain XRootD servers cannot show symlinks: their listings follow them, and
+  removing one removes the file it points to (XRootD's `XrdOssUnlink.cc`), so
+  that deleting a directory through a symlink empties the directory it points
+  to. `--delete` against a plain XRootD target is therefore refused unless
+  `--target-without-symlinks` states that it has none, and so is replacing a
+  file that the server cannot rename another over, as it cannot over a symlink:
+  eosmirror would move it aside and remove it. Local and EOS targets show
+  symlinks and remove them as such.
 - EOS directories can force uploads to be non-atomic (`sys.forced.atomic=0`,
   or `user.forced.atomic=0` without the former). EOS then removes the file
   that eosmirror replaces at the start of the upload, and discards an upload

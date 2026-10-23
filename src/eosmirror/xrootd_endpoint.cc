@@ -681,6 +681,15 @@ Status XrdEndpoint::rename_abs(const std::string& from, const std::string& to) {
     if (!st.IsOK()) return xrd_error(st, "rename " + url_of(a) + " to " + url_of(b));
     return {};
   };
+  if (caps_.follows_symlinks && !options_.without_symlinks) {
+    Status moved = move(from, to);
+    if (moved.ok() || moved.error().kind != ErrorKind::Exists) return moved;
+    return Error{ErrorKind::Unsupported,
+                 "the server renames nothing over " + url_of(to) +
+                     ", which it refuses for symlinks, and removing a symlink deletes what it "
+                     "points to: replacing it needs --target-without-symlinks, which states "
+                     "that the target has none"};
+  }
   return move_replacing(from, to, move, [&](const std::string& abs) { return remove_abs(abs); });
 }
 

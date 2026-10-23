@@ -398,6 +398,29 @@ TEST_CASE("xrootd endpoint: listings that end early or have forged lines") {
   CHECK(dotdot.value().skipped == 1);
 }
 
+TEST_CASE("xrootd endpoint: a file the server cannot rename over is kept without the option") {
+  if (!base_url()) return;
+  // xrootd-server.sh creates linked/f as a symlink to the absolute path of
+  // linked/target. The server renames nothing over a symlink
+  // (XrdOssRename.cc), and moving it aside and removing it deletes target.
+  auto ep = XrdEndpoint::create(std::string(base_url()) + "/fixtures/linked");
+  REQUIRE(ep.ok());
+  std::string content = "new";
+  CommitSpec spec;
+  spec.size = content.size();
+  auto w = ep.value()->open_write("f", spec);
+  REQUIRE(w.ok());
+  REQUIRE(w.value()->write(0, bytes(content)).ok());
+  auto committed = w.value()->commit(spec);
+  REQUIRE_FALSE(committed.ok());
+  CHECK(committed.error().kind == ErrorKind::Unsupported);
+  CHECK(committed.error().message.find("--target-without-symlinks") != std::string::npos);
+  // Both are as they were, and no temporary is left.
+  CHECK(ep.value()->list("").value().entries.size() == 2);
+  CHECK(ep.value()->stat("f").value().size == 5);
+  CHECK(ep.value()->stat("target").value().size == 5);
+}
+
 TEST_CASE("xrootd to FS: owners and symlink loops of a server that follows symlinks") {
   if (!base_url()) return;
   // xrootd-server.sh creates loop/sub/up -> .. and loop/self -> ., which the

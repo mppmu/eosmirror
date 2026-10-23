@@ -178,9 +178,10 @@ verified and confirmed. How, differs by target:
   nothing.
 - Plain XRootD (`XrdWriter`): a temporary name, the stored checksum (or the
   size) checked after the close, the mode set, the rename. A server that
-  refuses to replace a file gets the old one moved aside first
-  (`move_replacing()`), so there the old file is briefly under a temporary
-  name.
+  refuses to replace a file gets the old one moved aside first and removed
+  after (`move_replacing()`), so there the old file is briefly under a
+  temporary name. Removing a symlink removes what it points to, so this takes
+  `--target-without-symlinks` (`XrdOptions::without_symlinks`).
 - EOS (`EosUploadWriter` inside an `AtomicUploadWriter`): EOS's atomic upload
   under a hidden name, renamed into place by the storage node at close, so
   the file is in place before it is confirmed. The upload is known by the id

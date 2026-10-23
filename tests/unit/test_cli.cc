@@ -49,6 +49,7 @@ TEST_CASE("the sync command line maps onto the options") {
   CHECK(o.sync.delete_extra);
   CHECK(o.sync.keep_emptied);
   CHECK_FALSE(o.sync.target_without_symlinks);
+  CHECK_FALSE(o.endpoints.xrootd.without_symlinks);
   CHECK_FALSE(o.sync.size_only);
   CHECK_FALSE(o.sync.one_file_system);
   CHECK(o.endpoints.posix.sync);
@@ -61,7 +62,9 @@ TEST_CASE("the sync command line maps onto the options") {
   CHECK(parse({"sync", "-x", "a", "b"}).value().sync.one_file_system);
   CHECK(parse({"sync", "--one-file-system", "a", "b"}).value().sync.one_file_system);
   CHECK(parse({"sync", "--size-only", "a", "b"}).value().sync.size_only);
-  CHECK(parse({"sync", "--target-without-symlinks", "a", "b"}).value().sync.target_without_symlinks);
+  auto without = parse({"sync", "--target-without-symlinks", "a", "b"}).value();
+  CHECK(without.sync.target_without_symlinks);
+  CHECK(without.endpoints.xrootd.without_symlinks);
   CHECK(o.sync.max_delete == 5);
   CHECK_FALSE(o.sync.preserve_owner);
   CHECK(o.sync.preserve_mode);
@@ -224,6 +227,9 @@ TEST_CASE("paths below /eos name the EOS instance of the MGM") {
   CHECK(parse({"sync", "--mgm", "root://mgm.example.org", "/eos/a", "/local"}).value().endpoints.mgm ==
         "root://mgm.example.org");
   CHECK(parse({"selftest", "--mgm=root://m", "/eos/a"}).value().endpoints.mgm == "root://m");
+  CHECK(parse({"selftest", "--target-without-symlinks", "/a"})
+            .value()
+            .endpoints.xrootd.without_symlinks);
   CHECK_FALSE(parse({"selftest", "/eos/a", "--mgm"}).ok());
 
   CHECK(eos_path_url("/eos/user/x", "root://mgm:1094/", nullptr).value() ==
