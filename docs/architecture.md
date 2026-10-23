@@ -355,12 +355,13 @@ Every change keeps these; the tests named protect them.
    parsers refuse what they cannot tell apart. "listed names that cannot be
    joined into paths are skipped", `test_xrootd_eos` "find listing lines
    that are refused".
-5. Nothing is deleted without `--delete`; never everything (the empty-source
-   stop); nothing in a directory whose listings may be incomplete; no extra
-   before a stat of the source confirmed its absence; every deletion held
-   back is a journaled failure. "an empty source does not empty the target",
-   "nothing is deleted where a listing skipped entries", "the source confirms
-   what it lacks before anything is deleted".
+5. Without `--delete`, nothing is deleted that the source lacks or has as
+   another type; never everything (the empty-source stop); nothing in a
+   directory whose listings may be incomplete; no extra before a stat of the
+   source confirmed its absence; every deletion held back is a journaled
+   failure. "an empty source does not empty the target", "nothing is deleted
+   where a listing skipped entries", "the source confirms what it lacks
+   before anything is deleted".
 6. The journal is the only state across runs: it belongs to one source,
    target and shard, serves one run at a time, and a run that cannot write
    it stops. `test_journal`, "a run stops when its journal cannot be written".
