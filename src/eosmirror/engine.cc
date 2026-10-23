@@ -380,13 +380,13 @@ struct Engine::Impl {
 
   // An entry that was listed on the source but is gone when it is handled:
   // the source changed, which is no failure, and the next run sees it gone.
-  // A file whose copy in place (in_place) is in doubt keeps its row: the
-  // source may get the file back. Many in a row, though, mean that the
-  // source itself went away.
-  void vanished(const RelPath& path, EntryType type, bool in_place = false) {
+  // A file in place that is in doubt (in_doubt) keeps its row: the source
+  // may get the file back. Many in a row, though, mean that the source
+  // itself went away.
+  void vanished(const RelPath& path, EntryType type, bool in_doubt = false) {
     stats.vanished.fetch_add(1);
     log::info(to_string(type), " ", path, " vanished from the source");
-    if (!in_place || !copy_in_doubt(path)) forget_failure(path);
+    if (!in_doubt) forget_failure(path);
     in_a_row(path, type, "vanished from the source");
   }
 
@@ -1242,7 +1242,7 @@ struct Engine::Impl {
       return false;
     }
     if (on_source) {
-      vanished(path, EntryType::File, /*in_place=*/true);
+      vanished(path, EntryType::File, copy_in_doubt(path));
       return false;
     }
     if (options.dry_run) differs(path, "missing on the target");
@@ -1330,8 +1330,9 @@ struct Engine::Impl {
         succeeded(path);
         settled();
       } else if (result.error().kind == ErrorKind::NotFound && !target_failed && !doubt) {
-        vanished(path, EntryType::File, job.replaces);  // keeps a row in doubt
-        settled();
+        bool in_doubt = job.replaces && prior_doubt;
+        vanished(path, EntryType::File, in_doubt);
+        if (!in_doubt) settled();
       } else if (doubt || prior_doubt) {
         // The journal keeps the copy in doubt, however its last attempt
         // ended, also when cancelled (which fail() leaves out, so that the

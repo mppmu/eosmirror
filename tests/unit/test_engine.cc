@@ -1515,7 +1515,10 @@ TEST_CASE("fake: the journal keeps a differing file that mtime 0 cannot mark") {
   FakeEndpoint src, dst;
   populate(src);
   SyncOptions plain = fake_options();
-  bool ends = false;  // the run ends before the new copy, which else fails
+  // How the new copy does not arrive: it fails, the run ends before it, or
+  // the source file is gone when the copy opens it (and back for the next
+  // run).
+  std::string how = "fails";
   SUBCASE("a source file with mtime 0") {
     src.modify("f0", [](FakeEndpoint::Node& n) { n.entry.mtime = {0, 0}; });
   }
@@ -1526,7 +1529,12 @@ TEST_CASE("fake: the journal keeps a differing file that mtime 0 cannot mark") {
   SUBCASE("a target without mtimes, and a run that ends before the copy") {
     dst.caps.can_set_mtime = false;
     plain.size_only = true;
-    ends = true;
+    how = "ends";
+  }
+  SUBCASE("a target without mtimes, and a source file gone for the copy") {
+    dst.caps.can_set_mtime = false;
+    plain.size_only = true;
+    how = "vanishes";
   }
   Report mirror;
   REQUIRE(run_sync(src, dst, plain, mirror).ok());
@@ -1544,22 +1552,29 @@ TEST_CASE("fake: the journal keeps a differing file that mtime 0 cannot mark") {
 
   corrupt();
   Cancellation cancel;
-  if (ends) {
+  Report r;
+  if (how == "ends") {
     dst.hook = [&](std::string_view op, const RelPath& path) {
       if (op == "open_write" && path == "f0") cancel.request();
     };
     dst.fail("open_write", "f0", Error{ErrorKind::Cancelled, "cancelled"});
+  } else if (how == "vanishes") {
+    // Gone once the comparison has found it to differ.
+    src.hook = [&](std::string_view op, const RelPath& path) {
+      if (op == "open_read" && path == "f0" && r.stats.checksums_differ > 0)
+        src.fail("open_read", "f0", Error{ErrorKind::NotFound, "gone"});
+    };
   } else {
     dst.fail("commit", "f0", Error{ErrorKind::NoSpace, "quota exceeded"});
   }
   REQUIRE(j.begin_run(false).ok());
-  Report r;
   Engine engine(src, dst, o, r, &j, cancel);
-  CHECK(engine.run().ok() != ends);
+  CHECK(engine.run().ok() != (how == "ends"));
   CHECK(r.stats.checksums_differ == 1);
+  CHECK(r.stats.vanished == (how == "vanishes" ? 1 : 0));
   CHECK(dst.get("f0")->content == "root fil3");
   // A run with the journal that compares by size (and mtime) copies it.
-  dst.hook = nullptr;
+  src.hook = dst.hook = nullptr;
   REQUIRE(j.begin_run(false).ok());
   Report again;
   REQUIRE(run_sync(src, dst, plain, again, &j).ok());
