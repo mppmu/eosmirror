@@ -9,6 +9,8 @@
 #include <fstream>
 #include <string>
 
+#include "doctest/doctest.h"
+
 // A fresh directory under $TMPDIR, removed with all its contents on
 // destruction, including read-only directories.
 class TempDir {
@@ -31,10 +33,16 @@ class TempDir {
   const std::string& path() const { return path_; }
   std::string sub(const std::string& rel) const { return path_ + "/" + rel; }
 
+  // Creates or replaces the file, also one that is read-only: a user other
+  // than root cannot open those for writing.
   void write_file(const std::string& rel, const std::string& content, mode_t mode = 0644) const {
     std::string p = sub(rel);
     std::filesystem::create_directories(std::filesystem::path(p).parent_path());
-    std::ofstream(p, std::ios::binary) << content;
+    chmod(p.c_str(), 0600);  // fails harmlessly for a new file
+    std::ofstream out(p, std::ios::binary);
+    out << content;
+    out.close();
+    REQUIRE_MESSAGE(out, "cannot write " << p);
     chmod(p.c_str(), mode);
   }
 

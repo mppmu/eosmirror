@@ -430,6 +430,10 @@ TEST_CASE("posix mkdir, symlink, metadata and remove") {
   CHECK(ep.stat("d/l").value().mtime == Timespec{1400000000, 9});
   CHECK(ep.stat("d").value().mtime == Timespec{1500000000, 7});  // untouched
 
+  // Only root removes entries from a read-only directory; the engine makes
+  // such directories writable first.
+  md.mode = 0755;
+  REQUIRE(ep.set_metadata("d", md, MetaFields::Mode).ok());
   CHECK(ep.remove("d", EntryType::Directory).error().kind == ErrorKind::NotEmpty);
   REQUIRE(ep.remove("d/l", EntryType::Symlink).ok());
   REQUIRE(ep.remove("d", EntryType::Directory).ok());
