@@ -70,14 +70,25 @@ if(EOSMIRROR_WITH_XROOTD)
   set_tests_properties(integration integration_sudoer PROPERTIES SKIP_RETURN_CODE 77)
   # Under a sanitizer, XRootD's plugins (the security protocols) are loaded
   # through the sanitizer's dlopen, which ignores the library's own search
-  # path, so the tests get it in LD_LIBRARY_PATH. Leaks in XRootD's and
+  # path, so the tests get it in LD_LIBRARY_PATH, before the caller's path:
+  # that may be where the compiler's sanitizer runtimes are found (a
+  # compiler outside the system's, as in an LCG view). Leaks in XRootD's and
   # OpenSSL's global state are not ours (lsan.supp), nor are the races TSan
   # sees in glibc's time zone setup and in XrdCl's file state handler
   # (tsan.supp). The unit tests load the
   # client library too. UBSan stops at its first finding, with a stack trace.
   if(EOSMIRROR_SANITIZER AND EOSMIRROR_XROOTD_LIBDIR)
-    set_tests_properties(unit unit_unprivileged integration integration_sudoer cli_smoke differential crash_consistency
+    set(sanitized_tests unit unit_unprivileged integration integration_sudoer cli_smoke differential crash_consistency)
+    set_tests_properties(${sanitized_tests}
       PROPERTIES ENVIRONMENT
-      "LD_LIBRARY_PATH=${EOSMIRROR_XROOTD_LIBDIR};LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/lsan.supp;TSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tsan.supp;UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1")
+      "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/lsan.supp;TSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tsan.supp;UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1")
+    if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.22)
+      set_tests_properties(${sanitized_tests}
+        PROPERTIES ENVIRONMENT_MODIFICATION "LD_LIBRARY_PATH=path_list_prepend:${EOSMIRROR_XROOTD_LIBDIR}")
+    else()
+      # Without ENVIRONMENT_MODIFICATION, the caller's path is replaced.
+      set_property(TEST ${sanitized_tests} APPEND
+        PROPERTY ENVIRONMENT "LD_LIBRARY_PATH=${EOSMIRROR_XROOTD_LIBDIR}")
+    endif()
   endif()
 endif()
