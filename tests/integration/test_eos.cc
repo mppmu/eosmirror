@@ -4,7 +4,9 @@
 // writable directory on it, e.g. root://eosmirror-mgm.eosmirror.test//eos/test,
 // with the subdirectories replica2, raid6 and nochecksum as the test instance
 // creates them. The tests run as root, except the one that needs a sudoer's
-// identity, which as-sudoer.sh runs on its own.
+// identity, which as-sudoer.sh runs on its own. Run as a user whom EOS does
+// not take for root, as on a shared instance, they leave owners out and skip
+// the tests that need root on EOS, saying so.
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -136,6 +138,29 @@ std::unique_ptr<EosEndpoint> as_nobody(const std::string& url) {
   return std::move(ep).value();
 }
 
+// The uid EOS takes an endpoint's requests for. It is read from whoami's
+// machine-readable answer, not from the text the endpoint's own probe reads,
+// and an answer of another form fails the test.
+uid_t eos_uid(EosEndpoint& ep) {
+  auto who = ep.proc("mgm.cmd=whoami&mgm.option=m");
+  REQUIRE(who.ok());
+  const std::string& out = who.value().out;
+  INFO("whoami: ", out);
+  REQUIRE(out.starts_with("uid="));
+  size_t end = out.find_first_not_of("0123456789", 4);
+  REQUIRE(end > 4);
+  REQUIRE(end != std::string::npos);
+  REQUIRE(out[end] == ' ');
+  return static_cast<uid_t>(std::stoul(out.substr(4, end - 4)));
+}
+
+// Whether EOS takes the tests for root. Only root may set owners: run as
+// another user, the tests leave owners out and check that the endpoint says
+// it cannot set them.
+bool as_root(EosEndpoint& ep) {
+  return eos_uid(ep) == 0;
+}
+
 }  // namespace
 
 TEST_CASE("eos endpoint: identity, listing, symlinks, metadata and atomic writes") {
@@ -144,11 +169,14 @@ TEST_CASE("eos endpoint: identity, listing, symlinks, metadata and atomic writes
   RemoteDir dir("endpoint");
   EosEndpoint& ep = *dir.endpoint;
   Capabilities caps = ep.capabilities();
+  bool superuser = as_root(ep);
+  if (!superuser) MESSAGE("not root on EOS: owners are left out");
+  MetaFields owner = superuser ? MetaFields::Owner : MetaFields::None;
   CHECK(caps.has_owners);
-  CHECK(caps.can_set_owner);
+  CHECK(caps.can_set_owner == superuser);
   CHECK(caps.can_set_mtime);
   CHECK(caps.has_symlinks);
-  CHECK(caps.symlink_owner);
+  CHECK(caps.symlink_owner == superuser);
   CHECK(caps.mtime_resolution == 1);
   CHECK(caps.file_mode_bits == 0777);
   CHECK(caps.dir_mode_bits == 03777);
@@ -168,6 +196,7 @@ TEST_CASE("eos endpoint: identity, listing, symlinks, metadata and atomic writes
   std::string content = pattern(200000);
   CommitSpec spec;
   spec.size = content.size();
+  spec.fields = MetaFields::Mode | MetaFields::Mtime | owner;
   spec.metadata.mode = 0640;
   spec.metadata.uid = 1234;
   spec.metadata.gid = 5678;
@@ -191,13 +220,15 @@ TEST_CASE("eos endpoint: identity, listing, symlinks, metadata and atomic writes
   CHECK(f.type == EntryType::File);
   CHECK(f.size == content.size());
   CHECK(f.mode == 0640);
-  CHECK(f.uid == 1234);
-  CHECK(f.gid == 5678);
+  if (superuser) {
+    CHECK(f.uid == 1234);
+    CHECK(f.gid == 5678);
+  }
   CHECK(f.mtime == Timespec{1600000000, 123456789});
   auto st = ep.stat("d/f");
   REQUIRE(st.ok());
   CHECK(st.value().mtime == f.mtime);
-  CHECK(st.value().uid == 1234);
+  if (superuser) CHECK(st.value().uid == 1234);
   CHECK(st.value().mode == 0640);
 
   // A checksum mismatch found after the upload is in place takes it back,
@@ -252,7 +283,7 @@ TEST_CASE("eos endpoint: identity, listing, symlinks, metadata and atomic writes
   lmd.mtime = {1500000000, 42};
   lmd.uid = 2345;
   lmd.gid = 3456;
-  REQUIRE(ep.set_metadata("d/l", lmd, MetaFields::Mtime | MetaFields::Owner).ok());
+  REQUIRE(ep.set_metadata("d/l", lmd, MetaFields::Mtime | owner).ok());
   listed = ep.list("d");
   REQUIRE(listed.ok());
   REQUIRE(listed.value().entries.size() == 2);
@@ -261,8 +292,10 @@ TEST_CASE("eos endpoint: identity, listing, symlinks, metadata and atomic writes
       CHECK(e.type == EntryType::Symlink);
       CHECK(e.link_target == "../other target with spaces");
       CHECK(e.mtime == Timespec{1500000000, 42});
-      CHECK(e.uid == 2345);
-      CHECK(e.gid == 3456);
+      if (superuser) {
+        CHECK(e.uid == 2345);
+        CHECK(e.gid == 3456);
+      }
     }
   }
 
@@ -273,11 +306,13 @@ TEST_CASE("eos endpoint: identity, listing, symlinks, metadata and atomic writes
   dmd.uid = 4321;
   dmd.gid = 8765;
   dmd.mtime = {1400000000, 9};
-  REQUIRE(ep.set_metadata("d", dmd, MetaFields::All).ok());
+  REQUIRE(ep.set_metadata("d", dmd, MetaFields::Mode | MetaFields::Mtime | owner).ok());
   auto d = ep.stat("d");
   REQUIRE(d.ok());
-  CHECK(d.value().uid == 4321);
-  CHECK(d.value().gid == 8765);
+  if (superuser) {
+    CHECK(d.value().uid == 4321);
+    CHECK(d.value().gid == 8765);
+  }
   CHECK(d.value().mode == 02755);
   CHECK(d.value().mtime == Timespec{1400000000, 9});
 
@@ -444,6 +479,7 @@ TEST_CASE("FS to EOS: --delete leaves another writer's upload in progress alone"
   tmp.write_file("src/f", "x");
   PosixEndpoint src(tmp.sub("src"));
   SyncOptions options = test_options();
+  options.preserve_owner = as_root(ep);
   options.delete_extra = true;
   Cancellation cancel;
   Report r;
@@ -541,6 +577,10 @@ TEST_CASE("EOS to FS: downloads are verified, and a read that fails midway leave
   if (!base_url()) return;
   RemoteDir dir("download");
   EosEndpoint& ep = *dir.endpoint;
+  if (!as_root(ep)) {
+    MESSAGE("not root on EOS: a file's layout cannot be changed, verified downloads not tested");
+    return;
+  }
   std::string big = pattern(3 * 1024 * 1024 + 5);
   put(ep, "a", big);
   put(ep, "b", "small");
@@ -976,6 +1016,10 @@ TEST_CASE("eos endpoint: listings for an identity with find limits") {
   if (!base_url()) return;
   RemoteDir dir("limits");
   EosEndpoint& ep = *dir.endpoint;
+  if (!as_root(ep)) {
+    MESSAGE("not root on EOS: cannot act as nobody, listings with find limits not tested");
+    return;
+  }
   // The instance limits nobody to 20 files and 10 directories per find,
   // counting the files of subdirectories: "many" is cut right after the
   // directory itself, "wide" among its subdirectories.
@@ -1085,10 +1129,17 @@ TEST_CASE("eos endpoint: endpoint URLs") {
   REQUIRE(below.ok());
   CHECK_FALSE(check_disjoint(*below.value(), *ep.value()).ok());
   // Opaque parameters go with every request: as nobody, owners cannot be set.
+  // Only root may switch identities, so for another user that holds anyway.
   auto nobody = make_endpoint(url + "?eos.ruid=65534&eos.rgid=65534", settings);
   REQUIRE(nobody.ok());
   CHECK(nobody.value()->describe() == url);
   CHECK_FALSE(nobody.value()->capabilities().can_set_owner);
+  auto* nobody_eos = dynamic_cast<EosEndpoint*>(nobody.value().get());
+  REQUIRE(nobody_eos);
+  if (as_root(*below.value()))
+    CHECK(eos_uid(*nobody_eos) == 65534);
+  else
+    MESSAGE("not root on EOS: that the URL's opaque parameters reach the MGM is not tested");
   // The kind of server is logged once.
   StderrCapture err;
   CHECK(make_endpoint(path + "/replica2", settings).ok());
@@ -1201,15 +1252,19 @@ TEST_CASE("eos endpoint: symlinks are replaced in place") {
 
   // Owners of a symlink are its own, not those of its target.
   REQUIRE(ep.symlink("l", "d").ok());
-  Entry md;
-  md.type = EntryType::Symlink;
-  md.uid = 4444;
-  md.gid = 5555;
-  REQUIRE(ep.set_metadata("l", md, MetaFields::Owner).ok());
-  CHECK(must(ep.stat("l")).uid == 4444);
-  CHECK(must(ep.stat("l")).gid == 5555);
-  CHECK(must(ep.stat("d")).uid == before.uid);
-  CHECK(must(ep.stat("d")).gid == before.gid);
+  if (as_root(ep)) {
+    Entry md;
+    md.type = EntryType::Symlink;
+    md.uid = 4444;
+    md.gid = 5555;
+    REQUIRE(ep.set_metadata("l", md, MetaFields::Owner).ok());
+    CHECK(must(ep.stat("l")).uid == 4444);
+    CHECK(must(ep.stat("l")).gid == 5555);
+    CHECK(must(ep.stat("d")).uid == before.uid);
+    CHECK(must(ep.stat("d")).gid == before.gid);
+  } else {
+    MESSAGE("not root on EOS: owners of symlinks are not tested");
+  }
   CHECK(ep.list("").value().entries.size() == 2);
 }
 
@@ -1220,8 +1275,41 @@ TEST_CASE("FS to EOS as a user other than root: read-only directories") {
   nobody_owns.type = EntryType::Directory;
   nobody_owns.uid = 65534;
   nobody_owns.gid = 65534;
-  REQUIRE(dir.endpoint->set_metadata("", nobody_owns, MetaFields::Owner).ok());
-  auto nobody = as_nobody(dir.url);
+  // Root hands the directory to nobody and copies as nobody; another user
+  // copies as itself.
+  bool superuser = as_root(*dir.endpoint);
+  if (superuser) REQUIRE(dir.endpoint->set_metadata("", nobody_owns, MetaFields::Owner).ok());
+  std::unique_ptr<EosEndpoint> other = superuser ? as_nobody(dir.url) : nullptr;
+  EosEndpoint* nobody = superuser ? other.get() : dir.endpoint.get();
+
+  // On a shared instance an inherited ACL can grant write access that the
+  // mode denies. The engine then has nothing to make writable, and the test
+  // would pass without exercising it: a directory of mode 0555 must keep its
+  // copier from setting its mtime and from removing its entries.
+  {
+    Entry probe = nobody_owns;
+    probe.mode = 0555;
+    probe.mtime = {1500000000, 0};
+    REQUIRE(dir.endpoint->mkdir("probe", 0755).ok());
+    put(*dir.endpoint, "probe/f", "f");
+    if (superuser) {
+      REQUIRE(dir.endpoint->set_metadata("probe", nobody_owns, MetaFields::Owner).ok());
+      Entry file = nobody_owns;
+      file.type = EntryType::File;
+      REQUIRE(dir.endpoint->set_metadata("probe/f", file, MetaFields::Owner).ok());
+    }
+    REQUIRE(dir.endpoint->set_metadata("probe", probe, MetaFields::Mode).ok());
+    bool mtime_denied = !nobody->set_metadata("probe", probe, MetaFields::Mtime).ok();
+    bool remove_denied = !nobody->remove("probe/f", EntryType::File).ok();
+    probe.mode = 0755;
+    REQUIRE(dir.endpoint->set_metadata("probe", probe, MetaFields::Mode).ok());
+    if (remove_denied) REQUIRE(dir.endpoint->remove("probe/f", EntryType::File).ok());
+    REQUIRE(dir.endpoint->remove("probe", EntryType::Directory).ok());
+    if (!mtime_denied || !remove_denied) {
+      MESSAGE("mode 0555 does not keep this identity from writing: read-only dirs not tested");
+      return;
+    }
+  }
 
   TempDir tmp;
   tmp.write_file("src/ro/f", "x", 0444);
@@ -1247,14 +1335,20 @@ TEST_CASE("FS to EOS as a user other than root: read-only directories") {
   // read-only tree is deleted only after making it writable.
   struct timespec times[2] = {{0, UTIME_OMIT}, {1600000000, 5}};
   REQUIRE(utimensat(AT_FDCWD, tmp.sub("src/ro/sub").c_str(), times, 0) == 0);
+  // Only root writes into the copy's read-only directory without making it
+  // writable first.
+  Entry writable = nobody_owns;
+  writable.mode = 0755;
+  if (!superuser) REQUIRE(dir.endpoint->set_metadata("ro", writable, MetaFields::Mode).ok());
   for (const char* d : {"ro/extra", "ro/extra/inner"}) {
     REQUIRE(dir.endpoint->mkdir(d, 0755).ok());
-    REQUIRE(dir.endpoint->set_metadata(d, nobody_owns, MetaFields::Owner).ok());
+    if (superuser) REQUIRE(dir.endpoint->set_metadata(d, nobody_owns, MetaFields::Owner).ok());
   }
   Entry read_only = nobody_owns;
   read_only.mode = 0555;
   for (const char* d : {"ro/extra/inner", "ro/extra"})
     REQUIRE(dir.endpoint->set_metadata(d, read_only, MetaFields::Mode).ok());
+  if (!superuser) REQUIRE(dir.endpoint->set_metadata("ro", read_only, MetaFields::Mode).ok());
   CHECK(run() == 0);
   CHECK(must(nobody->stat("ro/sub")).mtime == Timespec{1600000000, 5});
   CHECK(must(nobody->stat("ro/sub")).mode == 0555);
@@ -1309,8 +1403,16 @@ TEST_CASE("FS to EOS and back, replica and erasure coded layouts") {
     PosixEndpoint src(tmp.sub("src"));
     RemoteDir dir("sync", layout);
     EosEndpoint& dst = *dir.endpoint;
+    // EOS sets owners only for root on EOS, the local file system only for
+    // local root; the owners given above make the round trip with both.
+    bool eos_root = as_root(dst);
+    bool owners = is_root() && eos_root;
     SyncOptions options = test_options();
-    options.preserve_owner = is_root();
+    options.preserve_owner = eos_root;
+    SyncOptions back_options = test_options();
+    back_options.preserve_owner = is_root();
+    SyncOptions compare = test_options();
+    compare.preserve_owner = owners;
 
     Cancellation cancel;
     Report r;
@@ -1327,7 +1429,7 @@ TEST_CASE("FS to EOS and back, replica and erasure coded layouts") {
     auto sub = dst.stat("sub").value();
     CHECK(sub.mode == 0750);
     CHECK(sub.mtime == Timespec{1600000000, 5});
-    if (is_root()) {
+    if (owners) {
       CHECK(a.uid == 1111);
       CHECK(a.gid == 2222);
       CHECK(sub.uid == 3333);
@@ -1368,7 +1470,7 @@ TEST_CASE("FS to EOS and back, replica and erasure coded layouts") {
     // Back to a local directory, with everything intact.
     PosixEndpoint back(tmp.sub("back"));
     Report r4;
-    Engine restore(dst, back, options, r4, nullptr, cancel);
+    Engine restore(dst, back, back_options, r4, nullptr, cancel);
     REQUIRE(restore.run().ok());
     CHECK(r4.stats.files_copied == 4);
     CHECK(r4.stats.files_unverified == 0);
@@ -1378,10 +1480,10 @@ TEST_CASE("FS to EOS and back, replica and erasure coded layouts") {
     CHECK(tmp.read_file("back/big.bin") == tmp.read_file("src/big.bin"));
     CHECK(back.stat("sub").value().mtime == Timespec{1600000000, 5});
     CHECK(back.stat("link").value().link_target == "empty");
-    if (is_root()) CHECK(back.stat("a.txt").value().uid == 1111);
+    if (owners) CHECK(back.stat("a.txt").value().uid == 1111);
 
     Report r5;
-    Engine verify(src, back, options, r5, nullptr, cancel);
+    Engine verify(src, back, compare, r5, nullptr, cancel);
     REQUIRE(verify.run().ok());
     CHECK(r5.stats.files_copied == 0);
     CHECK(r5.stats.metadata_fixed == 0);
@@ -1404,6 +1506,7 @@ TEST_CASE("FS to EOS: pipelined writes give erasure-coded files their parity") {
   for (int i = 0; i < 3; ++i) tmp.write_file("src/f" + std::to_string(i), content);
   PosixEndpoint src(tmp.sub("src"));
   SyncOptions options = test_options();
+  options.preserve_owner = as_root(ep);
   options.buffer_size = 256 * 1024;
   Cancellation cancel;
   Report r;
@@ -1480,6 +1583,7 @@ TEST_CASE("EOS to EOS between directories") {
   std::string content = pattern(2 * 1024 * 1024 + 3);
   CommitSpec spec;
   spec.size = content.size();
+  if (!as_root(*a.endpoint)) spec.fields = ~MetaFields::Owner;
   spec.checksum = adler(content);
   spec.metadata.mode = 0644;
   spec.metadata.mtime = {1600000000, 1};
