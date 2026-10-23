@@ -21,6 +21,8 @@ src/eosmirror/
   endpoint.hh                        the Endpoint, FileReader and FileWriter interfaces,
                                      Capabilities, Listing, CommitSpec, Location
   posix_endpoint                     local file systems, deferred mtimes (DeferredMtimes)
+  xrd_client                         the XrdCl calls of both endpoints behind interfaces (XrdClient),
+                                     which tests can implement in place of a server
   xrootd_endpoint                    plain XRootD servers through XrdCl; XrdReader/XrdFileWriter
   eos_endpoint                       EOS on top of XrdEndpoint: MGM commands, find listings, uploads
   atomic_upload                      AtomicUploadWriter: a commit that the endpoint confirms afterwards

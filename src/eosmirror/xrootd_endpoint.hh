@@ -11,12 +11,14 @@
 #include "eosmirror/pipeline.hh"
 
 namespace XrdCl {
-class File;
-class FileSystem;
 class XRootDStatus;
 }  // namespace XrdCl
 
 namespace eosmirror {
+
+class XrdClient;
+class XrdFileApi;
+class XrdFsApi;
 
 struct XrdOptions {
   // Writes and reads of one file kept in flight, each of a chunk of the
@@ -76,8 +78,10 @@ Status move_replacing(const std::string& from, const std::string& to,
 // server computes one.
 class XrdEndpoint : public Endpoint {
  public:
+  // client: what sends the requests, by default XrdCl (xrdcl_client()).
   static Result<std::unique_ptr<XrdEndpoint>> create(const std::string& url,
-                                                     XrdOptions options = XrdOptions());
+                                                     XrdOptions options = XrdOptions(),
+                                                     std::shared_ptr<XrdClient> client = nullptr);
   ~XrdEndpoint() override;
 
   std::string describe() const override { return url_; }
@@ -121,15 +125,14 @@ class XrdEndpoint : public Endpoint {
   // Converts an XrdCl status into an error with the given context.
   static Error xrd_error(const XrdCl::XRootDStatus& status, const std::string& context);
 
-  // A file object that opens files as they are: by default, XrdCl takes
-  // files named *.meta4 or *.metalink for Metalink documents and opens the
-  // files they list instead (URL::IsMetalink).
-  static std::unique_ptr<XrdCl::File> new_file();
+  // A file object that opens files as they are (see XrdClient::new_file).
+  std::unique_ptr<XrdFileApi> new_file();
   // One for an upload, with write recovery turned off.
-  static std::unique_ptr<XrdCl::File> new_write_file();
+  std::unique_ptr<XrdFileApi> new_write_file();
 
  protected:
-  XrdEndpoint(const std::string& url, EndpointUrl parts, XrdOptions options);
+  XrdEndpoint(const std::string& url, EndpointUrl parts, XrdOptions options,
+              std::shared_ptr<XrdClient> client);
 
   // The URL for File::Open of a request path, over the calling thread's
   // own connection unless shared.
@@ -137,10 +140,10 @@ class XrdEndpoint : public Endpoint {
 
   // The file system for the calling thread's requests, over its own
   // connection unless shared.
-  XrdCl::FileSystem& fs();
+  XrdFsApi& fs();
 
   // Opens a file for reading.
-  Result<std::unique_ptr<XrdCl::File>> open_file(const std::string& abs_path);
+  Result<std::unique_ptr<XrdFileApi>> open_file(const std::string& abs_path);
 
   std::string url_;     // as given, for display (display_url)
   std::string server_;  // root://[user[:password]@]host:port
@@ -151,18 +154,19 @@ class XrdEndpoint : public Endpoint {
   Capabilities caps_;
 
  private:
+  std::shared_ptr<XrdClient> client_;
   std::mutex fs_mutex_;
-  std::unordered_map<int, std::unique_ptr<XrdCl::FileSystem>> fs_;  // by thread
+  std::unordered_map<int, std::unique_ptr<XrdFsApi>> fs_;  // by thread
 };
 
-// A file read through one XrdCl::File with up to `window` chunk reads in
+// A file read through one XrdCl file with up to `window` chunk reads in
 // flight (ReadAhead); the base of the XRootD and EOS readers. XrdCl may call
 // a read's handler after the file is closed, so the reads in flight are
 // waited for first.
 class XrdReader : public FileReader {
  public:
   // url: the file, for messages.
-  XrdReader(std::unique_ptr<XrdCl::File> file, std::string url, int window);
+  XrdReader(std::unique_ptr<XrdFileApi> file, std::string url, int window);
   ~XrdReader() override;
 
   Result<size_t> read(uint64_t offset, std::span<std::byte> buf) override;
@@ -178,18 +182,18 @@ class XrdReader : public FileReader {
  private:
   Status submit(uint64_t offset, std::span<std::byte> buf, ReadAhead::Done done);
 
-  std::unique_ptr<XrdCl::File> file_;
+  std::unique_ptr<XrdFileApi> file_;
   std::string url_;
   ReadAhead ahead_;
 };
 
-// A file written through one XrdCl::File with up to `window` writes in
+// A file written through one XrdCl file with up to `window` writes in
 // flight, each at the end of the previous one (WriteWindow); the base of the
 // XRootD and EOS writers. The file must come from new_write_file().
 class XrdFileWriter : public FileWriter {
  public:
   // name: the file, for messages.
-  XrdFileWriter(std::unique_ptr<XrdCl::File> file, std::string name, int window);
+  XrdFileWriter(std::unique_ptr<XrdFileApi> file, std::string name, int window);
   ~XrdFileWriter() override;
 
   Status write(Chunk chunk) override;
@@ -203,7 +207,7 @@ class XrdFileWriter : public FileWriter {
   // Waits for the writes in flight and closes the file, whatever fails.
   void close_quietly();
 
-  std::unique_ptr<XrdCl::File> file_;
+  std::unique_ptr<XrdFileApi> file_;
   std::string name_;
   WriteWindow writes_;
 };

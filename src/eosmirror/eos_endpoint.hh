@@ -22,13 +22,14 @@ namespace eosmirror {
 class EosEndpoint : public XrdEndpoint {
  public:
   // Connects and resolves symlinks in the path, since EOS lists entries
-  // under their real paths.
+  // under their real paths. client: as for XrdEndpoint::create.
   static Result<std::unique_ptr<EosEndpoint>> create(const std::string& url,
-                                                     XrdOptions options = XrdOptions());
+                                                     XrdOptions options = XrdOptions(),
+                                                     std::shared_ptr<XrdClient> client = nullptr);
 
   // Whether the server behind the URL is an EOS MGM. An error if the server
   // cannot be asked (unreachable, login refused).
-  static Result<bool> is_eos(const std::string& url);
+  static Result<bool> is_eos(const std::string& url, std::shared_ptr<XrdClient> client = nullptr);
 
   bool is_temporary(const Entry& entry) const override;
   // The condition of pipelined writes for erasure-coded files.
@@ -68,7 +69,8 @@ class EosEndpoint : public XrdEndpoint {
   Result<ProcResult> proc(const std::string& query);
 
  private:
-  EosEndpoint(const std::string& url, EndpointUrl parts, XrdOptions options);
+  EosEndpoint(const std::string& url, EndpointUrl parts, XrdOptions options,
+              std::shared_ptr<XrdClient> client);
   Status probe_identity();
 
   // proc(), telling through answered whether a failure is the server's answer
