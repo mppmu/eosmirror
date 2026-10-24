@@ -1324,14 +1324,14 @@ TEST_CASE("FS to EOS and back, replica and erasure coded layouts") {
     auto a = dst.stat("a.txt").value();
     CHECK(a.mode == 0640);
     CHECK(a.mtime == Timespec{1600000000, 5});
+    auto sub = dst.stat("sub").value();
+    CHECK(sub.mode == 0750);
+    CHECK(sub.mtime == Timespec{1600000000, 5});
     if (is_root()) {
       CHECK(a.uid == 1111);
       CHECK(a.gid == 2222);
-      auto sub = dst.stat("sub").value();
       CHECK(sub.uid == 3333);
-      CHECK(sub.mode == 0750);
     }
-    CHECK(dst.stat("sub").value().mtime == Timespec{1600000000, 5});
     CHECK(dst.stat("link").value().link_target == "a.txt");
     CHECK(dst.stat("sub/abslink").value().link_target == "/abs/elsewhere");
 
