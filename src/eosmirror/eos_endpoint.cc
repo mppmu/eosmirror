@@ -239,18 +239,25 @@ std::string format_timespec(const Timespec& t) {
 // size differs from the listing has changed since. It is stated through the
 // MGM before and after reading, and each stat must find the opened file under
 // its name (a file replaced since has another id).
-class EosReader final : public XrdReader {
+class EosReader final : public FileReader {
  public:
   // fid: the id of the file opened, 0 if unknown.
   EosReader(EosEndpoint& ep, std::unique_ptr<XrdFileApi> file, std::string url, int window,
             RelPath path, uint64_t fid)
-      : XrdReader(std::move(file), std::move(url), window),
-        ep_(ep),
+      : ep_(ep),
         path_(std::move(path)),
-        fid_(fid) {}
+        fid_(fid),
+        file_(std::move(file), std::move(url), window) {}
+
+  Result<size_t> read(uint64_t offset, std::span<std::byte> buf) override {
+    return file_.read(offset, buf);
+  }
+  Result<Chunk> read_chunk(uint64_t offset, uint64_t end, BufferPool& pool) override {
+    return file_.read_chunk(offset, end, pool);
+  }
 
   Result<Entry> state(const Entry& listed) override {
-    auto opened = file_stat(false);
+    auto opened = file_.stat(false);
     if (!opened.ok()) return opened.error();
     if (opened.value().size == listed.size) {
       replica_ = opened.value();
@@ -265,7 +272,7 @@ class EosReader final : public XrdReader {
     // Nothing was read. The MGM serves empty files itself, with a stat of
     // zeros (mgm/ofs/XrdMgmOfsFile.cc).
     if (replica_->size == 0) return true;
-    auto now = file_stat(true);
+    auto now = file_.stat(true);
     if (!now.ok()) return now.error();
     return now.value().size == replica_->size && now.value().mtime == replica_->mtime;
   }
@@ -283,6 +290,7 @@ class EosReader final : public XrdReader {
   RelPath path_;
   uint64_t fid_;
   std::optional<Entry> replica_;  // the replica at the open, when the listing was taken
+  XrdReadFile file_;
 };
 
 // An atomic upload to EOS: the file is created under its final name with
@@ -292,19 +300,21 @@ class EosReader final : public XrdReader {
 // what is in place. Up to `window` writes are in flight, sent in offset order
 // over the file's one connection, each at the end of the previous one, as
 // erasure-coded layouts need (see docs/design.md).
-class EosUploadWriter final : public XrdFileWriter {
+class EosUploadWriter final : public FileWriter {
  public:
   EosUploadWriter(std::unique_ptr<XrdFileApi> file, std::string url, int window)
-      : XrdFileWriter(std::move(file), std::move(url), window) {}
+      : file_(std::move(file), std::move(url), window) {}
 
   ~EosUploadWriter() override { (void)abort(); }
 
+  Status write(Chunk chunk) override { return file_.write(std::move(chunk)); }
+
   Result<CommitInfo> commit(const CommitSpec& spec) override {
-    if (Status s = complete(spec.size); !s.ok()) {
+    if (Status s = file_.complete(spec.size); !s.ok()) {
       (void)abort();
       return s.error();
     }
-    if (Status s = close(); !s.ok()) return s.error();
+    if (Status s = file_.close(); !s.ok()) return s.error();
     return CommitInfo{};
   }
 
@@ -316,24 +326,28 @@ class EosUploadWriter final : public XrdFileWriter {
   // commit the upload: an error, for the caller to take the file away by its
   // id.
   Status abort() override {
-    if (!file_) return {};
-    Status drained = writes_.drain();  // XrdCl refuses to close with writes in flight
+    XrdFileApi* file = file_.file();
+    if (!file) return {};
+    Status drained = file_.drain();  // XrdCl refuses to close with writes in flight
     (void)drained;
     Status status;
-    if (file_->is_open()) {
+    if (file->is_open()) {
       XrdCl::Buffer arg;
       arg.FromString("delete");
       XrdCl::Buffer* response = nullptr;
-      XrdCl::XRootDStatus st = file_->fcntl(arg, response);
+      XrdCl::XRootDStatus st = file->fcntl(arg, response);
       delete response;
       if (!st.IsOK())
         status = Status(XrdEndpoint::xrd_error(
-            st, "discard the upload of " + name_ + " (its close may commit it)"));
-      st = file_->close();  // fails after the delete
+            st, "discard the upload of " + file_.name() + " (its close may commit it)"));
+      st = file->close();  // fails after the delete
     }
-    file_.reset();
+    file_.drop();
     return status;
   }
+
+ private:
+  XrdWriteFile file_;
 };
 
 }  // namespace

@@ -23,7 +23,8 @@ src/eosmirror/
   posix_endpoint                     local file systems, deferred mtimes (DeferredMtimes)
   xrd_client                         the XrdCl calls of both endpoints behind interfaces (XrdClient),
                                      which tests can implement in place of a server
-  xrootd_endpoint                    plain XRootD servers through XrdCl; XrdReader/XrdFileWriter
+  xrootd_endpoint                    plain XRootD servers through XrdCl; XrdReadFile/XrdWriteFile,
+                                     the files that the XRootD and EOS readers and writers hold
   eos_endpoint                       EOS on top of XrdEndpoint: MGM commands, find listings, uploads
   atomic_upload                      AtomicUploadWriter: a commit that the endpoint confirms afterwards
   pipeline                           ReadAhead and WriteWindow: reads and writes kept in flight
@@ -162,7 +163,8 @@ Within a file, remote endpoints pipeline: `ReadAhead` keeps up to
 where the previous one ended, and once one has failed nothing more is sent
 and the rest is waited for before the file is closed. Both are transport
 independent (pipeline.cc) and tested with synthetic submit functions; the
-XrdCl specifics are in `XrdReader` and `XrdFileWriter`.
+XrdCl specifics are in `XrdReadFile` and `XrdWriteFile`, which the XRootD
+and EOS readers and writers hold as members.
 
 ### Durability and confirmation
 

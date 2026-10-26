@@ -160,45 +160,50 @@ class XrdEndpoint : public Endpoint {
 };
 
 // A file read through one XrdCl file with up to `window` chunk reads in
-// flight (ReadAhead); the base of the XRootD and EOS readers. XrdCl may call
-// a read's handler after the file is closed, so the reads in flight are
-// waited for first.
-class XrdReader : public FileReader {
+// flight (ReadAhead), held by the XRootD and EOS readers. XrdCl may call a
+// read's handler after the file is closed, so its destruction waits for the
+// reads in flight before it closes the file. The handlers refer to this
+// object, which therefore cannot be copied or moved.
+class XrdReadFile final {
  public:
   // url: the file, for messages.
-  XrdReader(std::unique_ptr<XrdFileApi> file, std::string url, int window);
-  ~XrdReader() override;
+  XrdReadFile(std::unique_ptr<XrdFileApi> file, std::string url, int window);
+  ~XrdReadFile();
+  XrdReadFile(const XrdReadFile&) = delete;
+  XrdReadFile& operator=(const XrdReadFile&) = delete;
 
-  Result<size_t> read(uint64_t offset, std::span<std::byte> buf) override;
-  Result<Chunk> read_chunk(uint64_t offset, uint64_t end, BufferPool& pool) override;
-  Result<Entry> stat() override;
+  // As FileReader::read and read_chunk.
+  Result<size_t> read(uint64_t offset, std::span<std::byte> buf);
+  Result<Chunk> read_chunk(uint64_t offset, uint64_t end, BufferPool& pool);
 
- protected:
   // The server's stat of the open file: a fresh one, or else the last one
   // XrdCl got. Until a fresh one is asked for, that is the one that came with
   // the open (XrdCl asks every open for it, kXR_retstat).
-  Result<Entry> file_stat(bool fresh);
+  Result<Entry> stat(bool fresh);
 
  private:
   Status submit(uint64_t offset, std::span<std::byte> buf, ReadAhead::Done done);
 
   std::unique_ptr<XrdFileApi> file_;
   std::string url_;
-  ReadAhead ahead_;
+  ReadAhead ahead_;  // last: destroyed first, while the file and url are alive
 };
 
 // A file written through one XrdCl file with up to `window` writes in
-// flight, each at the end of the previous one (WriteWindow); the base of the
-// XRootD and EOS writers. The file must come from new_write_file().
-class XrdFileWriter : public FileWriter {
+// flight, each at the end of the previous one (WriteWindow), held by the
+// XRootD and EOS writers. The file must come from new_write_file(). The
+// handlers refer to this object, which therefore cannot be copied or moved;
+// its destruction waits for the writes in flight.
+class XrdWriteFile final {
  public:
   // name: the file, for messages.
-  XrdFileWriter(std::unique_ptr<XrdFileApi> file, std::string name, int window);
-  ~XrdFileWriter() override;
+  XrdWriteFile(std::unique_ptr<XrdFileApi> file, std::string name, int window);
+  ~XrdWriteFile();
+  XrdWriteFile(const XrdWriteFile&) = delete;
+  XrdWriteFile& operator=(const XrdWriteFile&) = delete;
 
-  Status write(Chunk chunk) override;
-
- protected:
+  // As FileWriter::write.
+  Status write(Chunk chunk);
   // Waits for the writes in flight. Fails if one of them failed or if the
   // number of bytes written is not `size`.
   Status complete(uint64_t size);
@@ -207,9 +212,19 @@ class XrdFileWriter : public FileWriter {
   // Waits for the writes in flight and closes the file, whatever fails.
   void close_quietly();
 
+  // For writers that end a file in their own way: the file, null once it is
+  // closed or dropped; waiting for the writes in flight, which XrdCl needs
+  // before a close; and dropping the file, which XrdCl closes if it is open.
+  XrdFileApi* file() { return file_.get(); }
+  Status drain() { return writes_.drain(); }
+  void drop();
+
+  const std::string& name() const { return name_; }
+
+ private:
   std::unique_ptr<XrdFileApi> file_;
   std::string name_;
-  WriteWindow writes_;
+  WriteWindow writes_;  // last: destroyed first, while the file and name are alive
 };
 
 }  // namespace eosmirror
