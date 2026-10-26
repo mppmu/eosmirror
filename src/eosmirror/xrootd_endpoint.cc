@@ -112,18 +112,38 @@ class Callback : public XrdCl::ResponseHandler {
   Function f_;
 };
 
+// Reads a file as XrdReadFile does.
+class XrdReader final : public FileReader {
+ public:
+  XrdReader(std::unique_ptr<XrdFileApi> file, std::string url, int window)
+      : file_(std::move(file), std::move(url), window) {}
+
+  Result<size_t> read(uint64_t offset, std::span<std::byte> buf) override {
+    return file_.read(offset, buf);
+  }
+  Result<Chunk> read_chunk(uint64_t offset, uint64_t end, BufferPool& pool) override {
+    return file_.read_chunk(offset, end, pool);
+  }
+  Result<Entry> stat() override { return file_.stat(true); }
+
+ private:
+  XrdReadFile file_;
+};
+
 // Writes to a temporary name; commit() waits for the writes, closes,
 // verifies the stored checksum and renames the file into place.
-class XrdWriter final : public XrdFileWriter {
+class XrdWriter final : public FileWriter {
  public:
   XrdWriter(XrdEndpoint& ep, std::unique_ptr<XrdFileApi> file, std::string temp_abs,
             std::string final_abs, int window)
-      : XrdFileWriter(std::move(file), temp_abs, window),
-        ep_(ep),
-        temp_(std::move(temp_abs)),
-        final_(std::move(final_abs)) {}
+      : ep_(ep),
+        temp_(temp_abs),
+        final_(std::move(final_abs)),
+        file_(std::move(file), std::move(temp_abs), window) {}
 
   ~XrdWriter() override { (void)abort(); }
+
+  Status write(Chunk chunk) override { return file_.write(std::move(chunk)); }
 
   Result<CommitInfo> commit(const CommitSpec& spec) override {
     Status s = finish(spec);
@@ -135,7 +155,7 @@ class XrdWriter final : public XrdFileWriter {
   }
 
   Status abort() override {
-    close_quietly();
+    file_.close_quietly();
     if (!temp_exists_) return {};
     temp_exists_ = false;
     Status removed = ep_.remove_abs(temp_);
@@ -146,8 +166,8 @@ class XrdWriter final : public XrdFileWriter {
 
  private:
   Status finish(const CommitSpec& spec) {
-    if (Status s = complete(spec.size); !s.ok()) return s;
-    if (Status s = close(); !s.ok()) return s;
+    if (Status s = file_.complete(spec.size); !s.ok()) return s;
+    if (Status s = file_.close(); !s.ok()) return s;
     if (spec.checksum.type != ChecksumType::None &&
         spec.checksum.type == ep_.capabilities().checksum) {
       auto stored = ep_.query_checksum(temp_);
@@ -184,6 +204,7 @@ class XrdWriter final : public XrdFileWriter {
   std::string final_;
   bool temp_exists_ = true;
   bool verified_ = false;
+  XrdWriteFile file_;
 };
 
 }  // namespace
@@ -310,9 +331,9 @@ std::unique_ptr<XrdFileApi> XrdEndpoint::new_file() {
   return client_->new_file();
 }
 
-// ---- XrdFileWriter -------------------------------------------------------------------
+// ---- XrdWriteFile --------------------------------------------------------------------
 
-XrdFileWriter::XrdFileWriter(std::unique_ptr<XrdFileApi> file, std::string name, int window)
+XrdWriteFile::XrdWriteFile(std::unique_ptr<XrdFileApi> file, std::string name, int window)
     : file_(std::move(file)),
       name_(std::move(name)),
       writes_(static_cast<size_t>(std::max(window, 1)),
@@ -335,14 +356,14 @@ XrdFileWriter::XrdFileWriter(std::unique_ptr<XrdFileApi> file, std::string name,
               },
               name_) {}
 
-XrdFileWriter::~XrdFileWriter() = default;
+XrdWriteFile::~XrdWriteFile() = default;
 
-Status XrdFileWriter::write(Chunk chunk) {
+Status XrdWriteFile::write(Chunk chunk) {
   if (!file_) return Error{ErrorKind::Other, "write to " + name_ + " after its close"};
   return writes_.write(std::move(chunk));
 }
 
-Status XrdFileWriter::complete(uint64_t size) {
+Status XrdWriteFile::complete(uint64_t size) {
   if (!file_) return Error{ErrorKind::Other, "commit of " + name_ + " without an open file"};
   if (Status drained = writes_.drain(); !drained.ok()) return drained;
   if (writes_.written() != size)
@@ -351,7 +372,7 @@ Status XrdFileWriter::complete(uint64_t size) {
   return {};
 }
 
-Status XrdFileWriter::close() {
+Status XrdWriteFile::close() {
   XrdCl::XRootDStatus st = file_->close();
   file_.reset();
   if (!st.IsOK())
@@ -359,7 +380,11 @@ Status XrdFileWriter::close() {
   return {};
 }
 
-void XrdFileWriter::close_quietly() {
+void XrdWriteFile::drop() {
+  file_.reset();
+}
+
+void XrdWriteFile::close_quietly() {
   if (!file_) return;
   Status drained = writes_.drain();
   (void)drained;
@@ -368,9 +393,9 @@ void XrdFileWriter::close_quietly() {
   file_.reset();
 }
 
-// ---- XrdReader -----------------------------------------------------------------------
+// ---- XrdReadFile ---------------------------------------------------------------------
 
-XrdReader::XrdReader(std::unique_ptr<XrdFileApi> file, std::string url, int window)
+XrdReadFile::XrdReadFile(std::unique_ptr<XrdFileApi> file, std::string url, int window)
     : file_(std::move(file)),
       url_(std::move(url)),
       ahead_(static_cast<size_t>(std::max(window, 1)),
@@ -378,13 +403,13 @@ XrdReader::XrdReader(std::unique_ptr<XrdFileApi> file, std::string url, int wind
                return submit(offset, buf, std::move(done));
              }) {}
 
-XrdReader::~XrdReader() {
+XrdReadFile::~XrdReadFile() {
   ahead_.stop();
   XrdCl::XRootDStatus st = file_->close();
   (void)st;
 }
 
-Result<size_t> XrdReader::read(uint64_t offset, std::span<std::byte> buf) {
+Result<size_t> XrdReadFile::read(uint64_t offset, std::span<std::byte> buf) {
   size_t done = 0;
   while (done < buf.size()) {
     uint32_t got = 0;
@@ -397,13 +422,11 @@ Result<size_t> XrdReader::read(uint64_t offset, std::span<std::byte> buf) {
   return done;
 }
 
-Result<Chunk> XrdReader::read_chunk(uint64_t offset, uint64_t end, BufferPool& pool) {
+Result<Chunk> XrdReadFile::read_chunk(uint64_t offset, uint64_t end, BufferPool& pool) {
   return ahead_.next(offset, end, pool);
 }
 
-Result<Entry> XrdReader::stat() { return file_stat(true); }
-
-Result<Entry> XrdReader::file_stat(bool fresh) {
+Result<Entry> XrdReadFile::stat(bool fresh) {
   XrdCl::StatInfo* info = nullptr;
   XrdCl::XRootDStatus st = file_->stat(fresh, info);
   if (!st.IsOK()) return XrdEndpoint::xrd_error(st, "stat " + url_);
@@ -411,7 +434,7 @@ Result<Entry> XrdReader::file_stat(bool fresh) {
   return entry_from_stat(name_of(url_), *info);
 }
 
-Status XrdReader::submit(uint64_t offset, std::span<std::byte> buf, ReadAhead::Done done) {
+Status XrdReadFile::submit(uint64_t offset, std::span<std::byte> buf, ReadAhead::Done done) {
   auto* handler = new Callback([this, done = std::move(done)](const XrdCl::XRootDStatus& st,
                                                               XrdCl::AnyObject* response) {
     if (!st.IsOK()) return done(XrdEndpoint::xrd_error(st, "read " + url_));
