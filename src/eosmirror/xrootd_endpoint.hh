@@ -14,11 +14,11 @@ namespace eosmirror {
 // with every request.
 //
 // Plain XRootD has no symlinks, owners or settable mtimes, so this endpoint
-// reports those as missing capabilities. The EOS endpoint adds them through
-// MGM commands. Files are written under a temporary name and renamed into
+// reports those as missing capabilities (the EOS endpoint has them, through
+// MGM commands). Files are written under a temporary name and renamed into
 // place on commit, with the checksum verified by a checksum query when the
-// server computes one.
-class XrdEndpoint : public Endpoint {
+// server computes one. Requests go through an XrdSession.
+class XrdEndpoint final : public Endpoint {
  public:
   // client: what sends the requests, by default XrdCl (xrdcl_client()).
   static Result<std::unique_ptr<XrdEndpoint>> create(const std::string& url,
@@ -27,7 +27,7 @@ class XrdEndpoint : public Endpoint {
   ~XrdEndpoint() override;
 
   std::string describe() const override { return session_.url(); }
-  // The root, normalized. EOS resolves it on creation.
+  // The root, normalized.
   Location location() const override { return session_.location(); }
   Capabilities capabilities() const override { return caps_; }
   bool is_temporary(const Entry& entry) const override;
@@ -50,7 +50,7 @@ class XrdEndpoint : public Endpoint {
   std::string url_of(const std::string& abs_path) const { return session_.url_of(abs_path); }
 
   // An absolute path as sent to the server, with the URL's opaque
-  // parameters. EOS encodes paths and adds the opaque parameter that says so.
+  // parameters.
   Result<std::string> request_path(const std::string& abs_path) const {
     return session_.request_path(abs_path);
   }
@@ -58,7 +58,7 @@ class XrdEndpoint : public Endpoint {
   // Operations on absolute server paths, used by the writer. A stored
   // checksum of a type eosmirror cannot compute, or none, has type None.
   // The result of a stat is named by the last path component.
-  virtual Result<Entry> stat_abs(const std::string& abs_path);
+  Result<Entry> stat_abs(const std::string& abs_path) { return session_.stat_abs(abs_path); }
   Result<Checksum> query_checksum(const std::string& abs_path) {
     return session_.query_checksum(abs_path);
   }
@@ -73,17 +73,11 @@ class XrdEndpoint : public Endpoint {
   // As eosmirror::xrd_error().
   static Error xrd_error(const XrdCl::XRootDStatus& status, const std::string& context);
 
- protected:
-  // encoding: how requests write paths.
-  XrdEndpoint(const std::string& url, EndpointUrl parts, XrdOptions options, PathEncoding encoding,
+ private:
+  XrdEndpoint(const std::string& url, EndpointUrl parts, XrdOptions options,
               std::shared_ptr<XrdClient> client);
 
-  XrdSession& session() { return session_; }
-  const XrdSession& session() const { return session_; }
-
   Capabilities caps_;
-
- private:
   XrdSession session_;
 };
 

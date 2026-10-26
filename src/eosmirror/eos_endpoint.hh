@@ -9,7 +9,8 @@
 #include <vector>
 
 #include "eosmirror/atomic_upload.hh"
-#include "eosmirror/xrootd_endpoint.hh"
+#include "eosmirror/endpoint.hh"
+#include "eosmirror/xrd_session.hh"
 
 namespace eosmirror {
 
@@ -18,8 +19,10 @@ namespace eosmirror {
 // On top of XRootD, EOS has symlinks, owners, nanosecond mtimes and
 // listings with full metadata, all reached through the MGM's commands the
 // way the eos client sends them (see docs/design.md). Files are uploaded
-// atomically: EOS renames them into place at close.
-class EosEndpoint : public XrdEndpoint {
+// atomically: EOS renames them into place at close. Requests go through an
+// XrdSession with EOS's path encoding, as the XRootD endpoint's go through
+// one of its own.
+class EosEndpoint final : public Endpoint {
  public:
   // Connects and resolves symlinks in the path, since EOS lists entries
   // under their real paths. client: as for XrdEndpoint::create.
@@ -31,21 +34,39 @@ class EosEndpoint : public XrdEndpoint {
   // cannot be asked (unreachable, login refused).
   static Result<bool> is_eos(const std::string& url, std::shared_ptr<XrdClient> client = nullptr);
 
+  std::string describe() const override { return session_.url(); }
+  // The root, resolved on creation and normalized.
+  Location location() const override { return session_.location(); }
+  Capabilities capabilities() const override { return caps_; }
   bool is_temporary(const Entry& entry) const override;
   // The condition of pipelined writes for erasure-coded files.
   std::string target_note() const override;
+
+  Result<Entry> stat(const RelPath& path) override;
   Result<Listing> list(const RelPath& dir) override;
+  Status mkdir(const RelPath& path, ModeBits mode) override;
   Status symlink(const RelPath& path, const std::string& target) override;
   Status set_metadata(const RelPath& path, const Entry& metadata, MetaFields fields) override;
+  Status remove(const RelPath& path, EntryType type) override;
   Result<std::unique_ptr<FileReader>> open_read(const RelPath& path) override;
   Result<std::unique_ptr<FileWriter>> open_write(const RelPath& path,
                                                  const CommitSpec& spec) override;
   // The checksum from the listing, without asking.
   Result<Checksum> stored_checksum(const RelPath& path, const Entry& listed) override;
 
+  // The absolute path on the server of a relative path, and its URL for
+  // messages.
+  std::string absolute(const RelPath& path) const { return session_.absolute(path); }
+  std::string url_of(const std::string& abs_path) const { return session_.url_of(abs_path); }
+
   // Stats an absolute path without following a final symlink. The result is
   // named by the last path component.
-  Result<Entry> stat_abs(const std::string& abs_path) override;
+  Result<Entry> stat_abs(const std::string& abs_path);
+  // The checksum the server reports for an absolute path (see
+  // XrdSession::query_checksum); the listing has it as well.
+  Result<Checksum> query_checksum(const std::string& abs_path) {
+    return session_.query_checksum(abs_path);
+  }
 
   // Runs an MGM fsctl command (mgm.pcmd=<command><args>) on an absolute path,
   // as a single query; it replies "<command>: retc=<errno>".
@@ -85,7 +106,14 @@ class EosEndpoint : public XrdEndpoint {
   // cannot be stated (invalid ones).
   Result<size_t> complete_listing(const std::string& abs_dir, std::vector<Entry>& entries);
 
+  // An absolute path as sent to the MGM (never an error for EOS's encoding).
+  Result<std::string> request_path(const std::string& abs_path) const {
+    return session_.request_path(abs_path);
+  }
+
+  Capabilities caps_;
   std::atomic<bool> truncation_warned_{false};
+  XrdSession session_;
 };
 
 // The RequestProto of the console's "file symlink" command (with force),

@@ -28,7 +28,7 @@ src/eosmirror/
                                      on paths; XrdReadFile/XrdWriteFile, the files that their
                                      readers and writers hold
   xrootd_endpoint                    plain XRootD servers
-  eos_endpoint                       EOS on top of XrdEndpoint: MGM commands, find listings, uploads
+  eos_endpoint                       EOS over its own XrdSession: MGM commands, find listings, uploads
   atomic_upload                      AtomicUploadWriter: a commit that the endpoint confirms afterwards
   pipeline                           ReadAhead and WriteWindow: reads and writes kept in flight
   endpoints                          the factory for command line specs, the overlap check
@@ -45,9 +45,10 @@ Dependencies point one way, with no cycles:
 
 ```
 main ──► cli ──► endpoints ──► posix_endpoint ──────────────┐
- │        │         └──(with XRootD)──► eos_endpoint ──► xrootd_endpoint ──► xrd_session ──► pipeline
- │        │                                 └──► atomic_upload ─┐                │
- │        └──► journal ──► report ──┐                           ▼                ▼
+ │        │         ├──(with XRootD)──► xrootd_endpoint ──────┐
+ │        │         └──(with XRootD)──► eos_endpoint ─────────┴──► xrd_session ──► pipeline
+ │        │                                 └──► atomic_upload ─┐                  │
+ │        └──► journal ──► report ──┐                           ▼                  ▼
  ├──► engine ──► copy ──────────────┴──► endpoint ──► types, error, checksum, buffer
  │      └──► queue, retry, cancellation, journal, report, log
  ├──► progress_display ──► report, log

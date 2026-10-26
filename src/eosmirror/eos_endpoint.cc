@@ -320,7 +320,7 @@ class EosUploadWriter final : public FileWriter {
       XrdCl::XRootDStatus st = file->fcntl(arg, response);
       delete response;
       if (!st.IsOK())
-        status = Status(XrdEndpoint::xrd_error(
+        status = Status(xrd_error(
             st, "discard the upload of " + file_.name() + " (its close may commit it)"));
       st = file->close();  // fails after the delete
     }
@@ -604,13 +604,14 @@ std::optional<std::vector<std::string>> parse_find_denials(std::string_view err,
 
 EosEndpoint::EosEndpoint(const std::string& url, EndpointUrl parts, XrdOptions options,
                          std::shared_ptr<XrdClient> client)
-    : XrdEndpoint(url, std::move(parts), options, PathEncoding::Eos, std::move(client)) {
+    : session_(url, std::move(parts), options, PathEncoding::Eos, std::move(client)) {
   caps_.mtime_resolution = 1;
   caps_.has_owners = true;
   caps_.can_set_mtime = true;
   caps_.has_symlinks = true;
   caps_.follows_symlinks = false;
-  caps_.symlink_owner = false;  // settled by probe_identity()
+  caps_.can_set_owner = false;  // settled by probe_identity()
+  caps_.symlink_owner = false;  // likewise
   caps_.can_set_mode = true;
   // EOS keeps the permission bits of files, and clears setuid on directories
   // (EOS 5.5 mgm/ofs/cmds/Chmod.inc).
@@ -628,11 +629,11 @@ Result<std::unique_ptr<EosEndpoint>> EosEndpoint::create(const std::string& url,
       new EosEndpoint(url, std::move(parts).value(), options, std::move(client)));
   Status probed = ep->probe_identity();
   if (!probed.ok()) return probed.error();
-  auto real = ep->resolve(ep->session().root());
+  auto real = ep->resolve(ep->session_.root());
   if (!real.ok()) return real.error();
-  if (real.value() != ep->session().root()) {
+  if (real.value() != ep->session_.root()) {
     log::debug(ep->describe(), " is ", real.value());
-    ep->session().set_root(std::move(real).value());
+    ep->session_.set_root(std::move(real).value());
   }
   return ep;
 }
@@ -680,12 +681,12 @@ Result<EosEndpoint::ProcResult> EosEndpoint::proc(const std::string& query) {
 
 Result<EosEndpoint::ProcResult> EosEndpoint::run_proc(const std::string& query, bool* answered) {
   std::string url =
-      session().open_url(with_cgi("/proc/user/?" + query + std::string(kEosApp), session().cgi()));
+      session_.open_url(with_cgi("/proc/user/?" + query + std::string(kEosApp), session_.cgi()));
   auto failed = [&](const XrdCl::XRootDStatus& st, const std::string& context) {
     if (answered) *answered = st.code == XrdCl::errErrorResponse;
-    return xrd_error(st, context + display_url(session().server()));
+    return xrd_error(st, context + display_url(session_.server()));
   };
-  auto file = session().new_file();
+  auto file = session_.new_file();
   XrdCl::XRootDStatus st = file->open(url, XrdCl::OpenFlags::Read);
   if (!st.IsOK()) return failed(st, "command on ");
   std::string response;
@@ -709,16 +710,22 @@ Result<EosEndpoint::ProcResult> EosEndpoint::run_proc(const std::string& query, 
 }
 
 bool EosEndpoint::is_temporary(const Entry& entry) const {
-  return XrdEndpoint::is_temporary(entry) ||
-         (entry.type == EntryType::File && entry.name.starts_with(".sys.a#."));
+  return entry.type == EntryType::File &&
+         (is_temporary_name(entry.name) || entry.name.starts_with(".sys.a#."));
 }
 
 std::string EosEndpoint::target_note() const {
-  int window = session().options().write_window;
+  int window = session_.options().write_window;
   if (window <= 1) return {};
   return "pipelined writes (--write-window " + std::to_string(window) + ") to " + describe() +
          " are safe for erasure-coded directories only while its storage nodes keep EOS's "
          "default xrootd.async off; use --write-window 1 when in doubt";
+}
+
+Result<Entry> EosEndpoint::stat(const RelPath& path) {
+  auto e = stat_abs(absolute(path));
+  if (e.ok() && path.empty()) e.value().name.clear();
+  return e;
 }
 
 Result<Entry> EosEndpoint::stat_abs(const std::string& abs) {
@@ -726,7 +733,7 @@ Result<Entry> EosEndpoint::stat_abs(const std::string& abs) {
   XrdCl::Buffer arg;
   arg.FromString(request + "&mgm.pcmd=stat");
   XrdCl::Buffer* response = nullptr;
-  XrdCl::XRootDStatus st = session().fs().query(XrdCl::QueryCode::OpaqueFile, arg, response);
+  XrdCl::XRootDStatus st = session_.fs().query(XrdCl::QueryCode::OpaqueFile, arg, response);
   if (!st.IsOK()) return xrd_error(st, "stat " + url_of(abs));
   std::unique_ptr<XrdCl::Buffer> owned(response);
   std::string text = response ? response->ToString() : "";
@@ -762,7 +769,7 @@ Result<Entry> EosEndpoint::stat_abs(const std::string& abs) {
     XrdCl::Buffer link_arg;
     link_arg.FromString(request + "&mgm.pcmd=readlink");
     XrdCl::Buffer* link_response = nullptr;
-    st = session().fs().query(XrdCl::QueryCode::OpaqueFile, link_arg, link_response);
+    st = session_.fs().query(XrdCl::QueryCode::OpaqueFile, link_arg, link_response);
     if (!st.IsOK()) return xrd_error(st, "readlink " + url_of(abs));
     std::unique_ptr<XrdCl::Buffer> owned_link(link_response);
     std::string link = link_response ? link_response->ToString() : "";
@@ -912,7 +919,7 @@ Result<size_t> EosEndpoint::complete_listing(const std::string& abs, std::vector
   auto request = request_path(abs);
   XrdCl::DirectoryList* listing = nullptr;
   XrdCl::XRootDStatus st =
-      session().fs().dir_list(request.value(), XrdCl::DirListFlags::None, listing);
+      session_.fs().dir_list(request.value(), XrdCl::DirListFlags::None, listing);
   if (!st.IsOK()) return xrd_error(st, "list " + url_of(abs));
   std::unique_ptr<XrdCl::DirectoryList> owned(listing);
   std::unordered_set<std::string> names;
@@ -991,12 +998,22 @@ Status EosEndpoint::set_metadata(const RelPath& path, const Entry& md, MetaField
   return {};
 }
 
+Status EosEndpoint::mkdir(const RelPath& path, ModeBits mode) {
+  return session_.mkdir_abs(absolute(path), mode);
+}
+
+Status EosEndpoint::remove(const RelPath& path, EntryType type) {
+  std::string abs = absolute(path);
+  if (type == EntryType::Directory) return session_.rmdir_abs(abs);
+  return session_.remove_abs(abs);
+}
+
 Status EosEndpoint::fsctl(const std::string& abs, const std::string& command,
                           const std::string& args) {
   XrdCl::Buffer arg;
   arg.FromString(request_path(abs).value() + "&mgm.pcmd=" + command + args);
   XrdCl::Buffer* response = nullptr;
-  XrdCl::XRootDStatus st = session().fs().query(XrdCl::QueryCode::OpaqueFile, arg, response);
+  XrdCl::XRootDStatus st = session_.fs().query(XrdCl::QueryCode::OpaqueFile, arg, response);
   if (!st.IsOK()) return xrd_error(st, command + " " + url_of(abs));
   std::unique_ptr<XrdCl::Buffer> owned(response);
   std::string text = response ? response->ToString() : "";
@@ -1013,7 +1030,7 @@ Result<UploadFile> EosEndpoint::file_by_id(const std::string& abs, uint64_t fid)
   arg.FromString(request_path(abs).value() + "&mgm.pcmd=getfmd&mgm.getfmd.fid=" +
                  std::to_string(fid));
   XrdCl::Buffer* response = nullptr;
-  XrdCl::XRootDStatus st = session().fs().query(XrdCl::QueryCode::OpaqueFile, arg, response);
+  XrdCl::XRootDStatus st = session_.fs().query(XrdCl::QueryCode::OpaqueFile, arg, response);
   if (!st.IsOK()) return xrd_error(st, "getfmd " + url_of(abs));
   std::unique_ptr<XrdCl::Buffer> owned(response);
   auto reply = parse_getfmd_reply(response ? response->ToString() : "");
@@ -1073,11 +1090,11 @@ Result<Checksum> EosEndpoint::stored_checksum(const RelPath& path, const Entry& 
 
 Result<std::unique_ptr<FileReader>> EosEndpoint::open_read(const RelPath& path) {
   std::string abs = absolute(path);
-  auto file = session().open_file(abs);
+  auto file = session_.open_file(abs);
   if (!file.ok()) return file.error();
   uint64_t fid = opened_file_id(*file.value());
   return std::unique_ptr<FileReader>(new EosReader(*this, std::move(file).value(), url_of(abs),
-                                                   session().options().read_window, path, fid));
+                                                   session_.options().read_window, path, fid));
 }
 
 Result<std::unique_ptr<FileWriter>> EosEndpoint::open_write(const RelPath& path,
@@ -1089,8 +1106,8 @@ Result<std::unique_ptr<FileWriter>> EosEndpoint::open_write(const RelPath& path,
   // once the file is confirmed.
   bool mtime_at_open = has(spec.fields, MetaFields::Mtime) && spec.metadata.mtime.sec != 0;
   if (mtime_at_open) request += "&eos.mtime=" + format_timespec(spec.metadata.mtime);
-  std::string url = session().open_url(request);
-  auto file = session().new_write_file();
+  std::string url = session_.open_url(request);
+  auto file = session_.new_write_file();
   ModeBits mode = has(spec.fields, MetaFields::Mode) ? spec.metadata.mode : 0644;
   XrdCl::XRootDStatus st = file->open(url, XrdCl::OpenFlags::Delete | XrdCl::OpenFlags::Write,
                                       static_cast<XrdCl::Access::Mode>(mode & 0777));
@@ -1099,7 +1116,7 @@ Result<std::unique_ptr<FileWriter>> EosEndpoint::open_write(const RelPath& path,
   // other file in place afterwards.
   uint64_t fid = opened_file_id(*file);
   std::unique_ptr<FileWriter> upload(
-      new EosUploadWriter(std::move(file), url_of(abs), session().options().write_window));
+      new EosUploadWriter(std::move(file), url_of(abs), session_.options().write_window));
   if (fid == 0) {
     (void)upload->abort();
     return Error{ErrorKind::Unsupported,
