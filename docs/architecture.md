@@ -459,8 +459,12 @@ of it, not an independent model of EOS.
 - Unit (`tests/unit`, doctest, `ctest`): the engine on `FakeEndpoint` with
   fault injection (test_engine.cc), the local endpoint on a temporary
   directory, the parsers, URLs and request paths of the XRootD and EOS
-  endpoints without a server, the pipeline with synthetic submits, the journal, the
-  CLI, the controller. `unit_unprivileged` runs the tests of what a user
+  endpoints, the endpoints themselves on `FakeXrd` (fake_xrd_client.hh, an
+  in-memory EOS instance behind `XrdClient`, with faults, for the error
+  paths that a real server rarely shows), the pipeline with synthetic
+  submits, the journal, the CLI, the controller. What EOS itself does
+  (atomic uploads, `eos.mtime`, versions, parity) is tested on a real
+  instance only. `unit_unprivileged` runs the tests of what a user
   other than root cannot do, as `nobody` where needed (skipped with exit
   status 77 where it cannot). `cli_smoke` runs the binary on local
   directories, three shards among them.
