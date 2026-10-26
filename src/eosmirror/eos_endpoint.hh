@@ -34,7 +34,6 @@ class EosEndpoint : public XrdEndpoint {
   bool is_temporary(const Entry& entry) const override;
   // The condition of pipelined writes for erasure-coded files.
   std::string target_note() const override;
-  Result<std::string> request_path(const std::string& abs_path) const override;
   Result<Listing> list(const RelPath& dir) override;
   Status symlink(const RelPath& path, const std::string& target) override;
   Status set_metadata(const RelPath& path, const Entry& metadata, MetaFields fields) override;
@@ -88,12 +87,6 @@ class EosEndpoint : public XrdEndpoint {
 
   std::atomic<bool> truncation_warned_{false};
 };
-
-// A path for a request to EOS: percent-encoded behind "/#curl#", which the
-// MGM decodes when the request carries eos.encodepath. The request path adds
-// that parameter; further ones follow after '&'.
-std::string eos_encoded_path(const std::string& abs_path);
-std::string eos_request_path(const std::string& abs_path);
 
 // The RequestProto of the console's "file symlink" command (with force),
 // which carries the link path and target as bytes.

@@ -6,9 +6,13 @@
 
 #include <cerrno>
 #include <map>
+#include <memory>
+#include <thread>
 
 #include "doctest/doctest.h"
 #include "eosmirror/eos_endpoint.hh"
+#include "eosmirror/xrd_client.hh"
+#include "eosmirror/xrd_session.hh"
 
 using namespace eosmirror;
 
@@ -24,6 +28,25 @@ Entry listed(std::string_view line, std::string_view dir = "/eos/d") {
 
 bool refused(std::string_view line, std::string_view dir = "/eos/d") {
   return !parse_find_line(line, dir).ok();
+}
+
+// A client for sessions that must send nothing.
+class NoClient final : public XrdClient {
+ public:
+  std::unique_ptr<XrdFileApi> new_file() override {
+    FAIL("a file was made");
+    return nullptr;
+  }
+  std::unique_ptr<XrdFsApi> new_file_system(const std::string&) override {
+    FAIL("a file system was made");
+    return nullptr;
+  }
+};
+
+XrdSession session(const std::string& url, PathEncoding encoding, XrdOptions options = {}) {
+  auto parts = parse_endpoint_url(url);
+  REQUIRE(parts.ok());
+  return XrdSession(url, std::move(parts).value(), options, encoding, std::make_shared<NoClient>());
 }
 
 }  // namespace
@@ -77,6 +100,51 @@ TEST_CASE("endpoint URLs keep their protocol and opaque parameters") {
         "/#curl#/eos/a%20b?eos.encodepath=1&eos.app=eosmirror&authz=token&xrd.wantprot=krb5");
   CHECK(with_cgi("root://mgm//proc/user/?mgm.cmd=whoami", cgi) ==
         "root://mgm//proc/user/?mgm.cmd=whoami&authz=token&xrd.wantprot=krb5");
+}
+
+TEST_CASE("sessions write paths in their encoding, with the URL's opaque parameters") {
+  SUBCASE("XRootD") {
+    auto s = session("root://user@Host//data/dir/?authz=t", PathEncoding::XRootD);
+    CHECK(s.url() == "root://user@Host//data/dir/");
+    CHECK(s.absolute("") == "/data/dir");
+    CHECK(s.absolute("a/b") == "/data/dir/a/b");
+    CHECK(s.url_of("/data/dir/f") == "root://user@Host:1094//data/dir/f");
+    CHECK(s.location().server == "host:1094");
+    CHECK(s.location().path == "/data/dir");
+    CHECK(s.request_path("/data/dir/a b#c").value() == "/data/dir/a b#c?authz=t");
+    auto refused_path = s.request_path("/data/dir/x?eos.ruid=0");
+    REQUIRE_FALSE(refused_path.ok());
+    CHECK(refused_path.error().kind == ErrorKind::Unsupported);
+  }
+  SUBCASE("EOS") {
+    auto s = session("root://mgm//eos/dir?authz=t", PathEncoding::Eos);
+    CHECK(s.request_path("/eos/dir/a b?x").value() ==
+          "/#curl#/eos/dir/a%20b%3Fx?eos.encodepath=1&eos.app=eosmirror&authz=t");
+  }
+  SUBCASE("a root that is resolved, and the root directory") {
+    auto s = session("root://mgm//eos/link", PathEncoding::Eos);
+    s.set_root("/eos/real");
+    CHECK(s.absolute("x") == "/eos/real/x");
+    CHECK(s.location().path == "/eos/real");
+    auto top = session("root://host//", PathEncoding::XRootD);
+    CHECK(top.absolute("") == "/");
+    CHECK(top.absolute("x") == "/x");
+  }
+}
+
+TEST_CASE("sessions open files over the calling thread's own connection unless shared") {
+  auto own = session("root://host//data", PathEncoding::XRootD);
+  std::string url = own.open_url("/data/f?authz=t");
+  CHECK(url.starts_with("root://host:1094//data/f?authz=t&xrdcl.intent=eosmirror"));
+  CHECK(own.open_url("/data/g") ==
+        "root://host:1094//data/g?" + url.substr(url.find("xrdcl.intent=")));
+  std::string other;
+  std::thread([&] { other = own.open_url("/data/f?authz=t"); }).join();
+  CHECK(other != url);
+  XrdOptions shared;
+  shared.shared_connection = true;
+  CHECK(session("root://host//data", PathEncoding::XRootD, shared).open_url("/data/f?authz=t") ==
+        "root://host:1094//data/f?authz=t");
 }
 
 TEST_CASE("files are replaced by moves where the server refuses to replace them") {
