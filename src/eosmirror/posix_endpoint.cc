@@ -208,7 +208,7 @@ Status apply_metadata_fd(int fd, const std::string& context, const Entry& md, Me
   return {};
 }
 
-class PosixReader : public FileReader {
+class PosixReader final : public FileReader {
  public:
   PosixReader(int fd, std::string path) : fd_(fd), path_(std::move(path)) {}
   ~PosixReader() override { close(fd_); }
@@ -239,7 +239,7 @@ class PosixReader : public FileReader {
   std::string path_;
 };
 
-class PosixWriter : public FileWriter {
+class PosixWriter final : public FileWriter {
  public:
   // deferred: where copies get their mtimes after a sync, if at all.
   PosixWriter(int fd, std::string temp, std::string final_path, PosixOptions options,
