@@ -13,6 +13,7 @@
 #include "eosmirror/eos_endpoint.hh"
 #include "eosmirror/xrd_client.hh"
 #include "eosmirror/xrd_session.hh"
+#include "eosmirror/xrootd_endpoint.hh"
 
 using namespace eosmirror;
 

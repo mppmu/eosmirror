@@ -133,8 +133,8 @@ Result<std::unique_ptr<XrdEndpoint>> XrdEndpoint::create(const std::string& url,
                                                          std::shared_ptr<XrdClient> client) {
   auto parts = parse_endpoint_url(url);
   if (!parts.ok()) return parts.error();
-  std::unique_ptr<XrdEndpoint> ep(new XrdEndpoint(url, std::move(parts).value(), options,
-                                                  PathEncoding::XRootD, std::move(client)));
+  std::unique_ptr<XrdEndpoint> ep(
+      new XrdEndpoint(url, std::move(parts).value(), options, std::move(client)));
 
   // The checksum the server computes, if any. A server that cannot be
   // reached or refuses the login is no endpoint to work with.
@@ -160,8 +160,8 @@ Result<std::unique_ptr<XrdEndpoint>> XrdEndpoint::create(const std::string& url,
 }
 
 XrdEndpoint::XrdEndpoint(const std::string& url, EndpointUrl parts, XrdOptions options,
-                         PathEncoding encoding, std::shared_ptr<XrdClient> client)
-    : session_(url, std::move(parts), options, encoding, std::move(client)) {
+                         std::shared_ptr<XrdClient> client)
+    : session_(url, std::move(parts), options, PathEncoding::XRootD, std::move(client)) {
   caps_.mtime_resolution = 1000000000;
   caps_.has_owners = false;
   caps_.can_set_owner = false;
@@ -188,10 +188,6 @@ Result<Entry> XrdEndpoint::stat(const RelPath& path) {
   auto e = stat_abs(absolute(path));
   if (e.ok() && path.empty()) e.value().name.clear();
   return e;
-}
-
-Result<Entry> XrdEndpoint::stat_abs(const std::string& abs) {
-  return session_.stat_abs(abs);
 }
 
 Result<Listing> XrdEndpoint::list(const RelPath& dir) {
