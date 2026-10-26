@@ -114,7 +114,7 @@ class Callback : public XrdCl::ResponseHandler {
 
 // Writes to a temporary name; commit() waits for the writes, closes,
 // verifies the stored checksum and renames the file into place.
-class XrdWriter : public XrdFileWriter {
+class XrdWriter final : public XrdFileWriter {
  public:
   XrdWriter(XrdEndpoint& ep, std::unique_ptr<XrdFileApi> file, std::string temp_abs,
             std::string final_abs, int window)

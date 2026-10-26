@@ -239,7 +239,7 @@ std::string format_timespec(const Timespec& t) {
 // size differs from the listing has changed since. It is stated through the
 // MGM before and after reading, and each stat must find the opened file under
 // its name (a file replaced since has another id).
-class EosReader : public XrdReader {
+class EosReader final : public XrdReader {
  public:
   // fid: the id of the file opened, 0 if unknown.
   EosReader(EosEndpoint& ep, std::unique_ptr<XrdFileApi> file, std::string url, int window,
@@ -292,7 +292,7 @@ class EosReader : public XrdReader {
 // what is in place. Up to `window` writes are in flight, sent in offset order
 // over the file's one connection, each at the end of the previous one, as
 // erasure-coded layouts need (see docs/design.md).
-class EosUploadWriter : public XrdFileWriter {
+class EosUploadWriter final : public XrdFileWriter {
  public:
   EosUploadWriter(std::unique_ptr<XrdFileApi> file, std::string url, int window)
       : XrdFileWriter(std::move(file), std::move(url), window) {}
