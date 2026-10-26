@@ -78,9 +78,9 @@ class FakeXrd final : public eosmirror::XrdClient, public std::enable_shared_fro
   };
 
   struct Fault {
-    std::string op;    // as in the request log: "open", "write", "close", "query:getfmd", ...
-    std::string path;  // empty for any
-    Status status;
+    std::string op = {};        // as in the request log: "open", "close", "query:getfmd", ...
+    std::string path = {};      // empty for any
+    Status status = {};         // success, for an operation that only appears to succeed
     bool async = false;         // reads and writes: through the handler
     bool takes_effect = false;  // the operation is done all the same
     int remaining = 1;
@@ -120,9 +120,12 @@ class FakeXrd final : public eosmirror::XrdClient, public std::enable_shared_fro
   // ("mgm.proc.stdout=...&mgm.proc.stderr=...&mgm.proc.retc=N"). Unanswered
   // commands get EOPNOTSUPP.
   std::function<std::optional<std::string>(std::string_view query)> proc;
-  // Replies to fsctl queries (mgm.pcmd), in place of the model's, by command
-  // and decoded path; nothing for the model's reply.
-  std::function<std::optional<std::string>(std::string_view pcmd, const std::string& path)> reply;
+  // Replies to fsctl queries (mgm.pcmd) in place of the model's, by command,
+  // decoded path and the model's reply (which has taken effect); nothing to
+  // keep the model's.
+  std::function<std::optional<std::string>(std::string_view pcmd, const std::string& path,
+                                           const std::string& reply)>
+      reply;
   // Called after an upload is in place under its name.
   std::function<void(const std::string& path)> on_commit;
 
@@ -153,6 +156,14 @@ class FakeXrd final : public eosmirror::XrdClient, public std::enable_shared_fro
     n.mtime = n.ctime = mtime;
     nodes_[path] = n;
     return n.fid;
+  }
+
+  // Moves an entry, replacing what is at `to`, as another client may.
+  void rename(const std::string& from, const std::string& to) {
+    std::lock_guard lock(mutex_);
+    Node n = nodes_.at(from);
+    nodes_.erase(from);
+    nodes_[to] = n;
   }
 
   void symlink(const std::string& path, std::string target) {
@@ -598,8 +609,9 @@ class FakeXrd final : public eosmirror::XrdClient, public std::enable_shared_fro
         std::string pcmd = r.param("mgm.pcmd").value_or("");
         auto f = xrd_->request("query:" + pcmd, r.path);
         if (f && !f->takes_effect) return f->status;
-        auto scripted = xrd_->reply ? xrd_->reply(pcmd, r.path) : std::nullopt;
-        text = scripted ? *scripted : xrd_->fsctl(pcmd, r);
+        text = xrd_->fsctl(pcmd, r);
+        if (xrd_->reply)
+          if (auto scripted = xrd_->reply(pcmd, r.path, text)) text = *scripted;
         if (f) return f->status;
       }
       response = new XrdCl::Buffer();
