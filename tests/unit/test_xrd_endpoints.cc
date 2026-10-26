@@ -3,6 +3,7 @@
 // The XRootD and EOS endpoints on a fake XRootD client (fake_xrd_client.hh):
 // what they send and what the instance ends up with, without a server.
 #include <algorithm>
+#include <cerrno>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -75,6 +76,22 @@ CommitSpec spec_for(std::string_view content) {
   h.update({reinterpret_cast<const std::byte*>(content.data()), content.size()});
   spec.checksum = h.finish();
   return spec;
+}
+
+// Uploads content and commits it. The writer is gone afterwards, so that an
+// abort at its destruction has happened as well.
+Result<CommitInfo> upload(Endpoint& ep, const RelPath& path, std::string_view content,
+                          const CommitSpec& spec) {
+  BufferPool pool(4);
+  auto writer = ep.open_write(path, spec);
+  if (!writer.ok()) return writer.error();
+  if (Status s = write_all(*writer.value(), content, pool); !s.ok()) return s.error();
+  return writer.value()->commit(spec);
+}
+
+std::string proc_reply(const std::string& out, const std::string& err = "", int retc = 0) {
+  return "mgm.proc.stdout=" + out + "&mgm.proc.stderr=" + err +
+         "&mgm.proc.retc=" + std::to_string(retc);
 }
 
 bool hidden_uploads(const std::shared_ptr<FakeXrd>& xrd) {
@@ -258,4 +275,222 @@ TEST_CASE("XRootD endpoints on the fake: uploads are renamed into place, verifie
     return r.starts_with("mv /data/f /data/");
   });
   CHECK(moved_aside == replacing);
+}
+
+TEST_CASE("EOS uploads whose close fails although EOS committed them are taken back") {
+  auto xrd = instance();
+  std::string content = "the new content";
+  CommitSpec spec = spec_for(content);
+  // The storage node commits the upload; the client hears of no success.
+  xrd->fail(
+      {.op = "close", .path = "/eos/d/f", .status = FakeXrd::timeout(), .takes_effect = true});
+
+  SUBCASE("replacing a file: kept with mtime 0, so that EOS keeps its versions") {
+    xrd->file("/eos/d/f", "old");
+    auto committed = upload(*eos(xrd), "f", content, spec);
+    REQUIRE_FALSE(committed.ok());
+    CHECK_FALSE(committed.error().in_doubt);
+    auto f = xrd->at("/eos/d/f");
+    REQUIRE(f);
+    CHECK(f->content == content);
+    CHECK(f->mtime == Timespec{0, 0});
+  }
+  SUBCASE("replacing nothing: removed") {
+    spec.replaces = false;
+    auto committed = upload(*eos(xrd), "f", content, spec);
+    REQUIRE_FALSE(committed.ok());
+    CHECK_FALSE(committed.error().in_doubt);
+    CHECK_FALSE(xrd->at("/eos/d/f"));
+  }
+  SUBCASE("where it can be neither reset nor removed: in place, in doubt") {
+    xrd->file("/eos/d/f", "old");
+    xrd->fail({.op = "query:utimes", .status = FakeXrd::error(kXR_NotAuthorized, "no")});
+    xrd->fail({.op = "rm", .status = FakeXrd::error(kXR_NotAuthorized, "no")});
+    auto committed = upload(*eos(xrd), "f", content, spec);
+    REQUIRE_FALSE(committed.ok());
+    CHECK(committed.error().in_doubt);
+    CHECK(committed.error().kind == ErrorKind::IO);
+    auto f = xrd->at("/eos/d/f");
+    REQUIRE(f);
+    CHECK(f->content == content);
+    CHECK(f->mtime == spec.metadata.mtime);
+  }
+  CHECK_FALSE(hidden_uploads(xrd));
+}
+
+TEST_CASE("EOS uploads: the file in place is told by its id") {
+  auto xrd = instance();
+  std::string content = "the new content";
+  CommitSpec spec = spec_for(content);
+
+  SUBCASE("replaced by another writer before the confirmation: left alone") {
+    xrd->on_commit = [&](const std::string& path) { xrd->file(path, "another writer's"); };
+    auto committed = upload(*eos(xrd), "f", content, spec);
+    REQUIRE_FALSE(committed.ok());
+    CHECK_FALSE(committed.error().in_doubt);
+    CHECK(xrd->at("/eos/d/f")->content == "another writer's");
+  }
+  SUBCASE("moved away, another file under its name, which EOS writes as the other's") {
+    // EOS writes '&' as "#AND#" in replies: the upload, moved to a literal
+    // "a#AND#b", is reported under the name it was written to.
+    xrd->on_commit = [&](const std::string& path) {
+      xrd->rename(path, "/eos/d/a#AND#b");
+      xrd->file(path, "another writer's");
+    };
+    auto committed = upload(*eos(xrd), "a&b", content, spec);
+    REQUIRE_FALSE(committed.ok());
+    CHECK_FALSE(committed.error().in_doubt);
+    CHECK(xrd->at("/eos/d/a&b")->content == "another writer's");
+    CHECK(xrd->at("/eos/d/a#AND#b")->content == content);
+  }
+  SUBCASE("a close reported done after the connection was lost: not in place") {
+    xrd->file("/eos/d/f", "old");
+    // The storage node discards the upload; XrdCl reports the close as done.
+    xrd->fail({.op = "close", .path = "/eos/d/f"});
+    auto committed = upload(*eos(xrd), "f", content, spec);
+    REQUIRE_FALSE(committed.ok());
+    CHECK_FALSE(committed.error().in_doubt);
+    CHECK(xrd->at("/eos/d/f")->content == "old");
+  }
+  CHECK_FALSE(hidden_uploads(xrd));
+}
+
+TEST_CASE("EOS uploads whose confirmation fails") {
+  auto xrd = instance();
+  xrd->file("/eos/d/f", "old");
+  std::string content = "the new content";
+  CommitSpec spec = spec_for(content);
+
+  SUBCASE("getfmd times out once: taken back, not in doubt") {
+    xrd->fail({.op = "query:getfmd", .status = FakeXrd::timeout()});
+    auto committed = upload(*eos(xrd), "f", content, spec);
+    REQUIRE_FALSE(committed.ok());
+    CHECK(committed.error().kind == ErrorKind::Timeout);
+    CHECK_FALSE(committed.error().in_doubt);
+    CHECK(xrd->at("/eos/d/f")->mtime == Timespec{0, 0});
+  }
+  SUBCASE("getfmd keeps failing: left in place, in doubt") {
+    xrd->fail({.op = "query:getfmd", .status = FakeXrd::timeout(), .remaining = 10});
+    auto committed = upload(*eos(xrd), "f", content, spec);
+    REQUIRE_FALSE(committed.ok());
+    CHECK(committed.error().in_doubt);
+    CHECK(committed.error().kind == ErrorKind::IO);
+    auto f = xrd->at("/eos/d/f");
+    CHECK(f->content == content);
+    CHECK(f->mtime == spec.metadata.mtime);
+  }
+}
+
+TEST_CASE("XRootD uploads whose checksum query fails leave the target as it was") {
+  auto xrd = std::make_shared<FakeXrd>();
+  xrd->dir("/data");
+  xrd->file("/data/f", "old");
+  auto ep = XrdEndpoint::create("root://xrd.fake//data", XrdOptions(), xrd);
+  REQUIRE(ep.ok());
+  xrd->fail({.op = "query:checksum", .status = FakeXrd::timeout()});
+  std::string content = "plain xrootd";
+  auto committed = upload(*ep.value(), "f", content, spec_for(content));
+  REQUIRE_FALSE(committed.ok());
+  CHECK(committed.error().kind == ErrorKind::Timeout);
+  CHECK(xrd->paths() == std::vector<std::string>{"/", "/data", "/data/f"});
+  CHECK(xrd->at("/data/f")->content == "old");
+}
+
+TEST_CASE("EOS uploads: getfmd replies that cannot be relied on") {
+  auto xrd = instance();
+  xrd->file("/eos/d/f", "old");
+  std::string content = "the new content";
+  CommitSpec spec = spec_for(content);
+
+  SUBCASE("a reply of another form: left in place, in doubt") {
+    xrd->reply = [](std::string_view pcmd, const std::string&,
+                    const std::string&) -> std::optional<std::string> {
+      if (pcmd != "getfmd") return std::nullopt;
+      return "getfmd: retc=0 name=f";
+    };
+    auto committed = upload(*eos(xrd), "f", content, spec);
+    REQUIRE_FALSE(committed.ok());
+    CHECK(committed.error().in_doubt);
+    CHECK(xrd->at("/eos/d/f")->content == content);
+  }
+  SUBCASE("another size than written: taken back, not in doubt") {
+    xrd->reply = [](std::string_view pcmd, const std::string&,
+                    const std::string& reply) -> std::optional<std::string> {
+      auto size = reply.find("&size=");
+      if (pcmd != "getfmd" || size == std::string::npos) return std::nullopt;
+      return reply.substr(0, size) + "&size=1" + reply.substr(reply.find('&', size + 1));
+    };
+    auto committed = upload(*eos(xrd), "f", content, spec);
+    REQUIRE_FALSE(committed.ok());
+    CHECK(committed.error().kind == ErrorKind::IO);
+    CHECK_FALSE(committed.error().in_doubt);
+    CHECK(xrd->at("/eos/d/f")->mtime == Timespec{0, 0});
+  }
+  CHECK_FALSE(hidden_uploads(xrd));
+}
+
+TEST_CASE("EOS listings: find replies that cannot be taken as they are") {
+  auto xrd = instance();
+  xrd->file("/eos/d/a", "a");
+  xrd->file("/eos/d/b", "b");
+  const std::string self =
+      R"(path="/eos/d/" type=directory  size=0 uid=0 gid=0 mode=40755 mtime=1.0)";
+  auto file_line = [](const std::string& name) {
+    return R"(path="/eos/d/)" + name + R"(" type=file  size=1 uid=0 gid=0 flags=644 mtime=1.0)";
+  };
+  std::string answer;
+  xrd->proc = [&](std::string_view query) -> std::optional<std::string> {
+    if (!query.starts_with("mgm.cmd.proto=")) return std::nullopt;
+    return answer;
+  };
+  auto names = [](const Listing& listing) {
+    std::vector<std::string> out;
+    for (const Entry& e : listing.entries) out.push_back(e.name);
+    std::sort(out.begin(), out.end());
+    return out;
+  };
+  auto ep = eos(xrd);
+
+  SUBCASE("a line that cannot be parsed is skipped") {
+    answer = proc_reply(self + "\nnot a find line\n" + file_line("a") + "\n");
+    auto listing = ep->list("");
+    REQUIRE(listing.ok());
+    CHECK(names(listing.value()) == std::vector<std::string>{"a"});
+    CHECK(listing.value().skipped == 1);
+  }
+  SUBCASE("a name listed twice, forged by a line break, is skipped") {
+    answer = proc_reply(self + "\n" + file_line("a") + "\n" + file_line("a") + "\n");
+    auto listing = ep->list("");
+    REQUIRE(listing.ok());
+    CHECK(listing.value().entries.empty());
+    CHECK(listing.value().skipped == 2);
+  }
+  SUBCASE("a listing that does not name the directory itself is refused") {
+    answer = proc_reply(file_line("a") + "\n");
+    auto listing = ep->list("");
+    REQUIRE_FALSE(listing.ok());
+    CHECK(listing.error().kind == ErrorKind::Other);
+  }
+  SUBCASE("a listing cut short is completed from a plain listing") {
+    // "x" does not exist: its line was forged. "b" was cut off.
+    answer = proc_reply(self + "\n" + file_line("a") + "\n" + file_line("x") + "\n", "", E2BIG);
+    auto listing = ep->list("");
+    REQUIRE(listing.ok());
+    CHECK(names(listing.value()) == std::vector<std::string>{"a", "b"});
+    CHECK(logged(xrd, "dirlist /eos/d"));
+  }
+  SUBCASE("subdirectories left out for lack of permission are listed all the same") {
+    xrd->dir("/eos/d/secret", 0700);
+    answer = proc_reply(self + "\n" + file_line("a") + "\n",
+                        "error(13): no permissions to read directory /eos/d/secret/\n", EACCES);
+    auto listing = ep->list("");
+    REQUIRE(listing.ok());
+    CHECK(names(listing.value()) == std::vector<std::string>{"a", "secret"});
+  }
+  SUBCASE("other errors fail the listing") {
+    answer = proc_reply("", "error: something else", EIO);
+    CHECK_FALSE(ep->list("").ok());
+    answer = proc_reply("", "error(13): permission denied for /eos/d/\n", EACCES);
+    CHECK_FALSE(ep->list("").ok());
+  }
 }
