@@ -138,27 +138,52 @@ std::unique_ptr<EosEndpoint> as_nobody(const std::string& url) {
   return std::move(ep).value();
 }
 
-// The uid EOS takes an endpoint's requests for. It is read from whoami's
-// machine-readable answer, not from the text the endpoint's own probe reads,
-// and an answer of another form fails the test.
-uid_t eos_uid(EosEndpoint& ep) {
+// Who EOS takes an endpoint's requests for. It is read from whoami's
+// machine-readable answer, "uid=U uids=... gid=G gids=... ... sudo=B", not
+// from the text the endpoint's own probe reads, and ids of another form fail
+// the test.
+struct EosId {
+  uid_t uid;
+  gid_t gid;
+  bool sudoer;
+};
+
+EosId eos_id(EosEndpoint& ep) {
   auto who = ep.proc("mgm.cmd=whoami&mgm.option=m");
   REQUIRE(who.ok());
-  const std::string& out = who.value().out;
-  INFO("whoami: ", out);
-  REQUIRE(out.starts_with("uid="));
-  size_t end = out.find_first_not_of("0123456789", 4);
-  REQUIRE(end > 4);
-  REQUIRE(end != std::string::npos);
-  REQUIRE(out[end] == ' ');
-  return static_cast<uid_t>(std::stoul(out.substr(4, end - 4)));
+  const std::string out = " " + who.value().out;
+  INFO("whoami: ", who.value().out);
+  auto number = [&](std::string_view key) {
+    size_t at = out.find(" " + std::string(key) + "=");
+    REQUIRE(at != std::string::npos);
+    size_t begin = at + key.size() + 2;
+    size_t end = out.find_first_not_of("0123456789", begin);
+    REQUIRE(end > begin);
+    REQUIRE(end != std::string::npos);
+    REQUIRE(out[end] == ' ');
+    return std::stoul(out.substr(begin, end - begin));
+  };
+  REQUIRE(out.starts_with(" uid="));
+  EosId id{static_cast<uid_t>(number("uid")), static_cast<gid_t>(number("gid")), false};
+  id.sudoer = out.find(" sudo=true") != std::string::npos;
+  return id;
 }
 
 // Whether EOS takes the tests for root. Only root may set owners: run as
 // another user, the tests leave owners out and check that the endpoint says
 // it cannot set them.
 bool as_root(EosEndpoint& ep) {
-  return eos_uid(ep) == 0;
+  return eos_id(ep).uid == 0;
+}
+
+// Whether asking for nobody's identity (eos.ruid, eos.rgid) makes this
+// caller nobody, and no sudoer, as find limits need. EOS grants it to a
+// sudoer, and to another caller that holds nobody's ids (common/Mapping.cc).
+bool becomes_nobody(const std::string& url) {
+  auto ep = EosEndpoint::create(url + "?eos.ruid=65534&eos.rgid=65534");
+  REQUIRE(ep.ok());
+  EosId id = eos_id(*ep.value());
+  return id.uid == 65534 && id.gid == 65534 && !id.sudoer;
 }
 
 }  // namespace
@@ -1016,8 +1041,8 @@ TEST_CASE("eos endpoint: listings for an identity with find limits") {
   if (!base_url()) return;
   RemoteDir dir("limits");
   EosEndpoint& ep = *dir.endpoint;
-  if (!as_root(ep)) {
-    MESSAGE("not root on EOS: cannot act as nobody, listings with find limits not tested");
+  if (!becomes_nobody(dir.url)) {
+    MESSAGE("this caller cannot become nobody: listings with find limits not tested");
     return;
   }
   // The instance limits nobody to 20 files and 10 directories per find,
@@ -1061,6 +1086,7 @@ TEST_CASE("eos endpoint: listings for an identity with find limits") {
       CHECK(got->link_target == e.link_target);
     }
   }
+  INFO("the test needs the find limits for nobody that tests/integration/eos/instance.sh sets");
   CHECK(err.text().find("cuts find results short") != std::string::npos);
 
   // Without truncation, the unreadable subdirectory is still listed, and only
@@ -1129,17 +1155,22 @@ TEST_CASE("eos endpoint: endpoint URLs") {
   REQUIRE(below.ok());
   CHECK_FALSE(check_disjoint(*below.value(), *ep.value()).ok());
   // Opaque parameters go with every request: as nobody, owners cannot be set.
-  // Only root may switch identities, so for another user that holds anyway.
   auto nobody = make_endpoint(url + "?eos.ruid=65534&eos.rgid=65534", settings);
   REQUIRE(nobody.ok());
   CHECK(nobody.value()->describe() == url);
   CHECK_FALSE(nobody.value()->capabilities().can_set_owner);
   auto* nobody_eos = dynamic_cast<EosEndpoint*>(nobody.value().get());
   REQUIRE(nobody_eos);
-  if (as_root(*below.value()))
-    CHECK(eos_uid(*nobody_eos) == 65534);
-  else
-    MESSAGE("not root on EOS: that the URL's opaque parameters reach the MGM is not tested");
+  // Any caller may ask for another identity, and gets nobody's where it may
+  // not have the one it asks for, so a caller that is not nobody already
+  // shows whether the parameters arrive.
+  if (eos_id(*below.value()).uid != 65534) {
+    EosId id = eos_id(*nobody_eos);
+    CHECK(id.uid == 65534);
+    CHECK(id.gid == 65534);
+  } else {
+    MESSAGE("the caller is nobody: that the URL's opaque parameters reach the MGM is not tested");
+  }
   // The kind of server is logged once.
   StderrCapture err;
   CHECK(make_endpoint(path + "/replica2", settings).ok());
@@ -1283,9 +1314,10 @@ TEST_CASE("FS to EOS as a user other than root: read-only directories") {
   EosEndpoint* nobody = superuser ? other.get() : dir.endpoint.get();
 
   // On a shared instance an inherited ACL can grant write access that the
-  // mode denies. The engine then has nothing to make writable, and the test
-  // would pass without exercising it: a directory of mode 0555 must keep its
-  // copier from setting its mtime and from removing its entries.
+  // mode denies. A passing test would then not show that the engine had to
+  // make directories writable: a directory of mode 0555 must keep its copier
+  // from setting its mtime and from removing its entries. Any other error
+  // than a denial fails the test.
   {
     Entry probe = nobody_owns;
     probe.mode = 0555;
@@ -1299,8 +1331,14 @@ TEST_CASE("FS to EOS as a user other than root: read-only directories") {
       REQUIRE(dir.endpoint->set_metadata("probe/f", file, MetaFields::Owner).ok());
     }
     REQUIRE(dir.endpoint->set_metadata("probe", probe, MetaFields::Mode).ok());
-    bool mtime_denied = !nobody->set_metadata("probe", probe, MetaFields::Mtime).ok();
-    bool remove_denied = !nobody->remove("probe/f", EntryType::File).ok();
+    auto denied = [](const Status& s) {
+      if (s.ok()) return false;
+      INFO("error: ", s.error().describe());
+      REQUIRE(s.error().kind == ErrorKind::Permission);
+      return true;
+    };
+    bool mtime_denied = denied(nobody->set_metadata("probe", probe, MetaFields::Mtime));
+    bool remove_denied = denied(nobody->remove("probe/f", EntryType::File));
     probe.mode = 0755;
     REQUIRE(dir.endpoint->set_metadata("probe", probe, MetaFields::Mode).ok());
     if (remove_denied) REQUIRE(dir.endpoint->remove("probe/f", EntryType::File).ok());
@@ -1480,6 +1518,12 @@ TEST_CASE("FS to EOS and back, replica and erasure coded layouts") {
     CHECK(tmp.read_file("back/big.bin") == tmp.read_file("src/big.bin"));
     CHECK(back.stat("sub").value().mtime == Timespec{1600000000, 5});
     CHECK(back.stat("link").value().link_target == "empty");
+    if (is_root()) {
+      // Local root restores the owners that EOS has, whoever set them.
+      Entry on_eos = must(dst.stat("a.txt"));
+      CHECK(back.stat("a.txt").value().uid == on_eos.uid);
+      CHECK(back.stat("a.txt").value().gid == on_eos.gid);
+    }
     if (owners) CHECK(back.stat("a.txt").value().uid == 1111);
 
     Report r5;
@@ -1583,7 +1627,7 @@ TEST_CASE("EOS to EOS between directories") {
   std::string content = pattern(2 * 1024 * 1024 + 3);
   CommitSpec spec;
   spec.size = content.size();
-  if (!as_root(*a.endpoint)) spec.fields = ~MetaFields::Owner;
+  spec.fields = MetaFields::Mode | MetaFields::Mtime;
   spec.checksum = adler(content);
   spec.metadata.mode = 0644;
   spec.metadata.mtime = {1600000000, 1};
