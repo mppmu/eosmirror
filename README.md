@@ -295,10 +295,11 @@ EOSMIRROR_XROOTD_LOCAL=1 tests/integration/xrootd-server.sh stop
 
 The EOS tests also run against a writable directory on another instance,
 named by `EOSMIRROR_EOS_URL`, with the subdirectories `replica2`, `raid6`
-and `nochecksum` as `tests/integration/eos/instance.sh` sets them up. Run as a
-user whom EOS does not take for root, they leave out owners, and the tests
-that need root on EOS (changing a file's layout, acting as another
-identity) say that they are skipped.
+and `nochecksum` as `tests/integration/eos/instance.sh` sets them up. Run as
+a user whom EOS does not take for root, they leave out owners, and the
+tests that need root on EOS (changing a file's layout) say that they are
+skipped. The test of listings with find limits needs the limits for nobody
+that `instance.sh` sets, and a caller that EOS lets become nobody.
 
 Two longer tests (about a minute each) run only when asked for, as in
 CI's on-demand job: `ctest --test-dir build -C long -L long`. One kills
