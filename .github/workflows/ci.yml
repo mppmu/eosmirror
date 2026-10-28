@@ -9,6 +9,12 @@ on:
     types: [published]
   workflow_dispatch:
 
+# One run per ref at a time: a newer push to a pull request cancels the
+# running one; elsewhere it waits, and replaces any run still waiting.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
+
 jobs:
   ubuntu:
     name: ${{ matrix.os }} ${{ matrix.sanitizer }}
