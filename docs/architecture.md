@@ -473,12 +473,13 @@ of it, not an independent model of EOS.
   undefined behavior fails the tests; `tests/lsan.supp` and `tests/tsan.supp`
   suppress what is in XRootD's, OpenSSL's and glibc's own code.
 
-CI (`.github/workflows/ci.yml`): on every push the unit tests on Ubuntu 22.04
-(plain, address, thread; without XRootD, whose Ubuntu package is too old),
-Ubuntu 24.04 (plain, thread; with the xrootd integration tests against the
-distribution's server) and EL9 (plain, address), and the packages for EL9 and
-Ubuntu, plus packages from stock Debian, Ubuntu, EL, Fedora and openSUSE
-images, each installed in a fresh container with the self-test run; nightly,
+CI (`.github/workflows/ci.yml`): for every pull request, every push to main,
+dev or a release branch, and every tag and release, the unit tests on Ubuntu
+22.04 (plain, address, thread; without XRootD, whose Ubuntu package is too
+old), Ubuntu 24.04 (plain, thread; with the xrootd integration tests against
+the distribution's server) and EL9 (plain, address), and the packages for EL9
+and Ubuntu, plus packages from stock Debian, Ubuntu, EL, Fedora and openSUSE
+images, each installed in a fresh container with the self-test run; on demand,
 the long tests and the EOS integration tests in the build containers, the
 integration tests also under address (with undefined).
 

@@ -2,15 +2,16 @@ name: CI
 
 on:
   push:
+    branches: [main, dev, "releases/**"]
+    tags: ["*"]
   pull_request:
-  schedule:
-    - cron: "23 2 * * *"  # the EOS integration tests
+  release:
+    types: [published]
   workflow_dispatch:
 
 jobs:
   ubuntu:
     name: ${{ matrix.os }} ${{ matrix.sanitizer }}
-    if: github.event_name != 'schedule'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -56,13 +57,13 @@ jobs:
             || { cat "$EOSMIRROR_XROOTD_DIR"/xrootd.log*; exit 1; }
           tests/integration/xrootd-server.sh stop
 
-  nightly:
+  eos:
     # The long tests, and the integration tests against a single-host EOS
     # instance and an xrootd server in rootless podman containers from
     # CERN's public EOS image, as scripts/integration-test.sh runs them;
-    # nightly and on demand. The integration tests also under ASan and UBSan.
+    # on demand. The integration tests also under ASan and UBSan.
     name: Long and EOS integration tests ${{ matrix.sanitizer }}
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     strategy:
@@ -105,7 +106,6 @@ jobs:
 
   el9:
     name: EL9 ${{ matrix.sanitizer }}
-    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     container: almalinux:9
     strategy:
@@ -128,7 +128,6 @@ jobs:
 
   packages:
     name: Packages ${{ matrix.platform }}
-    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -147,7 +146,6 @@ jobs:
 
   distribution-packages:
     name: Packages ${{ matrix.name }}
-    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false

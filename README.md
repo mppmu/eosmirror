@@ -283,7 +283,7 @@ Ubuntu 22.04 and 24.04) and `scripts/check.sh` builds and tests in one of
 them, optionally under AddressSanitizer or ThreadSanitizer.
 `scripts/integration-test.sh` runs the integration tests against a plain
 xrootd server and a single-host EOS instance started in containers from
-CERN's public EOS image; CI does so nightly. The XRootD tests also run
+CERN's public EOS image; CI does so on demand. The XRootD tests also run
 against an xrootd installed on the host, as in CI with Ubuntu's
 `xrootd-server`:
 
@@ -294,7 +294,7 @@ EOSMIRROR_XROOTD_LOCAL=1 tests/integration/xrootd-server.sh stop
 ```
 
 Two longer tests (about a minute each) run only when asked for, as in
-CI's nightly job: `ctest --test-dir build -C long -L long`. One kills
+CI's on-demand job: `ctest --test-dir build -C long -L long`. One kills
 syncs of a local tree at random points with SIGKILL and checks the copy
 once a run completes. The other makes random changes to random trees,
 syncs them with injected faults, checks that the journal records what the
