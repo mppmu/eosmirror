@@ -6,7 +6,8 @@
 // creates them. The tests run as root, except the one that needs a sudoer's
 // identity, which as-sudoer.sh runs on its own. Run as a user whom EOS does
 // not take for root, as on a shared instance, they leave owners out and skip
-// the tests that need root on EOS, saying so.
+// the tests that need root on EOS, saying so. EOSMIRROR_EOS_AS_ROOT=1, which
+// scripts/integration-test.sh sets, makes them fail instead.
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -195,6 +196,10 @@ TEST_CASE("eos endpoint: identity, listing, symlinks, metadata and atomic writes
   EosEndpoint& ep = *dir.endpoint;
   Capabilities caps = ep.capabilities();
   bool superuser = as_root(ep);
+  if (std::getenv("EOSMIRROR_EOS_AS_ROOT")) {
+    REQUIRE(superuser);
+    REQUIRE(becomes_nobody(dir.url));
+  }
   if (!superuser) MESSAGE("not root on EOS: owners are left out");
   MetaFields owner = superuser ? MetaFields::Owner : MetaFields::None;
   CHECK(caps.has_owners);
@@ -1331,6 +1336,7 @@ TEST_CASE("FS to EOS as a user other than root: read-only directories") {
       REQUIRE(dir.endpoint->set_metadata("probe/f", file, MetaFields::Owner).ok());
     }
     REQUIRE(dir.endpoint->set_metadata("probe", probe, MetaFields::Mode).ok());
+    REQUIRE(must(dir.endpoint->stat("probe")).mode == 0555);
     auto denied = [](const Status& s) {
       if (s.ok()) return false;
       INFO("error: ", s.error().describe());

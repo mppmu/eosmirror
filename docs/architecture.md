@@ -462,8 +462,9 @@ of it, not an independent model of EOS.
   operations, uploads and downloads of many chunks, erasure-coded parity
   (read back with stripes dropped, since a normal read cannot tell), the
   EOS-specific failure paths, the self-test, a sudoer's identity. The EOS
-  tests run as root on EOS; on another instance as another user, they leave
-  out owners and skip, with a message, what needs root there.
+  tests run as root on EOS, and check that they do; on another instance as
+  another user, they leave out owners and skip, with a message, what needs
+  root there.
 - Long (`ctest -C long -L long`): the randomized differential test (random
   trees, random changes, injected faults; the journal must record what was
   left behind before a clean run repairs it, and the target must then equal
