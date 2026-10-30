@@ -669,21 +669,23 @@ endpoint uses the MGM's commands, sent the way the `eos` client sends them
   read the storage node is asked for the replica's stat again (a request on
   the open file, which XrdCl sends to the storage node): another size or
   mtime means that the file changed while it was read, and the copy is
-  retried. That stat is of the replica opened: a file replaced during the
-  read is not seen there, its copy gets the old, listed mtime, and the next
-  run copies it again. A file with another size than listed has changed
-  since the listing: it is stated through the MGM before and after reading,
-  so that it is still copied in this run, with its current metadata. Those
-  stats must find the file opened under its name, known by its id from the
-  redirect (`mgm.id`, as for uploads): a file replaced once more since the
-  open has another id, which fails the copy as changed (it is retried). A
-  file rewritten with the same size after the listing shows up as a checksum
-  that differs from the listed one. A stat through the MGM then tells a
-  change (the copy fails as changed, after its retries, and the next run
-  copies it) from corrupt data (the MGM still has the listed size and
-  mtime). Where the listing has no checksum (a directory without
-  `sys.forced.checksum`), such a file is copied with the listed, older
-  mtime, and the next run copies it again.
+  retried. That stat is of the replica opened. It does not show a file
+  replaced during the read, and of a file with several replicas, it may not
+  show an append made during the read (seen with replicas on different
+  storage nodes). The copy is then of the listed version, with the listed
+  mtime, and the next run copies the file again. A file with another size
+  than listed has changed since the listing: it is stated through the MGM
+  before and after reading, so that it is still copied in this run, with its
+  current metadata. Those stats must find the file opened under its name,
+  known by its id from the redirect (`mgm.id`, as for uploads): a file
+  replaced once more since the open has another id, which fails the copy as
+  changed (it is retried). A file rewritten with the same size after the
+  listing shows up as a checksum that differs from the listed one. A stat
+  through the MGM then tells a change (the copy fails as changed, after its
+  retries, and the next run copies it) from corrupt data (the MGM still has
+  the listed size and mtime). Where the listing has no checksum (a directory
+  without `sys.forced.checksum`), such a file is copied with the listed,
+  older mtime, and the next run copies it again.
 - EOS's own hidden entries (atomic temporaries `.sys.a#.`, version
   directories `.sys.v#.`) are never treated as entries of the tree. An
   atomic temporary gets the `eos.mtime` of its open when EOS creates it,
