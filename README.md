@@ -300,8 +300,8 @@ a user whom EOS does not take for root, they leave out owners, and the
 tests that need root on EOS (changing a file's layout) say that they are
 skipped; with `EOSMIRROR_EOS_AS_ROOT=1`, as `scripts/integration-test.sh`
 sets it, they fail instead. The test of listings with find limits needs
-the limits for nobody that `instance.sh` sets, and a caller that EOS lets
-become nobody.
+the limits for nobody that `instance.sh` sets, and a caller that is neither
+nobody nor a sudoer.
 
 Two longer tests (about a minute each) run only when asked for, as in
 CI's on-demand job: `ctest --test-dir build -C long -L long`. One kills
