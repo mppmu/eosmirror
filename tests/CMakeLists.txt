@@ -74,9 +74,9 @@ if(EOSMIRROR_WITH_XROOTD)
   # that may be where the compiler's sanitizer runtimes are found (a
   # compiler outside the system's, as in an LCG view). Leaks in XRootD's and
   # OpenSSL's global state are not ours (lsan.supp), nor are the races TSan
-  # sees in glibc's time zone setup and in XrdCl's file state handler
-  # (tsan.supp). The unit tests load the
-  # client library too. UBSan stops at its first finding, with a stack trace.
+  # sees in glibc's time zone setup, XrdCl's file state handler and XrdCl's
+  # response parsing (tsan.supp). The unit tests load the client library
+  # too. UBSan stops at its first finding, with a stack trace.
   if(EOSMIRROR_SANITIZER AND EOSMIRROR_XROOTD_LIBDIR)
     set(sanitized_tests unit unit_unprivileged integration integration_sudoer cli_smoke differential crash_consistency)
     set_tests_properties(${sanitized_tests}
