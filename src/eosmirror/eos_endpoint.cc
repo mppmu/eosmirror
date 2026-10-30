@@ -234,9 +234,10 @@ std::string format_timespec(const Timespec& t) {
 // replica has the listed size. The storage node's stat of the replica, which
 // comes with the open, has the file's size (the logical size of erasure-coded
 // files) but the replica's own mtime, in seconds (fst/XrdFstOfsFile.cc stat):
-// a change during the copy shows in its stat after the read. A file whose
-// size differs from the listing has changed since. It is stated through the
-// MGM before and after reading, and each stat must find the opened file under
+// a change to that replica during the copy shows in its stat after the read
+// (see docs/design.md for the changes it does not show). A file whose size
+// differs from the listing has changed since. It is stated through the MGM
+// before and after reading, and each stat must find the opened file under
 // its name (a file replaced since has another id).
 class EosReader : public XrdReader {
  public:
