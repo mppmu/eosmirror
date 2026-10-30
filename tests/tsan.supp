@@ -7,3 +7,8 @@ race:XrdSysTimer::TimeZone
 # uninstrumented library: TSan takes the handler's destruction by the last
 # owner, an XrdCl thread, for a race with the File's earlier calls.
 race:XrdCl::FileStateHandler
+# Now and then, with Ubuntu 24.04's XRootD 5.6, TSan reports XrdCl's poller
+# thread freeing a response buffer that a job thread copied before in
+# XRootDMsgHandler::ParseResponse: a race, if any, between XrdCl's own
+# threads inside the uninstrumented library.
+race:XrdCl::XRootDMsgHandler::ParseResponse
