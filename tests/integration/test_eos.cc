@@ -178,8 +178,9 @@ bool as_root(EosEndpoint& ep) {
 }
 
 // Whether asking for nobody's identity (eos.ruid, eos.rgid) makes this
-// caller nobody, and no sudoer, as find limits need. EOS grants it to a
-// sudoer, and to another caller that holds nobody's ids (common/Mapping.cc).
+// caller nobody, and no sudoer, as find limits need. EOS makes every caller
+// but a sudoer nobody then: one that does not hold the ids it asks for gets
+// nobody's. A sudoer gets them, but stays a sudoer (common/Mapping.cc).
 bool becomes_nobody(const std::string& url) {
   auto ep = EosEndpoint::create(url + "?eos.ruid=65534&eos.rgid=65534");
   REQUIRE(ep.ok());
@@ -1046,8 +1047,9 @@ TEST_CASE("eos endpoint: listings for an identity with find limits") {
   if (!base_url()) return;
   RemoteDir dir("limits");
   EosEndpoint& ep = *dir.endpoint;
-  if (!becomes_nobody(dir.url)) {
-    MESSAGE("this caller cannot become nobody: listings with find limits not tested");
+  // A caller that is nobody would own the directory that nobody may not read.
+  if (eos_id(ep).uid == 65534 || !becomes_nobody(dir.url)) {
+    MESSAGE("the caller is nobody, or a sudoer as nobody: listings with find limits not tested");
     return;
   }
   // The instance limits nobody to 20 files and 10 directories per find,
