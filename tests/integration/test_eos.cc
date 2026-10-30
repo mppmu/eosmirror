@@ -20,6 +20,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <map>
+#include <set>
 #include <utility>
 #include <vector>
 
@@ -870,6 +871,26 @@ void append(const std::string& url, std::string_view data) {
   REQUIRE(file.Close().IsOK());
 }
 
+// The storage nodes that hold a file's replicas, from the hosts in the JSON
+// of fileinfo.
+std::set<std::string> replica_hosts(EosEndpoint& ep, const RelPath& path) {
+  auto info = ep.proc("mgm.cmd=fileinfo&mgm.format=json&mgm.path=" + ep.absolute(path));
+  REQUIRE(info.ok());
+  const std::string& json = info.value().out;
+  INFO("fileinfo: ", json);
+  std::set<std::string> hosts;
+  for (size_t at = json.find("\"host\""); at != std::string::npos;
+       at = json.find("\"host\"", at + 1)) {
+    size_t begin = json.find('"', json.find(':', at));
+    REQUIRE(begin != std::string::npos);
+    size_t end = json.find('"', ++begin);
+    REQUIRE(end != std::string::npos);
+    hosts.insert(json.substr(begin, end - begin));
+  }
+  REQUIRE_FALSE(hosts.empty());
+  return hosts;
+}
+
 }  // namespace
 
 TEST_CASE("EOS to FS: files that changed since the listing or while they are read") {
@@ -925,10 +946,13 @@ TEST_CASE("EOS to FS: files that changed since the listing or while they are rea
   CHECK(tmp.read_file("dst/f") == "replaced with a longer content");
 
   // Appended to while it is read: changed, and copied as it is now when the
-  // copy is retried with the same listed entry.
+  // copy is retried with the same listed entry. Of a file with replicas on
+  // several storage nodes, the one read may not show the append
+  // (docs/design.md): the copy is then of the listed version.
   std::string content = pattern(300000);
   put(ep, "g", content);
   old = listed(ep, "g");
+  size_t nodes = replica_hosts(ep, "g").size();
   CopyOptions appending = options;
   bool appended = false;
   appending.on_chunk = [&](uint64_t) {
@@ -936,10 +960,18 @@ TEST_CASE("EOS to FS: files that changed since the listing or while they are rea
   };
   auto grown = copy_file(ep, dst, "g", old, appending, pool, cancel);
   REQUIRE(appended);
-  REQUIRE_FALSE(grown.ok());
-  INFO("error: ", grown.error().describe());
-  CHECK(grown.error().kind == ErrorKind::Changed);
-  CHECK_FALSE(dst.stat("g").ok());
+  if (grown.ok() && nodes > 1) {
+    MESSAGE("the replica read does not show the append: copied as listed");
+    CHECK(tmp.read_file("dst/g") == content);
+    REQUIRE(dst.flush().ok());
+    CHECK(must(dst.stat("g")).mtime == old.mtime);
+  } else {
+    INFO("storage nodes: ", nodes);
+    REQUIRE_FALSE(grown.ok());
+    INFO("error: ", grown.error().describe());
+    CHECK(grown.error().kind == ErrorKind::Changed);
+    CHECK_FALSE(dst.stat("g").ok());
+  }
   auto retried = copy_file(ep, dst, "g", old, options, pool, cancel);
   REQUIRE(retried.ok());
   CHECK(tmp.read_file("dst/g") == content + "more");
