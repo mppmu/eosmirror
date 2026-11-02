@@ -5,6 +5,7 @@
 // fresh subdirectory of it and the fixtures that xrootd-server.sh creates.
 #include <XrdCl/XrdClDefaultEnv.hh>
 #include <XrdCl/XrdClFileSystem.hh>
+#include <XrdCl/XrdClURL.hh>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -20,6 +21,7 @@
 #include "eosmirror/posix_endpoint.hh"
 #include "eosmirror/selftest.hh"
 #include "eosmirror/xrootd_endpoint.hh"
+#include "request_log.hh"
 #include "stderr_capture.hh"
 #include "temp_dir.hh"
 
@@ -61,6 +63,12 @@ struct RemoteDir {
   std::string url;
   std::unique_ptr<XrdEndpoint> endpoint;
 };
+
+// The entry of a stat that must succeed.
+Entry must(Result<Entry> r) {
+  REQUIRE(r.ok());
+  return r.value();
+}
 
 SyncOptions test_options() {
   SyncOptions o;
@@ -445,4 +453,136 @@ TEST_CASE("xrootd to FS: owners and symlink loops of a server that follows symli
     CHECK(f.error.message.find("directory cycle") != std::string::npos);
   }
   CHECK(tmp.read_file("sub/f") == "fixture\n");
+}
+
+// The requests of each operation of the endpoint, in the order they are
+// sent: a change to how the endpoint is built must send the same ones.
+TEST_CASE("xrootd endpoint: the requests of each operation") {
+  if (!base_url()) return;
+  std::string server = XrdCl::URL(base_url()).GetHostName();
+  RemoteDir dir("requests");
+  XrdEndpoint& ep = *dir.endpoint;
+  std::string content = pattern(150000);  // three chunks
+  auto checksum = [](std::string_view data) {
+    Hasher hasher(ChecksumType::Adler32);
+    hasher.update(bytes(data));
+    return hasher.finish();
+  };
+  auto spec_for = [&](std::string_view data) {
+    CommitSpec spec;
+    spec.size = data.size();
+    spec.fields = MetaFields::Mode;
+    spec.metadata.mode = 0644;
+    spec.checksum = checksum(data);
+    return spec;
+  };
+  {
+    CommitSpec spec = spec_for(content);
+    auto w = ep.open_write("f", spec);
+    REQUIRE(w.ok());
+    REQUIRE(w.value()->write(0, bytes(content)).ok());
+    REQUIRE(w.value()->commit(spec).ok());
+  }
+  REQUIRE(ep.mkdir("d", 0755).ok());
+  TempDir tmp;
+  tmp.write_file("src/g", content);
+  tmp.write_file("src/f", pattern(1000));
+  PosixEndpoint src(tmp.sub("src"));
+  PosixEndpoint dst(tmp.sub("dst"));
+  REQUIRE(dst.mkdir("", 0755).ok());
+  CopyOptions options;
+  options.preserve_owner = false;
+  options.preserve_mtime = false;
+  BufferPool pool(64 * 1024);
+  Cancellation cancel;
+  auto requests = [&](const auto& operation) {
+    RequestLog::start();
+    operation();
+    return RequestLog::sequence(RequestLog::stop(), server);
+  };
+  auto check = [](const std::vector<std::string>& sent, const std::vector<std::string>& expected) {
+    std::string lines;
+    for (const std::string& s : sent) lines += "\n  \"" + s + "\",";
+    INFO("sent:", lines);
+    CHECK(sent == expected);
+  };
+
+  SUBCASE("stat") {
+    check(requests([&] { CHECK(ep.stat("f").ok()); }), {"server kXR_stat"});
+  }
+  SUBCASE("listing") {
+    check(requests([&] { CHECK(ep.list("").ok()); }), {"server kXR_dirlist", "server kXR_dirlist"});
+  }
+  SUBCASE("mkdir") {
+    check(requests([&] { CHECK(ep.mkdir("e", 0750).ok()); }), {"server kXR_mkdir mode 0750"});
+  }
+  SUBCASE("metadata") {
+    Entry md;
+    md.type = EntryType::File;
+    md.mode = 0640;
+    check(requests([&] { CHECK(ep.set_metadata("f", md, MetaFields::Mode).ok()); }),
+          {"server kXR_chmod mode 0640"});
+  }
+  SUBCASE("remove") {
+    check(requests([&] {
+            CHECK(ep.remove("f", EntryType::File).ok());
+            CHECK(ep.remove("d", EntryType::Directory).ok());
+          }),
+          {"server kXR_rm", "server kXR_rmdir"});
+  }
+  SUBCASE("download") {
+    Entry f = must(ep.stat("f"));
+    check(requests([&] { CHECK(copy_file(ep, dst, "f", f, options, pool, cancel).ok()); }),
+          {"server kXR_open read", "server kXR_stat open file", "server kXR_read 0+65536",
+           "server kXR_read 65536+65536", "server kXR_read 131072+18928",
+           "server kXR_stat open file", "server kXR_query kXR_Qcksum", "server kXR_close"});
+  }
+  SUBCASE("upload") {
+    Entry g = must(src.stat("g"));
+    check(requests([&] { CHECK(copy_file(src, ep, "g", g, options, pool, cancel).ok()); }),
+          {"server kXR_open write new temp", "server kXR_write 0+65536",
+           "server kXR_write 65536+65536", "server kXR_write 131072+18928", "server kXR_close",
+           "server kXR_query kXR_Qcksum", "server kXR_mv temp"});
+  }
+  SUBCASE("upload replacing a file") {
+    Entry f = must(src.stat("f"));
+    check(requests([&] { CHECK(copy_file(src, ep, "f", f, options, pool, cancel).ok()); }),
+          {"server kXR_open write new temp", "server kXR_write 0+1000", "server kXR_close",
+           "server kXR_query kXR_Qcksum", "server kXR_mv temp"});
+  }
+  SUBCASE("upload with a checksum the stored file does not have") {
+    CommitSpec spec = spec_for(content);
+    spec.checksum.hex = "00000000";
+    check(requests([&] {
+            auto w = ep.open_write("h", spec);
+            REQUIRE(w.ok());
+            CHECK(w.value()->write(0, bytes(content)).ok());
+            CHECK_FALSE(w.value()->commit(spec).ok());
+          }),
+          {"server kXR_open write new temp", "server kXR_write 0+150000", "server kXR_close",
+           "server kXR_query kXR_Qcksum", "server kXR_rm temp"});
+  }
+  SUBCASE("upload without a checksum to compare") {
+    CommitSpec spec = spec_for(content);
+    spec.checksum = {};
+    check(requests([&] {
+            auto w = ep.open_write("h", spec);
+            REQUIRE(w.ok());
+            CHECK(w.value()->write(0, bytes(content)).ok());
+            CHECK(w.value()->commit(spec).ok());
+          }),
+          {"server kXR_open write new temp", "server kXR_write 0+150000", "server kXR_close",
+           "server kXR_stat temp", "server kXR_mv temp"});
+  }
+  SUBCASE("abort") {
+    CommitSpec spec = spec_for(content);
+    check(requests([&] {
+            auto w = ep.open_write("h", spec);
+            REQUIRE(w.ok());
+            CHECK(w.value()->write(0, bytes(content)).ok());
+            CHECK(w.value()->abort().ok());
+          }),
+          {"server kXR_open write new temp", "server kXR_write 0+150000", "server kXR_close",
+           "server kXR_rm temp"});
+  }
 }

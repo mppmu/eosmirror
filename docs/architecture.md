@@ -21,8 +21,14 @@ src/eosmirror/
   endpoint.hh                        the Endpoint, FileReader and FileWriter interfaces,
                                      Capabilities, Listing, CommitSpec, Location
   posix_endpoint                     local file systems, deferred mtimes (DeferredMtimes)
-  xrootd_endpoint                    plain XRootD servers through XrdCl; XrdReader/XrdFileWriter
-  eos_endpoint                       EOS on top of XrdEndpoint: MGM commands, find listings, uploads
+  xrd_client                         the XrdCl calls of both endpoints behind interfaces (XrdClient),
+                                     which tests can implement in place of a server
+  xrd_session                        what both endpoints share of XRootD (XrdSession): the URL,
+                                     the connections, request paths (EOS's encoded), the requests
+                                     on paths; XrdReadFile/XrdWriteFile, the files that their
+                                     readers and writers hold
+  xrootd_endpoint                    plain XRootD servers
+  eos_endpoint                       EOS over its own XrdSession: MGM commands, find listings, uploads
   atomic_upload                      AtomicUploadWriter: a commit that the endpoint confirms afterwards
   pipeline                           ReadAhead and WriteWindow: reads and writes kept in flight
   endpoints                          the factory for command line specs, the overlap check
@@ -39,9 +45,10 @@ Dependencies point one way, with no cycles:
 
 ```
 main ──► cli ──► endpoints ──► posix_endpoint ──────────────┐
- │        │         └──(with XRootD)──► eos_endpoint ──► xrootd_endpoint ──► pipeline
- │        │                                 └──► atomic_upload ─┐                │
- │        └──► journal ──► report ──┐                           ▼                ▼
+ │        │         ├──(with XRootD)──► xrootd_endpoint ──────┐
+ │        │         └──(with XRootD)──► eos_endpoint ─────────┴──► xrd_session ──► pipeline
+ │        │                                 └──► atomic_upload ─┐                  │
+ │        └──► journal ──► report ──┐                           ▼                  ▼
  ├──► engine ──► copy ──────────────┴──► endpoint ──► types, error, checksum, buffer
  │      └──► queue, retry, cancellation, journal, report, log
  ├──► progress_display ──► report, log
@@ -160,7 +167,8 @@ Within a file, remote endpoints pipeline: `ReadAhead` keeps up to
 where the previous one ended, and once one has failed nothing more is sent
 and the rest is waited for before the file is closed. Both are transport
 independent (pipeline.cc) and tested with synthetic submit functions; the
-XrdCl specifics are in `XrdReader` and `XrdFileWriter`.
+XrdCl specifics are in `XrdReadFile` and `XrdWriteFile`, which the XRootD
+and EOS readers and writers hold as members.
 
 ### Durability and confirmation
 
@@ -287,7 +295,7 @@ Shared state and its protection: `WorkQueue` and `Gate` (own mutexes);
 workers start, read-only afterwards, also while the journal changes);
 `finalized` and `sync_failed` (`finalized_mutex`, atomic); `end_error`
 (`end_mutex`); `Report`'s failures and the log (own mutexes); the journal
-(its mutex, one statement at a time); `XrdEndpoint::fs_` (a `FileSystem` per
+(its mutex, one statement at a time); `XrdSession::fs_` (a `FileSystem` per
 thread under `fs_mutex_`, so that each thread's requests go over connections
 of its own, or one for all with `--shared-connection`); `ReadAhead` and
 `WriteWindow` (own mutexes, completions from XrdCl's threads);
@@ -316,7 +324,7 @@ and push to it, so a full one would deadlock them.
 exceptions are thrown for control flow (the only ones caught are thread
 creation failures). `ErrorKind` decides three things: whether an operation is
 retried (`is_transient()`: IO, Timeout, Changed and Checksum;
-`XrdEndpoint::xrd_error()` maps busy servers and connection errors to IO),
+`xrd_error()` maps busy servers and connection errors to IO),
 what a journal row means (above), and how a run ends (`Cancelled` ends it
 without a row; `main` tells the engine's own stop after failures in a row
 from a signal by the caller's cancellation). `upload_error()` turns the
@@ -450,9 +458,13 @@ of it, not an independent model of EOS.
 
 - Unit (`tests/unit`, doctest, `ctest`): the engine on `FakeEndpoint` with
   fault injection (test_engine.cc), the local endpoint on a temporary
-  directory, the parsers and URL handling of the XRootD and EOS endpoints
-  without a server, the pipeline with synthetic submits, the journal, the
-  CLI, the controller. `unit_unprivileged` runs the tests of what a user
+  directory, the parsers, URLs and request paths of the XRootD and EOS
+  endpoints, the endpoints themselves on `FakeXrd` (fake_xrd_client.hh, an
+  in-memory EOS instance behind `XrdClient`, with faults, for the error
+  paths that a real server rarely shows), the pipeline with synthetic
+  submits, the journal, the CLI, the controller. What EOS itself does
+  (atomic uploads, `eos.mtime`, versions, parity) is tested on a real
+  instance only. `unit_unprivileged` runs the tests of what a user
   other than root cannot do, as `nobody` where needed (skipped with exit
   status 77 where it cannot). `cli_smoke` runs the binary on local
   directories, three shards among them.

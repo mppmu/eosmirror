@@ -40,7 +40,7 @@ struct UploadFile {
 // other file in place is left alone, and so is one that cannot be told
 // apart from the upload. Owner and mode are applied once the file is
 // confirmed, and the mtime where the upload could not carry it.
-class AtomicUploadWriter : public FileWriter {
+class AtomicUploadWriter final : public FileWriter {
  public:
   // The file that the upload created; NotFound once it is gone.
   using Locate = std::function<Result<UploadFile>()>;

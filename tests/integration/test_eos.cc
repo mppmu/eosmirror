@@ -855,6 +855,142 @@ TEST_CASE("FS to EOS: an upload is confirmed by one query of the MGM") {
   CHECK(per_file("kXR_read") == 0);
 }
 
+// The requests of each operation of the endpoint, in the order they are
+// sent: a change to how the endpoint is built must send the same ones.
+TEST_CASE("eos endpoint: the requests of each operation") {
+  if (!base_url()) return;
+  std::string mgm = XrdCl::URL(base_url()).GetHostName();
+  RemoteDir dir("requests");
+  EosEndpoint& ep = *dir.endpoint;
+  std::string content = pattern(150000);  // three chunks
+  put(ep, "f", content, {1600000000, 1});
+  REQUIRE(ep.mkdir("d", 0755).ok());
+  REQUIRE(ep.symlink("l", "f").ok());
+  TempDir tmp;
+  tmp.write_file("src/g", content);
+  tmp.write_file("src/f", pattern(1000));
+  PosixEndpoint src(tmp.sub("src"));
+  PosixEndpoint dst(tmp.sub("dst"));
+  REQUIRE(dst.mkdir("", 0755).ok());
+  CopyOptions options;
+  options.preserve_owner = false;
+  BufferPool pool(64 * 1024);
+  Cancellation cancel;
+  auto requests = [&](const auto& operation) {
+    RequestLog::start();
+    operation();
+    return RequestLog::sequence(RequestLog::stop(), mgm);
+  };
+  auto check = [](const std::vector<std::string>& sent, const std::vector<std::string>& expected) {
+    std::string lines;
+    for (const std::string& s : sent) lines += "\n  \"" + s + "\",";
+    INFO("sent:", lines);
+    CHECK(sent == expected);
+  };
+  // An upload with a checksum that the stored file cannot have.
+  auto bad_upload = [&](const RelPath& path, bool replaces) {
+    CommitSpec spec;
+    spec.size = content.size();
+    spec.replaces = replaces;
+    spec.fields = MetaFields::Mode | MetaFields::Mtime;
+    spec.metadata.mode = 0644;
+    spec.metadata.mtime = {1600000000, 2};
+    spec.checksum = adler(content);
+    spec.checksum.hex = "00000000";
+    auto w = ep.open_write(path, spec);
+    REQUIRE(w.ok());
+    CHECK(w.value()->write(0, bytes(content)).ok());
+    CHECK_FALSE(w.value()->commit(spec).ok());
+  };
+
+  SUBCASE("stat") {
+    check(requests([&] { CHECK(ep.stat("f").ok()); }), {"server kXR_query kXR_Qopaquf"});
+  }
+  SUBCASE("stat of a symlink") {
+    check(requests([&] { CHECK(ep.stat("l").ok()); }),
+          {"server kXR_query kXR_Qopaquf", "server kXR_query kXR_Qopaquf"});
+  }
+  SUBCASE("listing") {
+    check(requests([&] { CHECK(ep.list("").ok()); }),
+          {"server kXR_open proc", "server kXR_read", "server kXR_read", "server kXR_close"});
+  }
+  SUBCASE("mkdir") {
+    check(requests([&] { CHECK(ep.mkdir("e", 0750).ok()); }), {"server kXR_mkdir mode 0750"});
+  }
+  SUBCASE("symlink") {
+    check(requests([&] { CHECK(ep.symlink("m", "f").ok()); }),
+          {"server kXR_open proc", "server kXR_read", "server kXR_read", "server kXR_close"});
+  }
+  SUBCASE("metadata") {
+    Entry md;
+    md.type = EntryType::File;
+    md.mode = 0640;
+    md.mtime = {1600000100, 5};
+    check(requests(
+              [&] { CHECK(ep.set_metadata("f", md, MetaFields::Mode | MetaFields::Mtime).ok()); }),
+          {"server kXR_query kXR_Qopaquf", "server kXR_query kXR_Qopaquf"});
+  }
+  SUBCASE("remove") {
+    check(requests([&] {
+            CHECK(ep.remove("l", EntryType::Symlink).ok());
+            CHECK(ep.remove("f", EntryType::File).ok());
+            CHECK(ep.remove("d", EntryType::Directory).ok());
+          }),
+          {"server kXR_rm", "server kXR_rm", "server kXR_rmdir"});
+  }
+  SUBCASE("download") {
+    auto listing = ep.list("");
+    REQUIRE(listing.ok());
+    const Entry* f = find(listing.value().entries, "f");
+    REQUIRE(f);
+    check(requests([&] { CHECK(copy_file(ep, dst, "f", *f, options, pool, cancel).ok()); }),
+          {"server kXR_open read", "node kXR_open read", "node kXR_read 0+65536",
+           "node kXR_read 65536+65536", "node kXR_read 131072+18928", "node kXR_stat open file",
+           "node kXR_close"});
+  }
+  SUBCASE("upload") {
+    Entry g = must(src.stat("g"));
+    check(requests([&] { CHECK(copy_file(src, ep, "g", g, options, pool, cancel).ok()); }),
+          {"server kXR_open write delete atomic mtime", "node kXR_open write delete atomic mtime",
+           "node kXR_write 0+65536", "node kXR_write 65536+65536", "node kXR_write 131072+18928",
+           "node kXR_close", "server kXR_query kXR_Qopaquf", "server kXR_query kXR_Qopaquf"});
+  }
+  SUBCASE("upload replacing a file") {
+    Entry f = must(src.stat("f"));
+    check(requests([&] { CHECK(copy_file(src, ep, "f", f, options, pool, cancel).ok()); }),
+          {"server kXR_open write delete atomic mtime", "node kXR_open write delete atomic mtime",
+           "node kXR_write 0+1000", "node kXR_close", "server kXR_query kXR_Qopaquf",
+           "server kXR_query kXR_Qopaquf"});
+  }
+  SUBCASE("upload taken back where it replaced a file") {
+    check(requests([&] { bad_upload("f", true); }),
+          {"server kXR_open write delete atomic mtime", "node kXR_open write delete atomic mtime",
+           "node kXR_write 0+150000", "node kXR_close", "server kXR_query kXR_Qopaquf",
+           "server kXR_query kXR_Qopaquf", "server kXR_query kXR_Qopaquf"});
+  }
+  SUBCASE("upload taken back where it replaced nothing") {
+    check(requests([&] { bad_upload("h", false); }),
+          {"server kXR_open write delete atomic mtime", "node kXR_open write delete atomic mtime",
+           "node kXR_write 0+150000", "node kXR_close", "server kXR_query kXR_Qopaquf",
+           "server kXR_query kXR_Qopaquf", "server kXR_rm"});
+  }
+  SUBCASE("abort") {
+    CommitSpec spec;
+    spec.size = content.size();
+    spec.fields = MetaFields::Mode | MetaFields::Mtime;
+    spec.metadata.mode = 0644;
+    spec.metadata.mtime = {1600000000, 3};
+    check(requests([&] {
+            auto w = ep.open_write("h", spec);
+            REQUIRE(w.ok());
+            CHECK(w.value()->write(0, bytes(content)).ok());
+            CHECK(w.value()->abort().ok());
+          }),
+          {"server kXR_open write delete atomic mtime", "node kXR_open write delete atomic mtime",
+           "node kXR_write 0+150000", "node kXR_query kXR_Qopaqug", "node kXR_close"});
+  }
+}
+
 namespace {
 
 // Appends to a file on EOS through an open for update.
