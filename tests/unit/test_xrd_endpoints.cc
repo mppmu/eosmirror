@@ -166,13 +166,24 @@ TEST_CASE("EOS endpoints on the fake: stat") {
 TEST_CASE("EOS endpoints on the fake: an upload is in place, confirmed by its file's id") {
   auto xrd = instance();
   uint64_t old_fid = 0;
-  SUBCASE("a new file") {}
+  bool replaces = true;
+  ModeBits mode = 0640;
+  // A new file has the open's mode with the owner's read and write bits.
+  SUBCASE("a new file, whose mode is the open's") {
+    replaces = false;
+  }
+  SUBCASE("a new file, whose mode is not the open's") {
+    replaces = false;
+    mode = 0440;
+  }
   SUBCASE("replacing a file") {
     old_fid = xrd->file("/eos/d/f", "old");
   }
   auto ep = eos(xrd);
   std::string content = "eleven characters and more";
   CommitSpec spec = spec_for(content);
+  spec.replaces = replaces;
+  spec.metadata.mode = mode;
   BufferPool pool(4);
   auto writer = ep->open_write("f", spec);
   REQUIRE(writer.ok());
@@ -187,11 +198,12 @@ TEST_CASE("EOS endpoints on the fake: an upload is in place, confirmed by its fi
   CHECK(f->content == content);
   CHECK(f->fid != old_fid);
   CHECK(f->mtime == spec.metadata.mtime);  // carried by the open
-  CHECK(f->mode == 0640);
+  CHECK(f->mode == mode);
   CHECK(f->uid == 1001);
   CHECK(f->gid == 1002);
   CHECK_FALSE(hidden_uploads(xrd));
   CHECK(logged(xrd, "query:getfmd /eos/d/f"));
+  CHECK(xrd->write_properties().at("/eos/d/f").at("WriteRecovery") == "false");
 }
 
 TEST_CASE("EOS endpoints on the fake: reads") {
@@ -270,6 +282,9 @@ TEST_CASE("XRootD endpoints on the fake: uploads are renamed into place, verifie
   REQUIRE(f);
   CHECK(f->content == content);
   CHECK(xrd->paths() == std::vector<std::string>{"/", "/data", "/data/f"});
+  auto opened = xrd->write_properties();
+  REQUIRE(opened.size() == 1);
+  CHECK(opened.begin()->second.at("WriteRecovery") == "false");
   auto sent = xrd->requests();
   bool moved_aside = std::any_of(sent.begin(), sent.end(), [](const std::string& r) {
     return r.starts_with("mv /data/f /data/");

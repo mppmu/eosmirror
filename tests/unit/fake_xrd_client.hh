@@ -38,7 +38,8 @@
 //
 // It keeps XrdCl's rules: a call that fails at once neither calls nor
 // deletes its handler; an accepted one calls it exactly once, from the
-// fake's own thread, in the order of submission.
+// fake's own thread, in the order of submission. File ids have hex letters,
+// so that one read in decimal where EOS gives hex is told apart.
 //
 // Faults make the next matching operations fail: at once, through the
 // handler (async), or after taking effect (takes_effect, such as a close
@@ -193,6 +194,12 @@ class FakeXrd final : public eosmirror::XrdClient, public std::enable_shared_fro
   std::vector<std::string> requests() const {
     std::lock_guard lock(mutex_);
     return log_;
+  }
+  // The properties set on the files opened for writing (set_property), by
+  // the path of the open.
+  std::map<std::string, std::map<std::string, std::string>> write_properties() const {
+    std::lock_guard lock(mutex_);
+    return write_properties_;
   }
   void clear_requests() {
     std::lock_guard lock(mutex_);
@@ -431,6 +438,7 @@ class FakeXrd final : public eosmirror::XrdClient, public std::enable_shared_fro
       Lock lock(xrd_->mutex_);
       auto& nodes = xrd_->nodes_;
       if (flags & XrdCl::OpenFlags::Write) {
+        xrd_->write_properties_[path_] = properties_;
         auto dir = nodes.find(parent(path_));
         if (dir == nodes.end() || dir->second.type != EntryType::Directory)
           return error(kXR_NotFound, "no directory for " + path_);
@@ -485,8 +493,8 @@ class FakeXrd final : public eosmirror::XrdClient, public std::enable_shared_fro
     Status read(uint64_t offset, uint32_t size, void* buffer,
                 XrdCl::ResponseHandler* handler) override {
       auto f = xrd_->request("read", path_);
-      if (f && !f->async) return f->status;
-      if (f) {
+      if (f && !f->async && !f->status.IsOK()) return f->status;
+      if (f) {  // accepted: one that only appears to succeed returns no data
         xrd_->post(handler, f->status, nullptr);
         return {};
       }
@@ -502,7 +510,7 @@ class FakeXrd final : public eosmirror::XrdClient, public std::enable_shared_fro
     Status write(uint64_t offset, uint32_t size, const void* buffer,
                  XrdCl::ResponseHandler* handler) override {
       auto f = xrd_->request("write", path_ + " " + std::to_string(offset));
-      if (f && !f->async && !f->takes_effect) return f->status;
+      if (f && !f->async && !f->takes_effect && !f->status.IsOK()) return f->status;
       if (!f || f->takes_effect) {
         Lock lock(xrd_->mutex_);
         auto it = xrd_->nodes_.find(written_);
@@ -557,7 +565,10 @@ class FakeXrd final : public eosmirror::XrdClient, public std::enable_shared_fro
     }
 
     bool is_open() const override { return open_; }
-    bool set_property(const std::string&, const std::string&) override { return true; }
+    bool set_property(const std::string& name, const std::string& value) override {
+      properties_[name] = value;
+      return true;
+    }
     bool get_property(const std::string& name, std::string& value) const override {
       if (name != "LastURL" || last_url_.empty()) return false;
       value = last_url_;
@@ -584,6 +595,7 @@ class FakeXrd final : public eosmirror::XrdClient, public std::enable_shared_fro
     std::string content_;  // an MGM command's reply
     std::string last_url_;
     uint64_t fid_ = 0;
+    std::map<std::string, std::string> properties_;
     bool open_ = false;
     bool mtime_set_ = false;
     bool discarded_ = false;
@@ -740,7 +752,8 @@ class FakeXrd final : public eosmirror::XrdClient, public std::enable_shared_fro
   std::map<std::string, Node> nodes_;
   std::vector<Fault> faults_;
   std::vector<std::string> log_;
-  uint64_t last_fid_ = 0;
+  std::map<std::string, std::map<std::string, std::string>> write_properties_;
+  uint64_t last_fid_ = 0xa00;
   int64_t clock_ = 0;
 
   std::mutex queue_mutex_;
