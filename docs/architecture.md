@@ -463,11 +463,12 @@ of it, not an independent model of EOS.
   in-memory EOS instance behind `XrdClient`, with faults, for the error
   paths that a real server rarely shows), the pipeline with synthetic
   submits, the journal, the CLI, the controller. What EOS itself does
-  (atomic uploads, `eos.mtime`, versions, parity) is tested on a real
-  instance only. `unit_unprivileged` runs the tests of what a user
-  other than root cannot do, as `nobody` where needed (skipped with exit
-  status 77 where it cannot). `cli_smoke` runs the binary on local
-  directories, three shards among them.
+  (atomic uploads, `eos.mtime`, parity) is tested on a real instance only.
+  That EOS keeps the versions of a replaced file is not tested: the
+  container instance does not enable versioning. `unit_unprivileged` runs
+  the tests of what a user other than root cannot do, as `nobody` where
+  needed (skipped with exit status 77 where it cannot). `cli_smoke` runs
+  the binary on local directories, three shards among them.
 - Integration (`tests/integration`, `scripts/integration-test.sh`): against
   a plain xrootd server and a single-host EOS instance in containers from
   CERN's public image (`tests/integration/eos/instance.sh`): the endpoints'
