@@ -15,7 +15,7 @@ add_executable(eosmirror_tests
   unit/test_types.cc
 )
 if(EOSMIRROR_WITH_XROOTD)
-  target_sources(eosmirror_tests PRIVATE unit/test_xrootd_eos.cc)
+  target_sources(eosmirror_tests PRIVATE unit/test_xrd_endpoints.cc unit/test_xrootd_eos.cc)
 endif()
 target_include_directories(eosmirror_tests PRIVATE ${PROJECT_SOURCE_DIR}/third_party)
 target_link_libraries(eosmirror_tests PRIVATE eosmirror_core)
