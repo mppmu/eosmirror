@@ -1,6 +1,6 @@
 #!/bin/bash
 # End-to-end tests of eosmirror against a live target, as an ordinary user
-# (--no-owner). Written for the code review of mppmu/eosmirror (dev branch).
+# (--no-owner). Written for the code review of mppmu/eosmirror.
 #
 # Usage:
 #   eos-review-tests.sh EOSMIRROR_BINARY TARGET_BASE_URL [WORKDIR]
