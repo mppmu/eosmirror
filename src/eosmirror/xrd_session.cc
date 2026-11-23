@@ -373,12 +373,6 @@ Status XrdSession::move_abs(const std::string& from, const std::string& to) {
   return {};
 }
 
-Status XrdSession::rename_abs(const std::string& from, const std::string& to) {
-  return move_replacing(
-      from, to, [&](const std::string& a, const std::string& b) { return move_abs(a, b); },
-      [&](const std::string& abs) { return remove_abs(abs); });
-}
-
 Result<Checksum> XrdSession::query_checksum(const std::string& abs) {
   auto request = request_path(abs);
   if (!request.ok()) return request.error();

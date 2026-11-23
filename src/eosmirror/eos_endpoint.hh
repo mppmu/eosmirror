@@ -51,8 +51,6 @@ class EosEndpoint final : public Endpoint {
   Result<std::unique_ptr<FileReader>> open_read(const RelPath& path) override;
   Result<std::unique_ptr<FileWriter>> open_write(const RelPath& path,
                                                  const CommitSpec& spec) override;
-  // The checksum from the listing, without asking.
-  Result<Checksum> stored_checksum(const RelPath& path, const Entry& listed) override;
 
   // The absolute path on the server of a relative path, and its URL for
   // messages.

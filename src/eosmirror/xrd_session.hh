@@ -138,15 +138,16 @@ class XrdSession final {
   // Requests on absolute paths. The result of a stat (kXR_stat, which does
   // not tell symlinks) is named by the last path component. A stored
   // checksum of a type eosmirror cannot compute, or none, has type None.
+  // stat_abs() and list() give plain XRootD's metadata, which marks no
+  // symlinks and has file ids for directories only: EOS has its own.
   Result<Entry> stat_abs(const std::string& abs_path);
   Status mkdir_abs(const std::string& abs_path, ModeBits mode);
   Status chmod_abs(const std::string& abs_path, ModeBits mode);
   Status rmdir_abs(const std::string& abs_path);
   Status remove_abs(const std::string& abs_path);
   // A single move, which fails with Exists where the server renames nothing
-  // over `to`; rename_abs() then replaces it as move_replacing() does.
+  // over `to`.
   Status move_abs(const std::string& from, const std::string& to);
-  Status rename_abs(const std::string& from, const std::string& to);
   Result<Checksum> query_checksum(const std::string& abs_path);
 
   // A directory under the root, as XRootD lists it (dirlist with stat

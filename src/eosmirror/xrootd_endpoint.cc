@@ -229,7 +229,9 @@ Status XrdEndpoint::rename_abs(const std::string& from, const std::string& to) {
                      "points to: replacing it needs --target-without-symlinks, which states "
                      "that the target has none"};
   }
-  return session_.rename_abs(from, to);
+  return move_replacing(
+      from, to, [&](const std::string& a, const std::string& b) { return session_.move_abs(a, b); },
+      [&](const std::string& abs) { return session_.remove_abs(abs); });
 }
 
 Result<Checksum> XrdEndpoint::stored_checksum(const RelPath& path, const Entry&) {

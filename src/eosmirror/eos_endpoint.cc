@@ -1085,10 +1085,6 @@ Result<UploadFile> EosEndpoint::file_by_id(const std::string& abs, uint64_t fid)
   return found;
 }
 
-Result<Checksum> EosEndpoint::stored_checksum(const RelPath& path, const Entry& listed) {
-  return Endpoint::stored_checksum(path, listed);
-}
-
 Result<std::unique_ptr<FileReader>> EosEndpoint::open_read(const RelPath& path) {
   std::string abs = absolute(path);
   auto file = session_.open_file(abs);
